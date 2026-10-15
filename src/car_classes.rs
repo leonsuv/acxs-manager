@@ -11,9 +11,10 @@
 //! Car ids are matched case-insensitively, the same way the INI reader matches keys.
 //!
 //! The writers ([`write_classes`], [`write_years`], [`add_car_to_class`],
-//! [`set_car_year`]) only upsert entries. They never remove a car, keep comments
-//! and key order, and back up the previous file before saving. A file that has
-//! no change is not saved at all.
+//! [`set_car_year`], [`create_class`]) only upsert entries. [`remove_class`] only
+//! empties the class value of a class's cars. Nothing is deleted, comments and key
+//! order are kept, and the previous file is backed up before saving. A file that
+//! has no change is not saved at all.
 
 use std::collections::{BTreeMap, HashSet};
 use std::io;
@@ -160,19 +161,88 @@ pub fn write_years(config_dir: &Path, years: &[CarYear]) -> io::Result<()> {
 pub fn add_car_to_class(config_dir: &Path, car_id: &str, class_id: &str) -> io::Result<()> {
     check_token("car id", car_id)?;
     check_token("class", class_id)?;
+    edit_file(config_dir, CLASSES_FILE, |ini| put_car(ini, car_id, class_id))
+}
+
+/// Creates class `class_id` with `car_id` as its first car. A class exists only as
+/// the class value of its cars, so it cannot be created empty.
+///
+/// Fails with `ErrorKind::AlreadyExists` when a class with that name exists (names
+/// compare case-insensitively), or when `car_id` is already in another class. Nothing
+/// is written in either case.
+pub fn create_class(config_dir: &Path, class_id: &str, car_id: &str) -> io::Result<()> {
+    check_token("class", class_id)?;
+    check_token("car id", car_id)?;
     edit_file(config_dir, CLASSES_FILE, |ini| {
-        if let Some(current) = ini.get(CLASSES_SECTION, car_id) {
-            if current.eq_ignore_ascii_case(class_id) {
-                return Ok(());
-            }
+        if ini.entries(CLASSES_SECTION).iter().any(|(_, class)| class.eq_ignore_ascii_case(class_id)) {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("class {class_id} already exists")));
+        }
+        put_car(ini, car_id, class_id)
+    })
+}
+
+/// Removes class `class_id`: every car in it is left without a class. Each car keeps
+/// its `car=` line with an empty value, and the year is not touched. Returns how many
+/// cars were left without a class.
+///
+/// A class that still has cars is refused with `ErrorKind::InvalidInput` unless
+/// `allow_cars` is true. A class that does not exist gives `ErrorKind::NotFound`.
+/// Nothing is written when the call fails.
+pub fn remove_class(config_dir: &Path, class_id: &str, allow_cars: bool) -> io::Result<usize> {
+    check_token("class", class_id)?;
+    let mut unassigned = 0;
+    edit_file(config_dir, CLASSES_FILE, |ini| {
+        let cars: Vec<String> = ini
+            .entries(CLASSES_SECTION)
+            .into_iter()
+            .filter(|(_, class)| class.eq_ignore_ascii_case(class_id))
+            .map(|(car, _)| car.to_string())
+            .collect();
+        if cars.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::NotFound, format!("no class named {class_id}")));
+        }
+        if !allow_cars {
             return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("{car_id} is already in class {current}; it was not moved"),
+                io::ErrorKind::InvalidInput,
+                format!("class {class_id} still has {} car(s); it was not removed", cars.len()),
             ));
         }
-        ini.set(CLASSES_SECTION, car_id, class_id);
+        for car in &cars {
+            ini.set(CLASSES_SECTION, car, "");
+        }
+        // `set` changes only the first line of a key. If a car is listed twice, a
+        // line with a class is still there, so refuse rather than move the car.
+        let left_behind = ini
+            .entries(CLASSES_SECTION)
+            .into_iter()
+            .any(|(car, class)| !class.is_empty() && cars.iter().any(|c| c.eq_ignore_ascii_case(car)));
+        if left_behind {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{CLASSES_FILE} lists a car twice; class {class_id} was not removed"),
+            ));
+        }
+        unassigned = cars.len();
         Ok(())
-    })
+    })?;
+    Ok(unassigned)
+}
+
+/// Puts `car_id` into `class_id` in an open `[CLASSES]`. A car whose class is empty
+/// (left by [`remove_class`]) counts as unassigned.
+fn put_car(ini: &mut Ini, car_id: &str, class_id: &str) -> io::Result<()> {
+    let current = ini.get(CLASSES_SECTION, car_id).filter(|c| !c.is_empty()).map(str::to_string);
+    if let Some(current) = current {
+        if current.eq_ignore_ascii_case(class_id) {
+            return Ok(());
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{car_id} is already in class {current}; it was not moved"),
+        ));
+    }
+    ini.set(CLASSES_SECTION, car_id, class_id);
+    Ok(())
 }
 
 /// Sets the year of `car_id` in `[YEARS]`, adding the entry when it is missing.
@@ -580,5 +650,116 @@ mod tests {
             fs::read_to_string(dir.path().join(YEARS_FILE)).unwrap(),
             "[YEARS]\r\nalpha=2001\r\nbeta=abc\r\n"
         );
+    }
+
+    #[test]
+    fn create_class_adds_a_class_with_its_first_car() {
+        let dir = TempDir::new("create_class");
+        dir.write(CLASSES_FILE, CLASSES_SAMPLE);
+
+        create_class(dir.path(), "drift", "delta").unwrap();
+        let classes = read_classes(dir.path()).unwrap();
+        assert_eq!(classes.len(), 3);
+        assert_eq!(classes[2].id, "drift");
+        assert_eq!(classes[2].cars, vec!["delta"]);
+        assert_eq!(backups(&dir), 2);
+    }
+
+    #[test]
+    fn create_class_refuses_a_duplicate_name_and_writes_nothing() {
+        let dir = TempDir::new("create_dup");
+        dir.write(CLASSES_FILE, CLASSES_SAMPLE);
+
+        let err = create_class(dir.path(), "RACE", "delta").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(dir.path().join(CLASSES_FILE)).unwrap(), CLASSES_SAMPLE);
+        assert_eq!(backups(&dir), 1);
+    }
+
+    #[test]
+    fn create_class_refuses_a_car_that_is_in_another_class() {
+        let dir = TempDir::new("create_moved");
+        dir.write(CLASSES_FILE, CLASSES_SAMPLE);
+
+        let err = create_class(dir.path(), "drift", "alpha").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(class_of(&read_classes(dir.path()).unwrap(), "alpha").map(|c| c.id.as_str()), Some("race"));
+        assert_eq!(backups(&dir), 1);
+    }
+
+    #[test]
+    fn create_class_takes_a_car_that_was_left_unassigned() {
+        let dir = TempDir::new("create_unassigned");
+        dir.write(CLASSES_FILE, "[CLASSES]\r\nalpha=\r\n");
+
+        create_class(dir.path(), "drift", "alpha").unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join(CLASSES_FILE)).unwrap(),
+            "[CLASSES]\r\nalpha=drift\r\n"
+        );
+    }
+
+    #[test]
+    fn remove_class_refuses_a_class_with_cars_unless_allowed() {
+        let dir = TempDir::new("remove_refuse");
+        dir.write(CLASSES_FILE, CLASSES_SAMPLE);
+
+        let err = remove_class(dir.path(), "race", false).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read_to_string(dir.path().join(CLASSES_FILE)).unwrap(), CLASSES_SAMPLE);
+        assert_eq!(backups(&dir), 1);
+    }
+
+    #[test]
+    fn remove_class_unassigns_its_cars_keeps_other_lines_and_backs_up() {
+        let dir = TempDir::new("remove_class");
+        dir.write(CLASSES_FILE, CLASSES_SAMPLE);
+
+        assert_eq!(remove_class(dir.path(), "RACE", true).unwrap(), 2);
+        assert_eq!(
+            fs::read_to_string(dir.path().join(CLASSES_FILE)).unwrap(),
+            "; in AC, there are two classes, street and race. for anything else,\r\n\
+             ; there are tags. let’s keep it tidy\r\n\
+             [CLASSES]\r\nalpha=\r\nbeta=street\r\ngamma=\r\n"
+        );
+        let classes = read_classes(dir.path()).unwrap();
+        assert_eq!(classes.len(), 1);
+        assert_eq!(classes[0].id, "street");
+        assert_eq!(backups(&dir), 2);
+    }
+
+    #[test]
+    fn remove_class_lets_a_removed_car_join_another_class() {
+        let dir = TempDir::new("remove_then_add");
+        dir.write(CLASSES_FILE, CLASSES_SAMPLE);
+
+        remove_class(dir.path(), "race", true).unwrap();
+        add_car_to_class(dir.path(), "alpha", "street").unwrap();
+        assert_eq!(class_of(&read_classes(dir.path()).unwrap(), "alpha").map(|c| c.id.as_str()), Some("street"));
+    }
+
+    #[test]
+    fn remove_class_reports_an_unknown_class_and_writes_nothing() {
+        let dir = TempDir::new("remove_missing");
+        dir.write(CLASSES_FILE, CLASSES_SAMPLE);
+
+        assert_eq!(remove_class(dir.path(), "drift", true).unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(fs::read_to_string(dir.path().join(CLASSES_FILE)).unwrap(), CLASSES_SAMPLE);
+        assert_eq!(backups(&dir), 1);
+
+        let nowhere = dir.path().join("does_not_exist");
+        assert_eq!(remove_class(&nowhere, "race", true).unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert!(!nowhere.exists());
+    }
+
+    #[test]
+    fn remove_class_refuses_a_car_listed_twice_and_writes_nothing() {
+        let dir = TempDir::new("remove_dup");
+        let text = "[CLASSES]\r\nalpha=race\r\nalpha=street\r\n";
+        dir.write(CLASSES_FILE, text);
+
+        assert_eq!(remove_class(dir.path(), "race", true).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read_to_string(dir.path().join(CLASSES_FILE)).unwrap(), text);
+        assert_eq!(backups(&dir), 1);
     }
 }

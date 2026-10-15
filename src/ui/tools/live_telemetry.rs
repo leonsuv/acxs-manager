@@ -10,6 +10,7 @@ use crate::ui::theme::{self, ACCENT, BG, BORDER, INFO, MUTED, OK, TEXT, WARN};
 use crate::ui::widgets;
 use crate::ui::Notice;
 use acxs_manager::charts::{Channel, ChannelBuffers, Ring, Sample};
+use acxs_manager::sharedmem::{self, AcStatus, SharedMemError, Snapshot};
 use acxs_manager::telemetry::{CarUpdate, HandshakeInfo, LapInfo, Packet, summarize_laps};
 use acxs_manager::telemetry_csv;
 use acxs_manager::track_map::{friction_circle_outline, friction_circle_points, project_lap};
@@ -19,12 +20,21 @@ use eframe::egui::{self, RichText};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 /// How long one receive waits before the thread checks the stop flag again.
 const POLL_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Gap between shared memory reads while the live data card is enabled (10 Hz).
+const SHM_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The shared memory card only polls where the game's mappings exist.
+const SHM_SUPPORTED: bool = cfg!(windows);
+
+/// One result of a shared memory read.
+type ShmReading = Result<Snapshot, SharedMemError>;
 
 /// Samples kept per chart channel. At 60 car updates a second this is about
 /// two minutes of history.
@@ -93,6 +103,13 @@ struct LiveTelemetry {
     /// Set when the user ticks the local network checkbox. Gates `WEB_LAN_BIND`.
     web_lan: bool,
     web_status: String,
+    /// Set while the live data card polls shared memory. Setting the flag to
+    /// true ends the poll thread.
+    shm_stop: Option<Arc<AtomicBool>>,
+    /// Newest read from the poll thread. The UI takes it each frame.
+    shm_slot: Arc<Mutex<Option<ShmReading>>>,
+    /// Last reading the UI took, kept between frames for display.
+    shm_last: Option<ShmReading>,
 }
 
 /// Chart and map state built from the car updates of one connection.
@@ -164,6 +181,9 @@ impl Default for LiveTelemetry {
             web_bind: web_dashboard::DEFAULT_BIND.to_string(),
             web_lan: false,
             web_status: String::new(),
+            shm_stop: None,
+            shm_slot: Arc::new(Mutex::new(None)),
+            shm_last: None,
         }
     }
 }
@@ -171,6 +191,7 @@ impl Default for LiveTelemetry {
 impl Drop for LiveTelemetry {
     fn drop(&mut self) {
         self.stop_session();
+        self.stop_shm();
     }
 }
 
@@ -186,6 +207,7 @@ impl Tool for LiveTelemetry {
     fn ui(&mut self, ui: &mut egui::Ui, _ctx: &ToolContext, notices: &mut Vec<Notice>) {
         self.poll_session();
         self.poll_export(notices);
+        self.poll_shm();
         let ctx = ui.ctx().clone();
 
         widgets::heading(
@@ -201,6 +223,8 @@ impl Tool for LiveTelemetry {
             self.session_card(ui);
             ui.add_space(16.0);
             self.live_card(ui);
+            ui.add_space(16.0);
+            self.shm_card(ui);
             ui.add_space(16.0);
             self.charts_card(ui);
             ui.add_space(16.0);
@@ -551,6 +575,82 @@ impl LiveTelemetry {
         });
     }
 
+    /// Starts the shared memory poll thread unless one is already running.
+    fn start_shm(&mut self) {
+        if self.shm_stop.is_some() {
+            return;
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let slot = Arc::clone(&self.shm_slot);
+        self.shm_stop = Some(stop);
+        thread::spawn(move || run_shm_poll(thread_stop, slot));
+    }
+
+    /// Asks the poll thread to exit and forgets the last reading. The thread
+    /// exits on its next check, at most one interval later.
+    fn stop_shm(&mut self) {
+        if let Some(stop) = self.shm_stop.take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        self.shm_last = None;
+        if let Ok(mut slot) = self.shm_slot.lock() {
+            *slot = None;
+        }
+    }
+
+    /// Takes the newest reading from the poll thread. Never waits.
+    fn poll_shm(&mut self) {
+        if self.shm_stop.is_none() {
+            return;
+        }
+        if let Ok(mut slot) = self.shm_slot.lock() {
+            if let Some(reading) = slot.take() {
+                self.shm_last = Some(reading);
+            }
+        }
+    }
+
+    fn shm_card(&mut self, ui: &mut egui::Ui) {
+        theme::card().show(ui, |ui| {
+            widgets::section_title(ui, "Live data (Windows)");
+            if !SHM_SUPPORTED {
+                ui.label(RichText::new(SharedMemError::Unsupported.to_string()).color(WARN));
+                return;
+            }
+            ui.label(
+                RichText::new(
+                    "Reads the game's shared memory pages about ten times a second while \
+                     enabled. Start Assetto Corsa first.",
+                )
+                .color(MUTED),
+            );
+            ui.add_space(6.0);
+            let mut enabled = self.shm_stop.is_some();
+            if ui.checkbox(&mut enabled, "Read shared memory at 10 Hz").changed() {
+                if enabled {
+                    self.start_shm();
+                } else {
+                    self.stop_shm();
+                }
+            }
+            if self.shm_stop.is_none() {
+                return;
+            }
+            ui.ctx().request_repaint_after(SHM_INTERVAL);
+            ui.add_space(8.0);
+            match &self.shm_last {
+                None => {
+                    ui.label(RichText::new("Waiting for the first read.").color(MUTED));
+                }
+                Some(Err(err)) => {
+                    ui.label(RichText::new(err.to_string()).color(WARN));
+                }
+                Some(Ok(snap)) => shm_stats(ui, snap),
+            }
+        });
+    }
+
     fn live_card(&self, ui: &mut egui::Ui) {
         theme::card().show(ui, |ui| {
             widgets::section_title(ui, "Live car");
@@ -877,6 +977,50 @@ fn draw_plot(ui: &mut egui::Ui, channel: Channel, ring: &Ring) {
         egui::FontId::proportional(11.0),
         MUTED,
     );
+}
+
+/// Body of the shared memory poll thread. Overwrites the slot with each new
+/// read, so the UI always sees the newest one, and exits once the stop flag is set.
+fn run_shm_poll(stop: Arc<AtomicBool>, slot: Arc<Mutex<Option<ShmReading>>>) {
+    while !stop.load(Ordering::Relaxed) {
+        let reading = sharedmem::read_snapshot();
+        if let Ok(mut latest) = slot.lock() {
+            *latest = Some(reading);
+        }
+        thread::sleep(SHM_INTERVAL);
+    }
+}
+
+/// The live data values from one snapshot, as stat tiles.
+fn shm_stats(ui: &mut egui::Ui, snap: &Snapshot) {
+    let physics = &snap.physics;
+    let graphics = &snap.graphics;
+    let lap = if graphics.current_lap_time.is_empty() {
+        "--".to_string()
+    } else {
+        graphics.current_lap_time.clone()
+    };
+    ui.horizontal_wrapped(|ui| {
+        widgets::stat(ui, "Speed", &format!("{:.0} km/h", physics.speed_kmh), TEXT);
+        let gear = i8::try_from(physics.gear).unwrap_or(i8::MIN);
+        widgets::stat(ui, "Gear", &gear_label(gear), TEXT);
+        widgets::stat(ui, "RPM", &physics.rpm.to_string(), TEXT);
+        widgets::stat(ui, "Throttle", &format!("{:.0}%", physics.throttle * 100.0), TEXT);
+        widgets::stat(ui, "Brake", &format!("{:.0}%", physics.brake * 100.0), TEXT);
+        widgets::stat(ui, "Lap time", &lap, TEXT);
+        widgets::stat(ui, "Status", &ac_status_label(graphics.status), TEXT);
+    });
+}
+
+/// Session state as a short word for the card.
+fn ac_status_label(status: AcStatus) -> String {
+    match status {
+        AcStatus::Off => "off".to_string(),
+        AcStatus::Replay => "replay".to_string(),
+        AcStatus::Live => "live".to_string(),
+        AcStatus::Pause => "paused".to_string(),
+        AcStatus::Unknown(v) => format!("unknown ({v})"),
+    }
 }
 
 /// Formats milliseconds as `m:ss.mmm`.

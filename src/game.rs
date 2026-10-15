@@ -19,11 +19,15 @@ pub fn is_game_running() -> bool {
         command.creation_flags(CREATE_NO_WINDOW);
     }
     match command.output() {
-        Ok(output) => String::from_utf8_lossy(&output.stdout)
-            .to_lowercase()
-            .contains(&AC_EXECUTABLE.to_lowercase()),
+        Ok(output) => tasklist_lists_game(&String::from_utf8_lossy(&output.stdout)),
         Err(_) => false,
     }
+}
+
+/// True when `tasklist` output names the game executable. Matching ignores case.
+/// The "no tasks are running" message and empty output do not name it, so they give false.
+fn tasklist_lists_game(output: &str) -> bool {
+    output.to_lowercase().contains(&AC_EXECUTABLE.to_lowercase())
 }
 
 pub fn launch_game(ac_root: &Path) -> io::Result<Child> {
@@ -35,4 +39,78 @@ pub fn launch_game(ac_root: &Path) -> io::Result<Child> {
         ));
     }
     Command::new(&exe).current_dir(ac_root).spawn()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A unique empty temp directory, removed on drop (also when a test panics).
+    struct TempRoot(PathBuf);
+
+    impl TempRoot {
+        fn new(name: &str) -> TempRoot {
+            static COUNTER: AtomicUsize = AtomicUsize::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+            let dir = std::env::temp_dir().join(format!("acxs-game-{}-{n}-{name}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            TempRoot(dir)
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn tasklist_no_tasks_message_is_not_running() {
+        let output = "INFO: No tasks are running which match the specified criteria.\r\n";
+        assert!(!tasklist_lists_game(output));
+    }
+
+    #[test]
+    fn tasklist_empty_output_is_not_running() {
+        assert!(!tasklist_lists_game(""));
+    }
+
+    #[test]
+    fn tasklist_matching_line_is_running() {
+        let output = "acs.exe                       4312 Console                    1    512,344 K\r\n";
+        assert!(tasklist_lists_game(output));
+    }
+
+    #[test]
+    fn tasklist_match_ignores_case() {
+        let output = "ACS.EXE                       4312 Console                    1    512,344 K\r\n";
+        assert!(tasklist_lists_game(output));
+    }
+
+    #[test]
+    fn tasklist_other_process_is_not_running() {
+        let output = "notepad.exe                   1200 Console                    1     12,000 K\r\n";
+        assert!(!tasklist_lists_game(output));
+    }
+
+    #[test]
+    fn launch_game_missing_exe_is_not_found_and_not_spawned() {
+        let dir = TempRoot::new("missing-exe");
+        let err = launch_game(&dir.0).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        // The message comes from this function, so the spawn path was never reached.
+        assert!(err.to_string().contains(&format!("{AC_EXECUTABLE} not found in")));
+    }
+
+    #[test]
+    fn launch_game_directory_named_like_exe_is_not_found() {
+        let dir = TempRoot::new("dir-named-exe");
+        fs::create_dir_all(dir.0.join(AC_EXECUTABLE)).unwrap();
+        let err = launch_game(&dir.0).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
 }

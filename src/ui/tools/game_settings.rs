@@ -1,4 +1,4 @@
-//! Game Settings tool page: the `video.ini` editor and configuration snapshots.
+//! Game Settings tool page: the `video.ini` and `assetto_corsa.ini` editors, and configuration snapshots.
 //!
 //! All file IO and the game check run on background threads. Results come back
 //! over a channel and are applied in [`GameSettings::poll`] at the start of each frame.
@@ -11,7 +11,7 @@ use std::thread;
 
 use acxs_manager::backup::{self, Snapshot};
 use acxs_manager::game;
-use acxs_manager::game_cfg::{self, VideoSettings, VIDEO_FILE};
+use acxs_manager::game_cfg::{self, AssettoCorsaSettings, VideoSettings, ASSETTO_CORSA_FILE, VIDEO_FILE};
 use eframe::egui::{self, RichText};
 
 use super::{Tool, ToolContext};
@@ -28,6 +28,8 @@ const AA_CHOICES: &[u32] = &[1, 2, 4, 8];
 const ANISOTROPIC_CHOICES: &[u32] = &[0, 2, 4, 8, 16];
 const SHADOW_CHOICES: &[i32] = &[-1, 32, 64, 128, 256, 512, 1024, 2048, 3072, 4096, 6144, 8192];
 const WORLD_DETAIL_CHOICES: &[u32] = &[0, 1, 2, 3, 4, 5];
+/// Choices for `[SCREENSHOT] FORMAT`. Same list as `acxs_manager::game_cfg` accepts.
+const SCREENSHOT_CHOICES: &[&str] = &["JPG", "BMP", "PNG"];
 
 pub fn tool() -> Box<dyn Tool> {
     let (tx, rx) = mpsc::channel();
@@ -40,6 +42,12 @@ pub fn tool() -> Box<dyn Tool> {
         video_file_present: false,
         video_pending: 0,
         form: VideoForm::from_settings(&VideoSettings::default()),
+        ac_dir: String::new(),
+        ac_for_root: None,
+        ac_loaded: false,
+        ac_file_present: false,
+        ac_pending: 0,
+        ac_form: AcForm::from_settings(&AssettoCorsaSettings::default()),
         snapshots: Vec::new(),
         listed_root: None,
         snap_pending: 0,
@@ -58,6 +66,11 @@ fn default_video_dir() -> String {
     home.join("Documents").join("Assetto Corsa").join("cfg").display().to_string()
 }
 
+/// `assetto_corsa.ini` lives in `<AC root>/system/cfg/` (see `game_cfg` module docs).
+fn default_ac_dir(ac_root: &Path) -> String {
+    ac_root.join("system").join("cfg").display().to_string()
+}
+
 fn ok_note(text: impl Into<String>) -> Notice {
     Notice { text: text.into(), ok: true }
 }
@@ -70,6 +83,8 @@ fn fail_note(text: impl Into<String>) -> Notice {
 enum Event {
     VideoLoaded { dir: String, present: bool, result: Result<VideoSettings, String> },
     VideoSaved(Result<(), String>),
+    AcLoaded { dir: String, present: bool, result: Result<AssettoCorsaSettings, String> },
+    AcSaved(Result<(), String>),
     SnapshotsListed(Vec<Snapshot>),
     SnapshotCreated(Result<Snapshot, String>),
     Verified { path: PathBuf, result: Result<Vec<String>, String> },
@@ -154,6 +169,65 @@ fn parse_optional<T: FromStr>(text: &str, label: &str, problems: &mut Vec<String
     }
 }
 
+/// Like [`parse_optional`], but an empty field is a problem too.
+fn parse_required<T: FromStr>(text: &str, label: &str, problems: &mut Vec<String>) -> Option<T> {
+    if text.trim().is_empty() {
+        problems.push(format!("{label} is required"));
+        return None;
+    }
+    parse_optional(text, label, problems)
+}
+
+/// Text and checkbox state of the assetto_corsa.ini form.
+#[derive(Clone)]
+struct AcForm {
+    simulation_value: String,
+    logging: bool,
+    developer_apps: bool,
+    allow_free_camera: bool,
+    hide_driver: bool,
+    screenshot_format: String,
+    mirrors_fov: String,
+    mirrors_far_plane: String,
+}
+
+impl AcForm {
+    fn from_settings(s: &AssettoCorsaSettings) -> Self {
+        AcForm {
+            simulation_value: s.simulation_value.to_string(),
+            logging: s.logging,
+            developer_apps: s.developer_apps,
+            allow_free_camera: s.allow_free_camera,
+            hide_driver: s.hide_driver,
+            screenshot_format: s.screenshot_format.clone(),
+            mirrors_fov: s.mirrors_fov.to_string(),
+            mirrors_far_plane: s.mirrors_far_plane.to_string(),
+        }
+    }
+
+    /// The settings to save, or a message for each text field that is missing or does not parse.
+    fn to_settings(&self) -> Result<AssettoCorsaSettings, Vec<String>> {
+        let mut problems = Vec::new();
+        let simulation_value = parse_required::<u32>(&self.simulation_value, "simulation value", &mut problems);
+        let mirrors_fov = parse_required::<u32>(&self.mirrors_fov, "mirrors field of view", &mut problems);
+        let mirrors_far_plane = parse_required::<u32>(&self.mirrors_far_plane, "mirrors far plane", &mut problems);
+        match (simulation_value, mirrors_fov, mirrors_far_plane) {
+            (Some(simulation_value), Some(mirrors_fov), Some(mirrors_far_plane)) => Ok(AssettoCorsaSettings {
+                simulation_value,
+                logging: self.logging,
+                developer_apps: self.developer_apps,
+                allow_free_camera: self.allow_free_camera,
+                hide_driver: self.hide_driver,
+                screenshot_format: self.screenshot_format.clone(),
+                mirrors_fov,
+                mirrors_far_plane,
+            }),
+            // Every missing value above added a problem, so the list is never empty here.
+            _ => Err(problems),
+        }
+    }
+}
+
 /// A drop-down over a fixed list of values.
 fn choice<T: Copy + PartialEq>(
     ui: &mut egui::Ui,
@@ -181,6 +255,14 @@ struct GameSettings {
     video_file_present: bool,
     video_pending: usize,
     form: VideoForm,
+
+    ac_dir: String,
+    /// The Assetto Corsa root the assetto_corsa.ini folder was last set from.
+    ac_for_root: Option<PathBuf>,
+    ac_loaded: bool,
+    ac_file_present: bool,
+    ac_pending: usize,
+    ac_form: AcForm,
 
     snapshots: Vec<Snapshot>,
     /// The Assetto Corsa root the snapshot list was requested for.
@@ -220,6 +302,28 @@ impl GameSettings {
         self.video_pending += 1;
         self.spawn(ctx, move || {
             Event::VideoSaved(game_cfg::write_video(&dir, &settings).map_err(|e| e.to_string()))
+        });
+    }
+
+    fn load_ac(&mut self, ctx: &egui::Context) {
+        let dir = PathBuf::from(self.ac_dir.trim());
+        if dir.as_os_str().is_empty() {
+            return;
+        }
+        self.ac_pending += 1;
+        self.spawn(ctx, move || {
+            let present = dir.join(ASSETTO_CORSA_FILE).is_file();
+            let result = game_cfg::read_assetto_corsa_ini(&dir).map_err(|e| e.to_string());
+            Event::AcLoaded { dir: dir.display().to_string(), present, result }
+        });
+    }
+
+    /// Goes through `write_assetto_corsa_ini`, which keeps the previous file as a backup.
+    fn save_ac(&mut self, ctx: &egui::Context, settings: AssettoCorsaSettings) {
+        let dir = PathBuf::from(self.ac_dir.trim());
+        self.ac_pending += 1;
+        self.spawn(ctx, move || {
+            Event::AcSaved(game_cfg::write_assetto_corsa_ini(&dir, &settings).map_err(|e| e.to_string()))
         });
     }
 
@@ -285,6 +389,38 @@ impl GameSettings {
                             )));
                         }
                         Err(e) => notices.push(fail_note(format!("Could not save {VIDEO_FILE}: {e}"))),
+                    }
+                }
+                Event::AcLoaded { dir, present, result } => {
+                    self.ac_pending = self.ac_pending.saturating_sub(1);
+                    match result {
+                        Ok(settings) => {
+                            self.ac_form = AcForm::from_settings(&settings);
+                            self.ac_loaded = true;
+                            self.ac_file_present = present;
+                            if !present {
+                                notices.push(fail_note(format!(
+                                    "{ASSETTO_CORSA_FILE} not found in {dir}; showing defaults. Save creates it."
+                                )));
+                            }
+                        }
+                        Err(e) => {
+                            notices.push(fail_note(format!("Could not read {ASSETTO_CORSA_FILE}: {e}")))
+                        }
+                    }
+                }
+                Event::AcSaved(result) => {
+                    self.ac_pending = self.ac_pending.saturating_sub(1);
+                    match result {
+                        Ok(()) => {
+                            self.ac_file_present = true;
+                            notices.push(ok_note(format!(
+                                "Saved {ASSETTO_CORSA_FILE}. The previous file was kept as a backup."
+                            )));
+                        }
+                        Err(e) => {
+                            notices.push(fail_note(format!("Could not save {ASSETTO_CORSA_FILE}: {e}")))
+                        }
                     }
                 }
                 Event::SnapshotsListed(list) => {
@@ -450,6 +586,123 @@ impl GameSettings {
         });
     }
 
+    fn ac_section(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let idle = self.ac_pending == 0;
+        theme::card().show(ui, |ui| {
+            ui.label(
+                RichText::new(format!(
+                    "Folder with {ASSETTO_CORSA_FILE} (system/cfg under the Assetto Corsa folder by default)"
+                ))
+                .color(MUTED),
+            );
+            ui.horizontal(|ui| {
+                let field = (ui.available_width() - 110.0).max(160.0);
+                ui.add(egui::TextEdit::singleline(&mut self.ac_dir).desired_width(field));
+                let can_reload = idle && !self.ac_dir.trim().is_empty();
+                if ui.add_enabled(can_reload, egui::Button::new("Reload")).clicked() {
+                    self.load_ac(ctx);
+                }
+            });
+            if self.ac_dir.trim().is_empty() {
+                ui.label(
+                    RichText::new("Set the Assetto Corsa folder on the Home page, or type a folder above.").color(WARN),
+                );
+            } else if !self.ac_loaded {
+                ui.label(RichText::new("Loading...").small().color(MUTED));
+            } else if !self.ac_file_present {
+                ui.label(RichText::new(format!("{ASSETTO_CORSA_FILE} not found: showing defaults.")).small().color(WARN));
+            }
+            ui.add_space(6.0);
+
+            egui::Grid::new("game_settings_ac")
+                .num_columns(2)
+                .spacing([16.0, 8.0])
+                .show(ui, |ui| {
+                    ui.label("Simulation value");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.ac_form.simulation_value)
+                                .desired_width(72.0)
+                                .hint_text("0-100"),
+                        );
+                        ui.label(RichText::new("percent").small().color(MUTED));
+                    });
+                    ui.end_row();
+
+                    ui.label("Logging");
+                    ui.checkbox(&mut self.ac_form.logging, "On");
+                    ui.end_row();
+
+                    ui.label("Developer apps");
+                    ui.checkbox(&mut self.ac_form.developer_apps, "On");
+                    ui.end_row();
+
+                    ui.label("Free camera");
+                    ui.checkbox(&mut self.ac_form.allow_free_camera, "Allowed");
+                    ui.end_row();
+
+                    ui.label("Hide driver");
+                    ui.checkbox(&mut self.ac_form.hide_driver, "On");
+                    ui.end_row();
+
+                    ui.label("Screenshot format");
+                    egui::ComboBox::from_id_salt("game_settings_ac_screenshot")
+                        .selected_text(self.ac_form.screenshot_format.clone())
+                        .show_ui(ui, |ui| {
+                            for &option in SCREENSHOT_CHOICES {
+                                ui.selectable_value(
+                                    &mut self.ac_form.screenshot_format,
+                                    option.to_string(),
+                                    option,
+                                );
+                            }
+                        });
+                    ui.end_row();
+
+                    ui.label("Mirror field of view");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.ac_form.mirrors_fov)
+                                .desired_width(72.0)
+                                .hint_text("1-180"),
+                        );
+                    });
+                    ui.end_row();
+
+                    ui.label("Mirror far plane");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.ac_form.mirrors_far_plane)
+                                .desired_width(72.0)
+                                .hint_text("10-2000"),
+                        );
+                    });
+                    ui.end_row();
+                });
+
+            ui.add_space(6.0);
+            let parsed = self.ac_form.to_settings();
+            let problems = match &parsed {
+                Ok(settings) => game_cfg::validate_assetto_corsa(settings),
+                Err(messages) => messages.clone(),
+            };
+            for problem in &problems {
+                ui.label(RichText::new(problem).color(WARN));
+            }
+            ui.horizontal(|ui| {
+                let can_save = idle && problems.is_empty() && !self.ac_dir.trim().is_empty();
+                if ui
+                    .add_enabled(can_save, widgets::primary_button("Save assetto_corsa settings"))
+                    .clicked()
+                    && let Ok(settings) = parsed
+                {
+                    self.save_ac(ctx, settings);
+                }
+                ui.label(RichText::new("The previous file is kept as a backup.").small().color(MUTED));
+            });
+        });
+    }
+
     fn snapshot_section(
         &mut self,
         ui: &mut egui::Ui,
@@ -582,12 +835,19 @@ impl Tool for GameSettings {
         widgets::heading(
             ui,
             "Game Settings",
-            "Video options from video.ini, and snapshots of your Assetto Corsa configuration.",
+            "Video and assetto_corsa.ini options, and snapshots of your Assetto Corsa configuration.",
         );
 
         if !self.video_requested {
             self.video_requested = true;
             self.load_video(&egui_ctx);
+        }
+        if let Some(root) = &ctx.ac_root
+            && self.ac_for_root.as_ref() != Some(root) && self.ac_pending == 0
+        {
+            self.ac_for_root = Some(root.clone());
+            self.ac_dir = default_ac_dir(root);
+            self.load_ac(&egui_ctx);
         }
         if let Some(root) = &ctx.ac_root
             && self.listed_root.as_ref() != Some(root) && self.snap_pending == 0
@@ -600,6 +860,9 @@ impl Tool for GameSettings {
             .show(ui, |ui| {
                 widgets::section_title(ui, "Video");
                 self.video_section(ui, &egui_ctx);
+                ui.add_space(16.0);
+                widgets::section_title(ui, "assetto_corsa.ini");
+                self.ac_section(ui, &egui_ctx);
                 ui.add_space(16.0);
                 widgets::section_title(ui, "Snapshots");
                 self.snapshot_section(ui, &egui_ctx, ctx.ac_root.clone(), ctx.game_running);

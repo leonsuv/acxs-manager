@@ -861,14 +861,55 @@ impl CspConfig {
         diff_card(ui, &self.data.diff, Tab::Classes);
 
         widgets::section_title(ui, "Classes (data_car_classes.ini)");
-        ui.horizontal_wrapped(|ui| {
-            if self.data.classes.is_empty() {
-                ui.label(RichText::new("No classes found.").color(MUTED));
-            }
-            for class in &self.data.classes {
+        if self.data.classes.is_empty() {
+            ui.label(RichText::new("No classes found.").color(MUTED));
+        }
+        // The confirm checkbox state is kept in egui memory, one entry per class id.
+        let mut remove: Option<String> = None;
+        for class in &self.data.classes {
+            ui.horizontal(|ui| {
                 widgets::pill(ui, &format!("{} · {} cars", class.id, class.cars.len()), INFO);
+                let confirm_id = ui.scope_id().with(("confirm_remove", class.id.as_str()));
+                let mut confirmed = ui.data(|d| d.get_temp::<bool>(confirm_id)).unwrap_or(false);
+                let label = match class.cars.len() {
+                    0 => "Confirm".to_string(),
+                    n => format!("Unassign {n} cars"),
+                };
+                ui.checkbox(&mut confirmed, label);
+                if ui.add_enabled(!busy && confirmed, egui::Button::new("Remove class")).clicked() {
+                    remove = Some(class.id.clone());
+                    confirmed = false;
+                }
+                ui.data_mut(|d| d.insert_temp(confirm_id, confirmed));
+            });
+        }
+        ui.add_space(8.0);
+
+        widgets::section_title(ui, "New class");
+        // The name is kept in egui memory between frames, like the checkbox above.
+        let name_id = ui.scope_id().with("new_class_name");
+        let mut new_class = ui.data(|d| d.get_temp::<String>(name_id)).unwrap_or_default();
+        let mut create: Option<(String, String)> = None;
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut new_class)
+                    .hint_text("New class")
+                    .desired_width(160.0),
+            );
+            let name = new_class.trim().to_string();
+            let car = self.data.class_car.trim().to_string();
+            let ready = !busy && !name.is_empty() && !car.is_empty();
+            let button = egui::Button::new("Create class");
+            if ui
+                .add_enabled(ready, button)
+                .on_hover_text("A class exists only through its cars, so the car in the Car field above goes into it.")
+                .clicked()
+            {
+                create = Some((name, car));
+                new_class.clear();
             }
         });
+        ui.data_mut(|d| d.insert_temp(name_id, new_class));
         ui.add_space(8.0);
 
         widgets::section_title(ui, "Edit car");
@@ -980,6 +1021,29 @@ impl CspConfig {
         }
         if let Some(edit) = write {
             self.save_classes(egui_ctx, root, edit);
+        }
+        if let Some((name, car)) = create {
+            let root_buf = root.to_path_buf();
+            self.spawn(egui_ctx, move |tx| {
+                let dir = config_dir(&root_buf);
+                match car_classes::create_class(&dir, &name, &car) {
+                    Ok(()) => note(tx, format!("Created class {name} with {car}."), true),
+                    Err(e) => note(tx, format!("Class not created: {e}"), false),
+                }
+                let _ = tx.send(classes_msg(root_buf));
+            });
+        }
+        if let Some(class) = remove {
+            let root_buf = root.to_path_buf();
+            self.spawn(egui_ctx, move |tx| {
+                let dir = config_dir(&root_buf);
+                // The confirm checkbox is the user's agreement to unassign the cars.
+                match car_classes::remove_class(&dir, &class, true) {
+                    Ok(n) => note(tx, format!("Removed class {class}; {n} car(s) left without a class."), true),
+                    Err(e) => note(tx, format!("Class not removed: {e}"), false),
+                }
+                let _ = tx.send(classes_msg(root_buf));
+            });
         }
         if compare {
             self.start_diff(egui_ctx, root, Tab::Classes);

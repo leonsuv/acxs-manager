@@ -13,21 +13,30 @@ use acxs_manager::server::{
 use acxs_manager::server_process::{
     find_server_executable, parse_log_line, LaunchArgs, LogKind, ServerProcess, Status,
 };
+use acxs_manager::server_status::{fetch, ServerStatus, StatusError};
 use eframe::egui::{self, Color32, RichText};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const ENTRY_LIST: &str = "entry_list.ini";
 /// The server reads `[CAR_0]` to `[CAR_254]`.
 const MAX_ENTRIES: usize = 255;
 const FIELD_WIDTH: f32 = 320.0;
+const DEFAULT_STATUS_HOST: &str = "127.0.0.1";
+/// Budget for one live status query, covering both HTTP requests.
+const LIVE_TIMEOUT: Duration = Duration::from_secs(3);
+const AUTO_REFRESH: Duration = Duration::from_secs(10);
+
+/// Result of one live status query.
+type LiveResult = Result<ServerStatus, StatusError>;
 
 pub fn tool() -> Box<dyn Tool> {
     let (tx, rx) = mpsc::channel();
+    let (live_tx, live_rx) = mpsc::channel();
     let cfg = ServerConfig::default();
     Box::new(ServerPage {
         dir_input: String::new(),
@@ -44,6 +53,14 @@ pub fn tool() -> Box<dyn Tool> {
         confirm_stop: false,
         tx,
         rx,
+        status_host: DEFAULT_STATUS_HOST.to_string(),
+        status_port: None,
+        live_auto: false,
+        live_pending: false,
+        live_at: None,
+        live: None,
+        live_tx,
+        live_rx,
     })
 }
 
@@ -70,6 +87,20 @@ struct ServerPage {
     confirm_stop: bool,
     tx: Sender<Done>,
     rx: Receiver<Done>,
+    /// Host for the live status query.
+    status_host: String,
+    /// Port typed by the user. `None` follows the HTTP port of the loaded config.
+    status_port: Option<u16>,
+    /// Re-runs the live status query every `AUTO_REFRESH`.
+    live_auto: bool,
+    /// True while a live status query is on its worker thread.
+    live_pending: bool,
+    /// When the last live status query started.
+    live_at: Option<Instant>,
+    /// Outcome of the last live status query.
+    live: Option<LiveResult>,
+    live_tx: Sender<LiveResult>,
+    live_rx: Receiver<LiveResult>,
 }
 
 /// Result of a background job, sent back to the page.
@@ -107,12 +138,14 @@ impl Tool for ServerPage {
     fn ui(&mut self, ui: &mut egui::Ui, ctx: &ToolContext, notices: &mut Vec<Notice>) {
         self.follow_ac_root(ctx.ac_root.as_deref());
         self.poll(notices);
+        self.poll_live();
         self.refresh_process();
 
         let egui_ctx = ui.ctx().clone();
         if self.status == Status::Running {
             egui_ctx.request_repaint_after(Duration::from_millis(500));
         }
+        self.live_tick(&egui_ctx);
         let mut action = Action::None;
         widgets::heading(
             ui,
@@ -122,6 +155,7 @@ impl Tool for ServerPage {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             self.folder_card(ui);
             self.process_card(ui, &mut action);
+            self.live_card(ui, &egui_ctx);
             self.server_card(ui);
             self.problem_list(ui);
             ui.add_space(8.0);
@@ -248,6 +282,41 @@ impl ServerPage {
         }
     }
 
+    /// Applies a finished live status query. Does not touch `busy`, so the form stays usable.
+    fn poll_live(&mut self) {
+        while let Ok(result) = self.live_rx.try_recv() {
+            self.live_pending = false;
+            self.live = Some(result);
+        }
+    }
+
+    /// Starts a live status query when auto-refresh is on and the last one is at least
+    /// `AUTO_REFRESH` old. Otherwise asks for a repaint when the next query is due.
+    fn live_tick(&mut self, ctx: &egui::Context) {
+        if !self.live_auto || self.live_pending {
+            return;
+        }
+        let elapsed = self.live_at.map(|at| at.elapsed());
+        match elapsed {
+            Some(e) if e < AUTO_REFRESH => ctx.request_repaint_after(AUTO_REFRESH - e),
+            _ => self.start_live(ctx),
+        }
+    }
+
+    /// Runs one live status query on a worker thread. The result arrives through `self.live_rx`.
+    fn start_live(&mut self, ctx: &egui::Context) {
+        let host = self.status_host.trim().to_string();
+        let port = self.status_port.unwrap_or(self.cfg.http_port);
+        self.live_pending = true;
+        self.live_at = Some(Instant::now());
+        let tx = self.live_tx.clone();
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            let _ = tx.send(fetch(&host, port, LIVE_TIMEOUT));
+            ctx.request_repaint();
+        });
+    }
+
     /// Runs `job` on a worker thread. The result arrives through `self.rx` on a later frame.
     fn spawn(&mut self, ctx: &egui::Context, job: impl FnOnce() -> Done + Send + 'static) {
         self.busy = true;
@@ -320,6 +389,83 @@ impl ServerPage {
                         ui.label(RichText::new(line.as_str()).monospace().color(tint));
                     }
                 });
+        });
+    }
+
+    fn live_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        widgets::section_title(ui, "Live status");
+        theme::card().show(ui, |ui| {
+            let mut refresh = false;
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Host");
+                ui.add(egui::TextEdit::singleline(&mut self.status_host).desired_width(140.0));
+                ui.label("Port");
+                let mut port = self.status_port.unwrap_or(self.cfg.http_port);
+                if ui.add(egui::DragValue::new(&mut port).range(1..=65535)).changed() {
+                    self.status_port = Some(port);
+                }
+                if ui.add_enabled(!self.live_pending, egui::Button::new("Refresh")).clicked() {
+                    refresh = true;
+                }
+                ui.checkbox(&mut self.live_auto, "Auto-refresh every 10 s");
+                if self.live_pending {
+                    ui.spinner();
+                }
+            });
+            if refresh {
+                self.start_live(ctx);
+            }
+            ui.add_space(8.0);
+            match &self.live {
+                None => {
+                    ui.label(RichText::new("Not checked yet. Press Refresh or turn on auto-refresh.").color(MUTED));
+                }
+                Some(Err(e)) => {
+                    widgets::pill(ui, "offline", MUTED);
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(e.to_string()).small().color(WARN));
+                }
+                Some(Ok(status)) => {
+                    let (label, tint) = if status.online { ("online", OK) } else { ("offline", MUTED) };
+                    widgets::pill(ui, label, tint);
+                    ui.add_space(6.0);
+                    egui::Grid::new("live_fields")
+                        .num_columns(2)
+                        .spacing([14.0, 6.0])
+                        .show(ui, |ui| {
+                            row(ui, "Server name", |ui| {
+                                ui.label(status.name.as_deref().unwrap_or("-"));
+                            });
+                            row(ui, "Track", |ui| {
+                                ui.label(status.track.as_deref().unwrap_or("-"));
+                            });
+                            row(ui, "Clients", |ui| {
+                                ui.label(status.clients.map_or("-".to_string(), |n| n.to_string()));
+                            });
+                            row(ui, "Max clients", |ui| {
+                                ui.label(status.max_clients.map_or("-".to_string(), |n| n.to_string()));
+                            });
+                            row(ui, "Session", |ui| {
+                                ui.label(status.session.as_deref().unwrap_or("-"));
+                            });
+                        });
+                    ui.add_space(8.0);
+                    if status.players.is_empty() {
+                        ui.label(RichText::new("No players connected.").color(MUTED));
+                    } else {
+                        ui.label(RichText::new(format!("Players ({})", status.players.len())).color(MUTED));
+                        egui::ScrollArea::vertical()
+                            .id_salt("live_players")
+                            .max_height(160.0)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                for name in &status.players {
+                                    ui.label(name.as_str());
+                                }
+                            });
+                    }
+                }
+            }
         });
     }
 
