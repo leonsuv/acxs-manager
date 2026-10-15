@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0
+
+- Install car and track zips from the Install Packages page, with a game-running guard.
+- Live server status card on the Dedicated Server page.
+- Live shared-memory panel (Windows) on the live telemetry page.
+- Track thumbnails rendered from the track model.
+- Weather presets can be created, duplicated and edited.
+- Car classes can be created and removed.
+- assetto_corsa.ini editor on the Game Settings page.
+- Game-module tests for the running check and launch errors.
+
 ## 0.2.0
 
 - Graphics profile switcher: one injector active at a time (CSP, ReShade, RTX Remix, or none), archiving whatever it replaces.
