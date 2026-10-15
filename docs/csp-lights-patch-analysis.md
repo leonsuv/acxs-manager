@@ -684,3 +684,24 @@ All commands ran in the scratch directory. `<copy A>` and `<copy B>` are the scr
 - Any function-level match beyond exact bytes. This needs an instruction decoder (not installed here).
 - Whether the full rizin analysis is complete. Its counts (38,272 and 34,684) are far below the `.pdata` counts, and it logged many ESIL messages.
 - Runtime behaviour. Nothing was launched.
+
+## 11. Ghidra loader analysis
+
+Method: Ghidra 12.1.4 headless (run under JDK 21) on scratch copies of both DLLs, with a small script that decompiles the function containing a given address and up to eight of its callers. The lights patch folders were only read. Each run took roughly 50 minutes of auto-analysis plus decompilation. Both runs exited normally.
+
+Results, 0.2.11 (`a.txt`, target 180c8f8b0 and 180f65730):
+- The loader function at 180c8f8b0 takes a module path from its caller. It checks an integrity value on that path string, then calls `LoadLibraryW` on it.
+- After loading, it resolves three entry points with `GetProcAddress` and stores them in globals: `csp_Initialize_v1`, `csp_GetLastError_v1` and `csp_Raycast_v1`.
+- No `SteamAPI_*` references appear anywhere in this build.
+
+Results, 0.3.0 (`b.txt`, targets 1815c4bd0, 1803d0b70, 1803d0b00, 1803d1f40):
+- The loader at 1815c4bd0 has the same shape: caller-supplied path, integrity check, `LoadLibraryW`, then `GetProcAddress` for the same three `csp_` names.
+- A separate function at 1803d0b70 builds a module name at run time: it decodes a constant buffer through 1803d1f40, then calls `LoadLibraryW` on the result. A second function at 1803d0b00 uses the same pattern.
+- The Steam interface wrappers (for example 1803d0e10 and 1803d11f0) resolve `SteamAPI_*` and `SteamInternal_*` functions with `GetProcAddress` from the module loaded in that way.
+- The caller of the csp loader is 18093e090. It is too large to decode in this pass.
+
+Not determined:
+- The module path the csp loader is given. It comes from the caller, and the caller's source was not traced.
+- What the `csp_` functions do. The implementations live in the module that gets loaded, which is not part of these DLLs.
+- The decoded Steam module name. The decoding routine was located but its output was not computed.
+- Whether the integrity value is a fixed checksum or depends on the caller.
