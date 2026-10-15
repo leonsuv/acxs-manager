@@ -1,0 +1,9 @@
+/target
+/dist/
+*.exe
+*.zip
+*.acxs-backup-*
+*.bak
+*.json.tmp
+/Cargo.lock.bak
+.DS_Store
