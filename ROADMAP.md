@@ -26,7 +26,7 @@ the registered tool pages named in the "UI page" column below.
 
 ## Summary
 
-Rows: 104. Done: 60. Partial: 23. Planned: 9. Not feasible: 12.
+Rows: 105. Done: 70. Partial: 13. Planned: 10. Not feasible: 12.
 
 Counts are for the rows in the sections below. Each section is one feature area.
 
@@ -39,8 +39,8 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | Find Assetto Corsa installs through Steam library folders | `steam.rs`, `settings.rs` | Install Finder | Done | - |
 | Check a game folder picked by hand | `install` tool, `settings.rs` | Install Finder | Done | - |
 | Saved game folder and patch library | `settings.rs` | Home | Done | - |
-| Detect whether the game is running | `game.rs` | Home, Quick Race, Mods, Game Settings, RTX & ReShade | Partial | Uses the Windows process list. Install, uninstall, mod and backup-restore actions refuse while the game runs. `game.rs` has no unit tests yet. |
-| Launch the game from the manager | `game.rs` | Home, Quick Race | Partial | Same module as the running check. `game.rs` has no unit tests yet. |
+| Detect whether the game is running | `game.rs` | Home, Quick Race, Mods, Game Settings, RTX & ReShade | Done | Uses the Windows process list. Install, uninstall, mod and backup-restore actions refuse while the game runs. |
+| Launch the game from the manager | `game.rs` | Home, Quick Race | Done | Same module as the running check. |
 | Launch a third-party launcher instead of the game | `launcher.rs` | External Launcher | Done | Starts the game through a saved launch profile: an external program with its arguments. |
 
 ## 2. Content browsing
@@ -59,9 +59,10 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | Enable and disable cars and tracks without deleting | `mods.rs` | Mods | Done | Disabled items move into a folder inside the game root. Nothing is deleted. |
 | Collections of cars and tracks | `collection.rs` | Collections | Done | - |
 | Health checks on installed content, with safe repairs | `content_repair.rs` | Metadata & Checks | Done | Reports issues with severity. Repairs are planned first and start selected, so each one can be unticked before it runs. |
-| Install a car or track from a zip archive | `installer.rs` | none | Partial | Installer and its unit tests exist. No page calls it. |
+| Install a car or track from a zip archive | `installer.rs` | Install Packages | Done | Installer and its unit tests. Used by the Install Packages page. |
 | Curated online content catalog | none | - | Planned | Not started. Needs a data source and a license check for each item. |
-| Car and track thumbnails and brand badges | `thumbnails.rs`, `png.rs` | Car Specs | Partial | Car thumbnails are drawn from the car's KN5 model and saved as PNG in the car folder. Track thumbnails and brand badges are not started. |
+| Car and track thumbnails | `thumbnails.rs`, `png.rs` | Car Specs, Track Info | Done | Car thumbnails are drawn from the car's KN5 model, track thumbnails top-down. Both are saved as PNG in the item's `acxs-thumbnails` folder. |
+| Brand badges | none | - | Planned | Not started. |
 
 ## 3. Car and track metadata
 
@@ -114,8 +115,8 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | --- | --- | --- | --- | --- |
 | Edit CSP config files (key, value, documentation) | `csp_config.rs` | CSP Config | Done | - |
 | Force-feedback tuning | `ffb.rs` | CSP Config (FFB) | Done | - |
-| Weather presets and weather effects | `weather.rs` | CSP Config (Weather) | Partial | Weather effect values can be edited. Presets are read-only. Two versions can be compared. |
-| Car classes and car years | `car_classes.rs` | CSP Config (Car classes) | Partial | Cars can be added to a class and given a year. Classes cannot be created or removed in the page. |
+| Weather presets and weather effects | `weather.rs` | CSP Config (Weather) | Done | Weather effect and preset values can be edited. Presets can be created and copied. Two versions can be compared. |
+| Car classes and car years | `car_classes.rs` | CSP Config (Car classes) | Done | Classes can be created and removed in the page. Cars can be added to a class and given a year. |
 | Gamepad and keyboard assist settings | `gamepad.rs` | CSP Config (Gamepad) | Partial | Settings editor. The config file location is not yet checked against a real install; the page shows a warning. The assist app is not installed by the manager. |
 | Race rules settings for the rules mod | `rare.rs` | Mods | Partial | Installed check and settings editor. The rules app itself is not installed by the manager. |
 | List CSP apps and user apps | `lua_apps.rs` | Mods | Done | Lists the apps shipped with CSP and the apps the user installed. |
@@ -123,14 +124,14 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | Shift-light thresholds per car | `shift_lights.rs` | Car Specs | Partial | Preview of the LED thresholds only. Not written to the car. |
 | Shift-light output to steering wheel LEDs | none | - | Planned | Not started. Needs a hardware bridge. |
 | Video settings editor (`video.ini`) | `game_cfg.rs` | Game Settings | Done | - |
-| Game settings file editor (`assetto_corsa.ini`) | `game_cfg.rs` | none | Partial | Read, write and validation exist in the library. No page edits this file. |
+| Game settings file editor (`assetto_corsa.ini`) | `game_cfg.rs` | Game Settings | Done | Read, write and validation. |
 | Configuration snapshots: create, verify, restore | `backup.rs` | Game Settings | Done | Restore refuses while the game runs. |
 
 ## 9. Quick race
 
 | Feature | ACXS module(s) | UI page | Status | Note |
 | --- | --- | --- | --- | --- |
-| Write `race.ini` and start the game | `race.rs`, `game.rs` | Quick Race | Partial | Writes the config. The start step is in `game.rs`, which has no unit tests yet. |
+| Write `race.ini` and start the game | `race.rs`, `game.rs` | Quick Race | Done | Writes the config. The start step is in `game.rs`. |
 | Named race presets | `presets.rs` | Quick Race | Done | Replacing a preset keeps the old value. |
 
 ## 10. Dedicated server
@@ -140,7 +141,7 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | Edit `server_cfg.ini` | `server.rs` | Dedicated Server | Done | - |
 | Edit `entry_list.ini` | `server.rs` | Dedicated Server | Done | - |
 | Start and stop the server process | `server_process.rs` | Dedicated Server | Done | Starts the server from the game's server folder, keeps recent log lines, and asks for confirmation before stopping. |
-| Live server status over HTTP | `server_status.rs` | none | Partial | Status queries are written and unit-tested. No page calls them yet. |
+| Live server status over HTTP | `server_status.rs` | Dedicated Server | Done | Status queries are unit-tested. |
 | Championships, results and race history | `championship.rs` | Championships | Partial | Standings, round results from CSV and JSON storage are on the Championships page. Server result files and race history are not read. |
 | Upload content to the server | none | - | Planned | Not started. |
 | Server plugins (AI traffic, dynamic weather, plugin API) | none | - | Planned | Not started. The reference server is large. Would run as an external process, not be ported. |
@@ -159,7 +160,7 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | Decode the built-in UDP telemetry protocol | `telemetry.rs` | Live Telemetry | Done | - |
 | UDP client: handshake, car samples, completed laps | `udp_client.rs` | Live Telemetry | Done | Feeds the live charts and the latest values. |
 | Telemetry CSV export | `telemetry_csv.rs` | Live Telemetry | Done | - |
-| Shared memory reader (static, physics, graphics data) | `sharedmem.rs` | none | Partial | The Windows reader and the page parsers are written and unit-tested. No page reads them yet. |
+| Shared memory reader (static, physics, graphics data) | `sharedmem.rs` | Live Telemetry | Done | Windows only. Other platforms report the reader as unsupported. The page parsers are unit-tested. |
 | Live charts (throttle, brake, steering, gear) | `charts.rs` | Live Telemetry | Done | Speed is plotted too. |
 | Track map and friction circle | `track_map.rs` | Live Telemetry | Done | - |
 | Telemetry output to hardware gauges | none | - | Planned | Not started. Needs a microcontroller bridge. |

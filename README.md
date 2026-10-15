@@ -12,11 +12,11 @@ host and cross-compiled for Windows.
 ## What it does today
 
 - **Install and launch:** finds installs through Steam library folders, checks a
-  folder picked by hand, detects whether the game is running, starts the game,
-  and starts it through a third-party launcher profile.
-- **Content:** scans cars and tracks, filters and searches them, shows specs,
-  compares two cars or two tracks, edits car and track metadata, runs content
-  health checks with optional repairs, enables and disables content without
+  folder picked by hand, detects whether the game is running, starts the game or a
+  third-party launcher profile, and installs cars and tracks from zip archives.
+- **Content:** scans cars and tracks, filters and searches them, shows specs and
+  thumbnails, compares two cars or two tracks, edits car and track metadata, runs
+  content health checks with optional repairs, enables and disables content without
   deleting it, keeps collections, and exports lists to CSV or JSON.
 - **Skins and tuning:** scans and imports skins, recolours skin textures, makes
   licence plates, and edits a car's engine, mass, fuel, gear and final drive values.
@@ -25,19 +25,21 @@ host and cross-compiled for Windows.
 - **Setups:** lists, imports and archives setup files, compares them, edits values,
   and runs a three-way merge.
 - **CSP and game settings:** installs, switches and removes the CSP lights patch
-  (with rollback), edits CSP config, force-feedback, car classes and car years,
-  reads weather and gamepad settings, manages user Lua apps, edits `video.ini`,
-  and makes and restores configuration snapshots.
+  (with rollback), edits CSP config, force-feedback, weather presets, car classes
+  (create, remove, assign) and car years, reads gamepad settings, manages user Lua
+  apps, edits `video.ini` and `assetto_corsa.ini`, and makes and restores
+  configuration snapshots.
 - **Graphics:** switches the active graphics injector between the lights patch, an
   injector build folder, a runtime build folder or none, and manages those folders.
 - **Racing:** writes a quick-race config and starts the game with named presets,
   keeps lap records with a delta trace, views replays, and offers race engineer,
   setup, strategy and timing-tower views. Championships are scored from CSV results.
-- **Server:** edits the dedicated server configuration and entry list, and starts
-  and stops the server process.
+- **Server:** edits the dedicated server configuration and entry list, starts
+  and stops the server process, and shows live server status.
 - **Telemetry and logs:** shows live UDP telemetry with charts and a track map,
-  exports telemetry and laps to CSV, serves a local web dashboard, edits a HUD
-  layout, summarizes game logs, and writes a diagnostics bundle.
+  reads the game's shared memory on Windows, exports telemetry and laps to CSV,
+  serves a local web dashboard, edits a HUD layout, summarizes game logs, and
+  writes a diagnostics bundle.
 
 The full feature list, with the status of each feature and the reason for anything
 not built, is in [ROADMAP.md](ROADMAP.md).
@@ -117,12 +119,11 @@ Core modules by feature area (all in `src/`):
   health checks with repairs, setups including value edits, skins, collections,
   quick race, dedicated server files and process control, lap records, replay
   viewing, live telemetry with charts, KN5 export and preview, graphics injector
-  switching, configuration snapshots, and the diagnostics bundle.
-- Partial: several modules exist without a UI page or with a read-only page, and
-  a few pages stop short of the full feature. Examples: the shared memory reader,
-  live server status, the install-from-zip library, the HUD layout (no in-game
-  drawing), AO baking (values not written), and the game settings file editor.
-  ROADMAP.md names what is missing for each.
+  switching, configuration snapshots, the diagnostics bundle, the install-from-zip
+  page, live server status, and the shared memory reader.
+- Partial: a few pages stop short of the full feature. Examples: the HUD layout
+  (no in-game drawing), AO baking (values not written), and car tuning (tyre and
+  suspension values not covered). ROADMAP.md names what is missing for each.
 - Not started: the Planned rows in ROADMAP.md, such as the online content catalog,
   shared leaderboards, server uploads, hardware outputs and the Windows CI workflow.
 
