@@ -1,9 +1,12 @@
-//! Skins tool page: pick an installed car, browse its skins, and import a skin folder.
+//! Skins tool page: pick an installed car, browse its skins, import a skin folder,
+//! and recolour a texture of a skin into a new file.
 //!
-//! Car and skin scans, the source folder check and the import run on background
-//! threads. They report back through a channel that is polled once per frame.
+//! Car and skin scans, the source folder check, the PNG listing and the import run on
+//! background threads. They report back through a channel that is polled once per frame.
 
 use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -13,6 +16,7 @@ use crate::ui::theme::{self, BORDER, CARD, CARD_SELECTED, DANGER, INFO, MUTED, O
 use crate::ui::widgets;
 use crate::ui::Notice;
 use acxs_manager::content::{self, CarEntry};
+use acxs_manager::livery;
 use acxs_manager::skin_import;
 use acxs_manager::skins::{self, SkinEntry};
 use eframe::egui::{self, CornerRadius, Margin, RichText, Sense, Stroke};
@@ -21,6 +25,8 @@ use eframe::egui::{self, CornerRadius, Margin, RichText, Sense, Stroke};
 const CAR_ROW_HEIGHT: f32 = 60.0;
 /// Inner width of a skin card.
 const CARD_WIDTH: f32 = 210.0;
+/// Target colour the recolour section starts with (a blue).
+const RECOLOUR_DEFAULT_TARGET: [u8; 3] = [0x2F, 0x80, 0xED];
 
 /// Results sent back from background threads.
 enum Msg {
@@ -33,6 +39,40 @@ enum Msg {
     /// Result of `validate_source` for `source`.
     Checked { source: String, problems: Vec<String> },
     ImportFinished,
+    /// PNG file names directly inside the skin folder `dir`.
+    PngFiles { dir: PathBuf, files: Vec<String> },
+    /// A recolour save has finished, successfully or not.
+    RecolourFinished,
+}
+
+/// State of the Recolour section for the selected skin.
+struct RecolourForm {
+    /// The skin folder that `files` belongs to.
+    dir: Option<PathBuf>,
+    /// PNG file names in `dir`, or None while they are being scanned.
+    files: Option<Vec<String>>,
+    /// The chosen source file name. Falls back to the first file when unset or gone.
+    source: Option<String>,
+    target: [u8; 3],
+    /// Recolour strength, 0 to 1.
+    strength: f32,
+    /// Optional greyscale mask. Its brightness scales the strength per pixel.
+    mask: Option<PathBuf>,
+    saving: bool,
+}
+
+impl Default for RecolourForm {
+    fn default() -> Self {
+        Self {
+            dir: None,
+            files: None,
+            source: None,
+            target: RECOLOUR_DEFAULT_TARGET,
+            strength: 1.0,
+            mask: None,
+            saving: false,
+        }
+    }
 }
 
 pub fn tool() -> Box<dyn Tool> {
@@ -60,6 +100,7 @@ struct SkinsPage {
     checked: Option<(String, Vec<String>)>,
     checking: bool,
     importing: bool,
+    recolour: RecolourForm,
 }
 
 impl SkinsPage {
@@ -83,6 +124,7 @@ impl SkinsPage {
             checked: None,
             checking: false,
             importing: false,
+            recolour: RecolourForm::default(),
         }
     }
 
@@ -114,6 +156,12 @@ impl SkinsPage {
                     self.checked = Some((source, problems));
                 }
                 Msg::ImportFinished => self.importing = false,
+                Msg::PngFiles { dir, files } => {
+                    if self.recolour.dir.as_deref() == Some(dir.as_path()) {
+                        self.recolour.files = Some(files);
+                    }
+                }
+                Msg::RecolourFinished => self.recolour.saving = false,
             }
         }
     }
@@ -198,6 +246,48 @@ impl SkinsPage {
         });
     }
 
+    /// Start a scan of the PNG files in `dir`, unless `dir` is already the listed folder.
+    fn ensure_png_list(&mut self, egui_ctx: &egui::Context, dir: &Path) {
+        if self.recolour.dir.as_deref() == Some(dir) {
+            return;
+        }
+        self.recolour.dir = Some(dir.to_path_buf());
+        self.recolour.files = None;
+        self.recolour.source = None;
+        let dir = dir.to_path_buf();
+        let tx = self.tx.clone();
+        let ctx = egui_ctx.clone();
+        thread::spawn(move || {
+            let files = list_pngs(&dir);
+            let _ = tx.send(Msg::PngFiles { dir, files });
+            ctx.request_repaint();
+        });
+    }
+
+    /// Recolour `source` with the current settings and save it as a new file in `dir`.
+    fn start_recolour(&mut self, egui_ctx: &egui::Context, dir: PathBuf, source: PathBuf) {
+        self.recolour.saving = true;
+        let target = self.recolour.target;
+        let strength = self.recolour.strength;
+        let mask = self.recolour.mask.clone();
+        let tx = self.tx.clone();
+        let ctx = egui_ctx.clone();
+        thread::spawn(move || {
+            let notice = match recolour_to_new_file(&dir, &source, target, strength, mask.as_deref()) {
+                Ok(path) => Notice {
+                    text: format!("Saved recoloured texture as {}", path.display()),
+                    ok: true,
+                },
+                Err(err) => Notice { text: format!("Recolour failed: {err}"), ok: false },
+            };
+            let _ = tx.send(Msg::Notice(notice));
+            let files = list_pngs(&dir);
+            let _ = tx.send(Msg::PngFiles { dir, files });
+            let _ = tx.send(Msg::RecolourFinished);
+            ctx.request_repaint();
+        });
+    }
+
     fn car_list(&mut self, ui: &mut egui::Ui) {
         ui.add(
             egui::TextEdit::singleline(&mut self.car_query)
@@ -258,12 +348,13 @@ impl SkinsPage {
         }
     }
 
-    fn detail(&self, ui: &mut egui::Ui) {
+    fn detail(&mut self, ui: &mut egui::Ui) {
         widgets::section_title(ui, "Details");
         let Some(skin) = self
             .selected_skin
             .as_deref()
             .and_then(|id| self.skins.iter().find(|s| s.skin_id == id))
+            .cloned()
         else {
             ui.label(RichText::new("Select a skin to see its details.").color(MUTED));
             return;
@@ -291,6 +382,85 @@ impl SkinsPage {
             None => {
                 ui.label(RichText::new("No preview image.").color(MUTED));
             }
+        }
+
+        self.recolour_section(ui, &skin);
+    }
+
+    /// Recolour one PNG of the skin into a new file in the skin folder.
+    fn recolour_section(&mut self, ui: &mut egui::Ui, skin: &SkinEntry) {
+        ui.add_space(12.0);
+        widgets::section_title(ui, "Recolour");
+        let egui_ctx = ui.ctx().clone();
+        self.ensure_png_list(&egui_ctx, &skin.path);
+
+        let Some(files) = self.recolour.files.clone() else {
+            ui.label(RichText::new("Scanning PNG files...").color(MUTED));
+            return;
+        };
+        if files.is_empty() {
+            ui.label(RichText::new("This skin folder has no PNG files.").color(MUTED));
+            return;
+        }
+        let source = match &self.recolour.source {
+            Some(name) if files.contains(name) => name.clone(),
+            _ => files[0].clone(),
+        };
+
+        ui.label(RichText::new("Source texture").color(MUTED));
+        let mut picked = None;
+        egui::ComboBox::from_id_salt("recolour_source")
+            .selected_text(source.as_str())
+            .show_ui(ui, |ui| {
+                for name in &files {
+                    if ui.selectable_label(*name == source, name.as_str()).clicked() {
+                        picked = Some(name.clone());
+                    }
+                }
+            });
+        if let Some(name) = picked {
+            self.recolour.source = Some(name);
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("Target colour");
+            ui.color_edit_button_srgb(&mut self.recolour.target);
+        });
+        ui.add(egui::Slider::new(&mut self.recolour.strength, 0.0..=1.0).text("Strength"));
+
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label("Mask");
+            let mask_name = self
+                .recolour
+                .mask
+                .as_deref()
+                .and_then(|path| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "none".to_string());
+            ui.label(RichText::new(mask_name).color(MUTED));
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Choose mask").clicked() {
+                if let Some(path) = rfd::FileDialog::new().add_filter("PNG", &["png"]).pick_file() {
+                    self.recolour.mask = Some(path);
+                }
+            }
+            if self.recolour.mask.is_some() && ui.button("Clear mask").clicked() {
+                self.recolour.mask = None;
+            }
+        });
+        ui.label(
+            RichText::new("Optional. White areas of the mask take the full strength, black areas none.")
+                .small()
+                .color(MUTED),
+        );
+
+        ui.add_space(6.0);
+        let saving = self.recolour.saving;
+        let label = if saving { "Saving..." } else { "Save as new file" };
+        if ui.add_enabled(!saving, widgets::primary_button(label)).clicked() {
+            self.start_recolour(&egui_ctx, skin.path.clone(), skin.path.join(&source));
         }
     }
 
@@ -463,10 +633,74 @@ impl Tool for SkinsPage {
         egui::Panel::right("skins_detail")
             .resizable(true)
             .default_size(320.0)
-            .show(ui, |ui| self.detail(ui));
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.detail(ui));
+            });
 
         self.import_bar(ui, &root, ctx.game_running, &egui_ctx);
         self.skin_grid(ui);
+    }
+}
+
+/// File names of the PNG files directly inside `dir`, sorted case-insensitively.
+/// Symbolic links are skipped. A folder that cannot be read yields an empty list.
+fn list_pngs(dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.to_ascii_lowercase().ends_with(".png"))
+        .collect();
+    names.sort_by_key(|name| name.to_lowercase());
+    names
+}
+
+/// Recolour the PNG at `source` and write the result to a new file in `dir`.
+///
+/// The name is `<source stem>-recoloured.png`, with a counter added while that name
+/// is taken. An existing file is never replaced. Errors are returned as text for the notice.
+fn recolour_to_new_file(
+    dir: &Path,
+    source: &Path,
+    target: [u8; 3],
+    strength: f32,
+    mask: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let input = fs::read(source).map_err(|e| format!("cannot read {}: {e}", source.display()))?;
+    let mask_bytes = mask
+        .map(|path| fs::read(path).map_err(|e| format!("cannot read mask {}: {e}", path.display())))
+        .transpose()?;
+    let output = livery::recolor_png(&input, target, strength, mask_bytes.as_deref())
+        .map_err(|err| err.to_string())?;
+
+    let stem = source
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "texture".to_string());
+    let mut counter = 1u32;
+    loop {
+        let name = if counter == 1 {
+            format!("{stem}-recoloured.png")
+        } else {
+            format!("{stem}-recoloured-{counter}.png")
+        };
+        let path = dir.join(name);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(&output) {
+                    let _ = fs::remove_file(&path);
+                    return Err(format!("cannot write {}: {e}", path.display()));
+                }
+                return Ok(path);
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => counter += 1,
+            Err(e) => return Err(format!("cannot create {}: {e}", path.display())),
+        }
     }
 }
 

@@ -59,6 +59,7 @@ pub mod server;
 pub mod server_process;
 pub mod server_status;
 pub mod settings;
+pub mod setup_advice;
 pub mod setups;
 pub mod sharedmem;
 pub mod shift_lights;

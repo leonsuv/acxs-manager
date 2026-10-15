@@ -7,12 +7,20 @@ use crate::ui::theme::{self, DANGER, INFO, MUTED, TEXT, WARN};
 use crate::ui::widgets;
 use crate::ui::Notice;
 use acxs_manager::ac_log::{self, LogLevel, LogLine, LogSummary};
+use acxs_manager::diagnostics::{self, BundleReport};
 use eframe::egui::{self, Color32, RichText};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 /// Height of one log line row. Matches a monospace label without wrapping.
 const ROW_HEIGHT: f32 = 18.0;
+
+/// What the bundle holds and what it leaves out, shown above the button.
+const BUNDLE_HELP: &str = "A zip file to attach to a bug report. It holds a summary (app version, \
+    game folder check, graphics proxy DLL names and sizes, lights patch state, content counts), \
+    the last part of the game log, and the app's settings with every path replaced by a placeholder. \
+    It leaves out save files, replays, car and track content, and the contents of DLL files. \
+    An existing bundle file is never overwritten.";
 
 pub fn tool() -> Box<dyn Tool> {
     Box::new(LogsTool::default())
@@ -66,6 +74,8 @@ struct LogsTool {
     loaded: Option<Loaded>,
     error: Option<String>,
     filter: Filter,
+    /// Set while a diagnostics bundle is being written on a background thread.
+    bundle_pending: Option<Receiver<Result<BundleReport, String>>>,
 }
 
 impl Tool for LogsTool {
@@ -83,6 +93,7 @@ impl Tool for LogsTool {
             self.path_input = default_log_path(ctx.ac_root.as_deref());
         }
         self.poll();
+        self.poll_bundle(notices);
 
         widgets::heading(ui, "Logs", "Summarize the Assetto Corsa log to find out why a launch failed.");
 
@@ -123,6 +134,8 @@ impl Tool for LogsTool {
         if start_read {
             self.start_read(ui.ctx());
         }
+
+        self.diagnostics_card(ui, ctx.ac_root.as_deref());
 
         let Some(loaded) = &self.loaded else {
             ui.add_space(12.0);
@@ -234,6 +247,94 @@ impl LogsTool {
             ctx.request_repaint();
         });
     }
+
+    /// The "Create diagnostics bundle" section. Asks for a folder, then builds the bundle.
+    fn diagnostics_card(&mut self, ui: &mut egui::Ui, ac_root: Option<&Path>) {
+        let busy = self.bundle_pending.is_some();
+        let mut start_bundle = false;
+        theme::card().show(ui, |ui| {
+            ui.label(RichText::new("Create diagnostics bundle").strong().color(TEXT));
+            ui.label(RichText::new(BUNDLE_HELP).color(MUTED));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let can_create = !busy && ac_root.is_some();
+                if ui.add_enabled(can_create, widgets::primary_button("Create bundle")).clicked() {
+                    start_bundle = true;
+                }
+                if busy {
+                    ui.spinner();
+                    ui.label(RichText::new("Creating bundle...").color(MUTED));
+                } else if ac_root.is_none() {
+                    ui.label(RichText::new("Set your game folder first.").color(MUTED));
+                }
+            });
+        });
+
+        if start_bundle {
+            if let (Some(ac_root), Some(out_dir)) = (ac_root, pick_bundle_dir()) {
+                self.start_bundle(ui.ctx(), ac_root.to_path_buf(), out_dir);
+            }
+        }
+    }
+
+    /// Builds the bundle in `out_dir` on a background thread. `poll_bundle` picks up the result.
+    fn start_bundle(&mut self, ctx: &egui::Context, ac_root: PathBuf, out_dir: PathBuf) {
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        self.bundle_pending = Some(rx);
+        std::thread::spawn(move || {
+            let result = diagnostics::create_bundle(&ac_root, &out_dir, env!("CARGO_PKG_VERSION"))
+                .map_err(|err| err.to_string());
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+    }
+
+    /// Turns a finished bundle job into a notice. Never blocks.
+    fn poll_bundle(&mut self, notices: &mut Vec<Notice>) {
+        let Some(rx) = &self.bundle_pending else {
+            return;
+        };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err("The bundle job stopped before it finished.".to_string()),
+        };
+        self.bundle_pending = None;
+        notices.push(match result {
+            Ok(report) => Notice {
+                text: bundle_notice_text(&report),
+                ok: true,
+            },
+            Err(message) => Notice { text: message, ok: false },
+        });
+    }
+}
+
+/// Asks for the folder to save the bundle in. Starts in the Documents folder when it exists.
+fn pick_bundle_dir() -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new().set_title("Choose a folder for the diagnostics bundle");
+    if let Some(documents) = home_dir().map(|home| home.join("Documents")).filter(|dir| dir.is_dir()) {
+        dialog = dialog.set_directory(documents);
+    }
+    dialog.pick_folder()
+}
+
+/// The user's home folder: USERPROFILE on Windows, HOME elsewhere.
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+}
+
+/// Notice text for a finished bundle: where it was written, then each file inside it.
+fn bundle_notice_text(report: &BundleReport) -> String {
+    let mut text = format!("Diagnostics bundle written to {}", report.path.display());
+    for file in &report.files {
+        text.push_str("\n- ");
+        text.push_str(file);
+    }
+    text
 }
 
 fn read_and_parse(path: &Path) -> Result<Loaded, String> {

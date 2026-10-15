@@ -1,15 +1,21 @@
-//! Model Tools tool page: inspects an Assetto Corsa `.kn5` model, exports its
-//! mesh geometry to OBJ, and lists the entries of a `data.acd` archive. Each
-//! operation runs on a background thread and reports back over a channel that
-//! is polled once per frame.
+//! Model Tools tool page: inspects a `.kn5` model, exports its mesh geometry to
+//! OBJ and FBX, imports OBJ meshes as a new KN5 file, bakes per-corner ambient
+//! occlusion, and lists the entries of a `data.acd` archive. Each operation runs
+//! on a background thread and reports back over a channel that is polled once
+//! per frame.
 
 use super::{Tool, ToolContext};
 use crate::ui::{theme, widgets, Notice};
 use acxs_manager::acd::{self, AcdEntry};
+use acxs_manager::ao_bake::{self, AoSettings};
+use acxs_manager::fbx::{self, FbxMesh};
 use acxs_manager::kn5::{self, Kn5Info};
 use acxs_manager::kn5_export::{self, ObjStats};
+use acxs_manager::kn5_writer;
+use acxs_manager::obj_import;
 use acxs_manager::ortho::{self, View};
 use eframe::egui::{self, RichText};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -23,6 +29,10 @@ const LIST_HEIGHT: f32 = 240.0;
 /// Size of the preview PNG written by "Render preview".
 const PREVIEW_WIDTH: u32 = 800;
 const PREVIEW_HEIGHT: u32 = 600;
+/// Settings for "Bake AO".
+const AO_RAYS: u32 = 64;
+const AO_MAX_DISTANCE: f32 = 10.0;
+const AO_BIAS: f32 = 0.01;
 
 pub fn tool() -> Box<dyn Tool> {
     Box::new(ModelTools::new())
@@ -47,6 +57,22 @@ enum Msg {
         path: PathBuf,
         result: Result<usize, String>,
     },
+    /// An FBX file was written; the result is the triangle count.
+    FbxExported {
+        path: PathBuf,
+        result: Result<usize, String>,
+    },
+    /// A KN5 file was written from an OBJ; the result is the mesh count.
+    ObjImported {
+        obj: PathBuf,
+        kn5: PathBuf,
+        result: Result<usize, String>,
+    },
+    /// AO was baked in memory; the result is the value count and the average.
+    AoBaked {
+        kn5: PathBuf,
+        result: Result<(usize, f64), String>,
+    },
 }
 
 struct ModelTools {
@@ -57,6 +83,9 @@ struct ModelTools {
     inspect_busy: bool,
     export_busy: bool,
     render_busy: bool,
+    fbx_busy: bool,
+    obj_busy: bool,
+    ao_busy: bool,
     /// Last successful inspection, with the file it came from.
     inspected: Option<(PathBuf, Kn5Info)>,
     /// Last successful export: output path and counts.
@@ -76,6 +105,9 @@ impl ModelTools {
             inspect_busy: false,
             export_busy: false,
             render_busy: false,
+            fbx_busy: false,
+            obj_busy: false,
+            ao_busy: false,
             inspected: None,
             exported: None,
             acd_busy: false,
@@ -167,8 +199,132 @@ impl ModelTools {
                         }
                     }
                 }
+                Msg::FbxExported { path, result } => {
+                    self.fbx_busy = false;
+                    match result {
+                        Ok(triangles) => notices.push(notice(
+                            format!("Exported FBX {} ({triangles} triangles)", file_name(&path)),
+                            true,
+                        )),
+                        Err(e) => notices.push(notice(format!("FBX export failed: {e}"), false)),
+                    }
+                }
+                Msg::ObjImported { obj, kn5, result } => {
+                    self.obj_busy = false;
+                    match result {
+                        Ok(meshes) => notices.push(notice(
+                            format!(
+                                "Imported {} as {meshes} KN5 meshes into {}",
+                                file_name(&obj),
+                                file_name(&kn5)
+                            ),
+                            true,
+                        )),
+                        Err(e) => notices.push(notice(format!("OBJ import failed: {e}"), false)),
+                    }
+                }
+                Msg::AoBaked { kn5, result } => {
+                    self.ao_busy = false;
+                    match result {
+                        Ok((values, average)) => notices.push(notice(
+                            format!(
+                                "Baked AO for {}: {values} values, average {average:.3} (not written to disk)",
+                                file_name(&kn5)
+                            ),
+                            true,
+                        )),
+                        Err(e) => notices.push(notice(format!("AO bake failed: {e}"), false)),
+                    }
+                }
             }
         }
+    }
+
+    fn convert_section(&mut self, ui: &mut egui::Ui) {
+        widgets::section_title(ui, "CONVERT AND BAKE");
+        theme::card().show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                let has_file = self.kn5_path.is_some();
+
+                let fbx = ui.add_enabled(
+                    has_file && !self.fbx_busy,
+                    egui::Button::new("Export FBX"),
+                );
+                if fbx.clicked() {
+                    if let Some(kn5_file) = self.kn5_path.clone() {
+                        let stem = default_stem(&kn5_file);
+                        if let Some(fbx_file) = rfd::FileDialog::new()
+                            .add_filter("fbx", &["fbx"])
+                            .set_file_name(format!("{stem}.fbx"))
+                            .save_file()
+                        {
+                            self.fbx_busy = true;
+                            self.spawn(ui.ctx(), move || {
+                                let result = export_fbx(&kn5_file, &fbx_file);
+                                Msg::FbxExported {
+                                    path: fbx_file,
+                                    result,
+                                }
+                            });
+                        }
+                    }
+                }
+
+                let import = ui.add_enabled(!self.obj_busy, egui::Button::new("Import OBJ"));
+                if import.clicked() {
+                    if let Some(obj_file) = rfd::FileDialog::new()
+                        .add_filter("obj", &["obj"])
+                        .pick_file()
+                    {
+                        let stem = default_stem(&obj_file);
+                        if let Some(kn5_file) = rfd::FileDialog::new()
+                            .add_filter("kn5", &["kn5"])
+                            .set_file_name(format!("{stem}.kn5"))
+                            .save_file()
+                        {
+                            self.obj_busy = true;
+                            self.spawn(ui.ctx(), move || {
+                                let result = import_obj(&obj_file, &kn5_file);
+                                Msg::ObjImported {
+                                    obj: obj_file,
+                                    kn5: kn5_file,
+                                    result,
+                                }
+                            });
+                        }
+                    }
+                }
+
+                let ao = ui.add_enabled(has_file && !self.ao_busy, egui::Button::new("Bake AO"));
+                if ao.clicked() {
+                    if let Some(kn5_file) = self.kn5_path.clone() {
+                        self.ao_busy = true;
+                        self.spawn(ui.ctx(), move || {
+                            let result = bake_ao(&kn5_file);
+                            Msg::AoBaked {
+                                kn5: kn5_file,
+                                result,
+                            }
+                        });
+                    }
+                }
+
+                if self.fbx_busy || self.obj_busy || self.ao_busy {
+                    ui.add(egui::Spinner::new());
+                    ui.label(RichText::new("Working...").color(theme::MUTED));
+                }
+            });
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(
+                    "Export FBX and Bake AO use the KN5 file chosen above. Export FBX writes one \
+                     mesh with no normals. Bake AO only reports the values; they are not written \
+                     to disk.",
+                )
+                .small()
+                .color(theme::MUTED),
+            );
+        });
     }
 
     fn kn5_section(&mut self, ui: &mut egui::Ui) {
@@ -329,13 +485,16 @@ impl Tool for ModelTools {
         widgets::heading(
             ui,
             "Model Tools",
-            "Inspect KN5 models, export their geometry to OBJ, and list data.acd archives.",
+            "Inspect KN5 models, export their geometry to OBJ and FBX, import OBJ as KN5, \
+             bake ambient occlusion, and list data.acd archives.",
         );
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 self.kn5_section(ui);
+                ui.add_space(20.0);
+                self.convert_section(ui);
                 ui.add_space(20.0);
                 self.acd_section(ui);
             });
@@ -479,6 +638,73 @@ fn render_preview(kn5_file: &Path, png: &Path) -> Result<usize, String> {
         return Err(format!("could not write {}: {e}", file_name(png)));
     }
     Ok(bytes.len())
+}
+
+/// Loads the KN5 model and writes its triangles as one FBX mesh to a new file.
+/// Returns the triangle count.
+fn export_fbx(kn5_file: &Path, fbx_file: &Path) -> Result<usize, String> {
+    let triangles = kn5_export::load_triangles(kn5_file).map_err(|e| e.to_string())?;
+    if triangles.is_empty() {
+        return Err(format!("{} has no triangles", file_name(kn5_file)));
+    }
+    let mut vertices = Vec::with_capacity(triangles.len() * 3);
+    for tri in &triangles {
+        vertices.extend_from_slice(&[tri.a, tri.b, tri.c]);
+    }
+    let count = vertices.len();
+    let indices = (0..count)
+        .map(|i| u32::try_from(i).map_err(|_| format!("{count} vertices is too many for FBX")))
+        .collect::<Result<Vec<u32>, String>>()?;
+    let mesh = FbxMesh {
+        name: fbx_name(&default_stem(kn5_file)),
+        vertices,
+        indices,
+        normals: None,
+    };
+    fbx::write_fbx(fbx_file, &[mesh]).map_err(|e| e.to_string())?;
+    Ok(triangles.len())
+}
+
+/// Reads the OBJ file (no texture mapping) and writes its meshes as a new KN5 file.
+/// Returns the mesh count.
+fn import_obj(obj_file: &Path, kn5_file: &Path) -> Result<usize, String> {
+    let meshes =
+        obj_import::read_obj(obj_file, &HashMap::new()).map_err(|e| e.to_string())?;
+    let count = meshes.len();
+    kn5_writer::write_kn5(kn5_file, &meshes).map_err(|e| e.to_string())?;
+    Ok(count)
+}
+
+/// Loads the KN5 model and bakes one AO value per triangle corner. The values are
+/// not stored. Returns the value count and their average.
+fn bake_ao(kn5_file: &Path) -> Result<(usize, f64), String> {
+    let triangles = kn5_export::load_triangles(kn5_file).map_err(|e| e.to_string())?;
+    if triangles.is_empty() {
+        return Err(format!("{} has no triangles", file_name(kn5_file)));
+    }
+    let settings = AoSettings {
+        rays: AO_RAYS,
+        max_distance: AO_MAX_DISTANCE,
+        bias: AO_BIAS,
+    };
+    let values = ao_bake::bake_vertex_ao(&triangles, &settings).map_err(|e| e.to_string())?;
+    let count = values.len();
+    let average = values.iter().map(|&v| f64::from(v)).sum::<f64>() / count as f64;
+    Ok((count, average))
+}
+
+/// Turns a file stem into an FBX mesh name: quotes and control characters become
+/// underscores, and an empty name becomes "model".
+fn fbx_name(stem: &str) -> String {
+    let name: String = stem
+        .chars()
+        .map(|c| if c == '"' || c.is_control() { '_' } else { c })
+        .collect();
+    if name.trim().is_empty() {
+        "model".to_string()
+    } else {
+        name
+    }
 }
 
 /// File stem of `path`, or "model" when it has none. Used as the default save name.

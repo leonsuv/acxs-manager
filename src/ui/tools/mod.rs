@@ -35,6 +35,7 @@ mod install;
 mod model_tools;
 mod logs;
 mod rtx;
+mod setup_advice;
 mod plate;
 mod hud_editor;
 mod launcher;
@@ -76,6 +77,7 @@ pub fn registry() -> Vec<Box<dyn Tool>> {
         model_tools::tool(),
         logs::tool(),
         rtx::tool(),
+        setup_advice::tool(),
         plate::tool(),
         hud_editor::tool(),
         launcher::tool(),
