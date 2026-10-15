@@ -441,10 +441,9 @@ impl GameSettings {
                 if ui
                     .add_enabled(can_save, widgets::primary_button("Save video settings"))
                     .clicked()
+                    && let Ok(settings) = parsed
                 {
-                    if let Ok(settings) = parsed {
-                        self.save_video(ctx, settings);
-                    }
+                    self.save_video(ctx, settings);
                 }
                 ui.label(RichText::new("The previous file is kept as a backup.").small().color(MUTED));
             });
@@ -590,10 +589,10 @@ impl Tool for GameSettings {
             self.video_requested = true;
             self.load_video(&egui_ctx);
         }
-        if let Some(root) = &ctx.ac_root {
-            if self.listed_root.as_ref() != Some(root) && self.snap_pending == 0 {
-                self.list_snapshots(&egui_ctx, root.clone());
-            }
+        if let Some(root) = &ctx.ac_root
+            && self.listed_root.as_ref() != Some(root) && self.snap_pending == 0
+        {
+            self.list_snapshots(&egui_ctx, root.clone());
         }
 
         egui::ScrollArea::vertical()

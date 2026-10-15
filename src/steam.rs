@@ -39,7 +39,7 @@ impl VdfValue {
         path.iter().try_fold(self, |node, key| match node {
             VdfValue::Map(entries) => entries
                 .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(*key))
+                .find(|(k, _)| k.eq_ignore_ascii_case(key))
                 .map(|(_, v)| v),
             VdfValue::Str(_) => None,
         })
@@ -314,7 +314,7 @@ fn safe_dir_name(name: &str) -> Option<String> {
     let unsafe_name = name.is_empty()
         || name == "."
         || name == ".."
-        || name.contains(|c| c == '/' || c == '\\');
+        || name.contains(['/', '\\']);
     (!unsafe_name).then(|| name.to_string())
 }
 
@@ -537,7 +537,7 @@ mod tests {
         tree.write("Steam/steamapps/common/Custom AC Dir/acs.exe", "");
 
         assert_eq!(
-            find_ac_installs(&[steam.clone()]),
+            find_ac_installs(std::slice::from_ref(&steam)),
             vec![steam.join("steamapps/common/Custom AC Dir")]
         );
     }

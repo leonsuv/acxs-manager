@@ -429,14 +429,14 @@ mod tests {
             ..view(64)
         };
         let rgba = render(&[front_triangle([200, 100, 50], 0.0)], &v).unwrap();
-        assert!(rgba.chunks_exact(4).all(|px| px == background()));
+        assert!(rgba.as_chunks::<4>().0.iter().all(|px| *px == background()));
     }
 
     #[test]
     fn empty_mesh_is_background() {
         let rgba = render(&[], &view(4)).unwrap();
         assert_eq!(rgba.len(), 4 * 4 * 4);
-        assert!(rgba.chunks_exact(4).all(|px| px == background()));
+        assert!(rgba.as_chunks::<4>().0.iter().all(|px| *px == background()));
     }
 
     #[test]

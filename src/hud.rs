@@ -385,11 +385,11 @@ impl From<serde_json::Error> for HudError {
 }
 
 fn is_known_source(source: &str) -> bool {
-    VALUE_SOURCES.iter().any(|s| *s == source)
+    VALUE_SOURCES.contains(&source)
 }
 
 fn kind_accepts(kind: WidgetKind, source: &str) -> bool {
-    kind.sources().iter().any(|s| *s == source)
+    kind.sources().contains(&source)
 }
 
 fn valid_size(v: f32) -> bool {
@@ -537,10 +537,8 @@ impl Layout {
             Err(e) => return Err(e.into()),
         }
 
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = path.parent() && !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
         }
         let tmp = tmp_path(path);
         fs::write(&tmp, content.as_bytes())?;

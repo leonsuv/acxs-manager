@@ -309,11 +309,11 @@ impl TrackInfo {
                 }
             });
 
-        if let Some(id) = clicked {
-            if self.selected.as_deref() != Some(id.as_str()) {
-                self.selected = Some(id);
-                self.layout = None;
-            }
+        if let Some(id) = clicked
+            && self.selected.as_deref() != Some(id.as_str())
+        {
+            self.selected = Some(id);
+            self.layout = None;
         }
     }
 

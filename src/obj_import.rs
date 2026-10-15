@@ -605,7 +605,8 @@ f 1 2 3 # one face
 
     #[test]
     fn invalid_input_is_reported_with_its_line() {
-        let cases: [(&str, fn(&ObjError) -> bool); 11] = [
+        type Case = (&'static str, fn(&ObjError) -> bool);
+        let cases: [Case; 11] = [
             ("v 1 2\nf 1 1 1", |e| matches!(e, ObjError::Syntax { line: 1, .. })),
             ("v 1 nan 3\nf 1 1 1", |e| matches!(e, ObjError::Syntax { line: 1, .. })),
             ("f 1 2 3", |e| matches!(e, ObjError::IndexOutOfRange { line: 1, index: 1, available: 0 })),

@@ -117,7 +117,7 @@ impl Ring {
     /// Index range of the samples with `from <= t <= to`. Empty when the bounds
     /// are inverted or NaN.
     fn range_of(&self, from: f64, to: f64) -> std::ops::Range<usize> {
-        if !(from <= to) {
+        if !matches!(from.partial_cmp(&to), Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)) {
             return 0..0;
         }
         let start = self.samples.partition_point(|s| s.t < from);

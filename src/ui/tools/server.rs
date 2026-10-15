@@ -202,10 +202,10 @@ impl ServerPage {
             return;
         }
         let old_default = self.default_dir.as_ref().map(|d| d.display().to_string());
-        if self.dir_input.trim().is_empty() || old_default.as_deref() == Some(self.dir_input.as_str()) {
-            if let Some(dir) = &default {
-                self.dir_input = dir.display().to_string();
-            }
+        if (self.dir_input.trim().is_empty() || old_default.as_deref() == Some(self.dir_input.as_str()))
+            && let Some(dir) = &default
+        {
+            self.dir_input = dir.display().to_string();
         }
         self.default_dir = default;
     }
@@ -343,10 +343,10 @@ impl ServerPage {
                         .hint_text("Not set"),
                 );
                 let has_default = self.default_dir.is_some();
-                if ui.add_enabled(has_default, egui::Button::new("Use default")).clicked() {
-                    if let Some(dir) = &self.default_dir {
-                        self.dir_input = dir.display().to_string();
-                    }
+                if ui.add_enabled(has_default, egui::Button::new("Use default")).clicked()
+                    && let Some(dir) = &self.default_dir
+                {
+                    self.dir_input = dir.display().to_string();
                 }
             });
         });

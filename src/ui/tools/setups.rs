@@ -470,11 +470,11 @@ impl SetupsPage {
                     if edit.lost_focus() {
                         *intent = Some(Intent::Rescan);
                     }
-                    if ui.add_enabled(!busy, egui::Button::new("Browse")).clicked() {
-                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                            self.root_input = path.display().to_string();
-                            *intent = Some(Intent::Rescan);
-                        }
+                    if ui.add_enabled(!busy, egui::Button::new("Browse")).clicked()
+                        && let Some(path) = rfd::FileDialog::new().pick_folder()
+                    {
+                        self.root_input = path.display().to_string();
+                        *intent = Some(Intent::Rescan);
                     }
                     if ui.add_enabled(!busy, egui::Button::new("Rescan")).clicked() {
                         *intent = Some(Intent::Rescan);

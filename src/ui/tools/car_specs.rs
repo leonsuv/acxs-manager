@@ -202,19 +202,19 @@ impl CarSpecsPage {
                 self.request_specs(egui_ctx, id);
             }
         }
-        if let (Some(left), Some(right)) = (self.selected.clone(), self.compare_id.clone()) {
-            if left != right {
-                let done = self
-                    .compare
-                    .as_ref()
-                    .is_some_and(|c| c.left == left && c.right == right);
-                let pending = self
-                    .pending_compare
-                    .as_ref()
-                    .is_some_and(|(l, r)| *l == left && *r == right);
-                if !done && !pending {
-                    self.request_compare(egui_ctx, left, right);
-                }
+        if let (Some(left), Some(right)) = (self.selected.clone(), self.compare_id.clone())
+            && left != right
+        {
+            let done = self
+                .compare
+                .as_ref()
+                .is_some_and(|c| c.left == left && c.right == right);
+            let pending = self
+                .pending_compare
+                .as_ref()
+                .is_some_and(|(l, r)| *l == left && *r == right);
+            if !done && !pending {
+                self.request_compare(egui_ctx, left, right);
             }
         }
     }
@@ -255,13 +255,13 @@ impl CarSpecsPage {
             widgets::key_value(ui, "Cached thumbnail", &shown);
             ui.horizontal(|ui| {
                 let open = ui.add_enabled(cache.is_dir(), egui::Button::new("Open folder"));
-                if open.clicked() {
-                    if let Err(e) = open_folder(&cache) {
-                        notices.push(Notice {
-                            text: format!("Could not open {}: {e}", cache.display()),
-                            ok: false,
-                        });
-                    }
+                if open.clicked()
+                    && let Err(e) = open_folder(&cache)
+                {
+                    notices.push(Notice {
+                        text: format!("Could not open {}: {e}", cache.display()),
+                        ok: false,
+                    });
                 }
             });
         });
@@ -441,11 +441,11 @@ impl Tool for CarSpecsPage {
         if rescan {
             self.start_scan(&egui_ctx);
         }
-        if let Some(id) = picked_car {
-            if self.selected.as_deref() != Some(id.as_str()) {
-                self.selected = Some(id);
-                self.loaded = None;
-            }
+        if let Some(id) = picked_car
+            && self.selected.as_deref() != Some(id.as_str())
+        {
+            self.selected = Some(id);
+            self.loaded = None;
         }
         if let Some(id) = picked_compare {
             self.compare_id = Some(id);

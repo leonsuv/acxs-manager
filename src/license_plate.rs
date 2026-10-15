@@ -490,7 +490,7 @@ mod tests {
 
     fn count_pixels(w: u32, h: u32, buf: &[u8], color: Rgba) -> usize {
         assert_eq!(buf.len(), (w * h * 4) as usize);
-        buf.chunks_exact(4).filter(|px| *px == color).count()
+        buf.as_chunks::<4>().0.iter().filter(|px| **px == color).count()
     }
 
     #[test]

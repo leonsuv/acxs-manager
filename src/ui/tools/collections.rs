@@ -225,10 +225,10 @@ impl CollectionsPage {
         match action {
             Action::Select(name) => self.select(name),
             Action::Reload => {
-                if let Some(root) = self.root.clone() {
-                    if !self.busy {
-                        self.start_load(root, ctx);
-                    }
+                if let Some(root) = self.root.clone()
+                    && !self.busy
+                {
+                    self.start_load(root, ctx);
                 }
             }
             Action::Create(name) => {
@@ -302,10 +302,10 @@ impl Tool for CollectionsPage {
             widgets::empty_state(ui, "Set your Assetto Corsa folder on the Home page to use collections.");
             return;
         }
-        if !self.busy && self.loaded_root != self.root {
-            if let Some(root) = self.root.clone() {
-                self.start_load(root, ui.ctx());
-            }
+        if !self.busy && self.loaded_root != self.root
+            && let Some(root) = self.root.clone()
+        {
+            self.start_load(root, ui.ctx());
         }
 
         let busy = self.busy;
@@ -542,7 +542,7 @@ fn detail_panel(
         Err(error) => {
             ui.label(RichText::new(error.to_string()).color(WARN));
         }
-        Ok(hits) => picker_results(ui, store, &collection, catalog, hits, busy, actions),
+        Ok(hits) => picker_results(ui, store, collection, catalog, hits, busy, actions),
     }
 }
 

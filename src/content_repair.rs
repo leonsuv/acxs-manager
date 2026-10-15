@@ -153,14 +153,12 @@ pub fn check_car(car_dir: &Path) -> Vec<Issue> {
     }
 
     // The car model is any *.kn5 in the folder root.
-    if let Some(entries) = read_entries(car_dir, &mut issues) {
-        if !entries.iter().any(|p| p.is_file() && has_ext(p, "kn5")) {
-            issues.push(Issue::new(
-                Severity::Error,
-                car_dir,
-                "no car model (*.kn5) in the folder root",
-            ));
-        }
+    if let Some(entries) = read_entries(car_dir, &mut issues) && !entries.iter().any(|p| p.is_file() && has_ext(p, "kn5")) {
+        issues.push(Issue::new(
+            Severity::Error,
+            car_dir,
+            "no car model (*.kn5) in the folder root",
+        ));
     }
 
     let skins = car_dir.join("skins");
@@ -266,16 +264,14 @@ pub fn check_track(track_dir: &Path) -> Vec<Issue> {
                 &dir,
                 format!("layout folder {name} has no ui/{name} folder, so it is not listed as a layout"),
             )),
-            Some(true) => {
-                if probe(&ui_layout.join("ui_track.json"), false, &mut issues) == Some(false) {
-                    issues.push(Issue::new(
-                        Severity::Info,
-                        &dir,
-                        format!("layout folder {name} has no ui/{name}/ui_track.json, so it is not listed as a layout"),
-                    ));
-                }
+            Some(true) if probe(&ui_layout.join("ui_track.json"), false, &mut issues) == Some(false) => {
+                issues.push(Issue::new(
+                    Severity::Info,
+                    &dir,
+                    format!("layout folder {name} has no ui/{name}/ui_track.json, so it is not listed as a layout"),
+                ));
             }
-            None => {}
+            _ => {}
         }
     }
 

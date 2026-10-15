@@ -547,7 +547,7 @@ mod tests {
         assert_eq!(info.kind, ContentKind::Track);
         assert_eq!(info.id, "trk");
         assert_eq!(info.file_count, 3);
-        assert_eq!(info.total_size, 2 + 0 + 2);
+        assert_eq!(info.total_size, 2 + 2);
 
         let report = install_archive(&ac, &zip, false).unwrap();
         assert_eq!(report.installed_to, ac.join("content/tracks/trk"));

@@ -341,12 +341,11 @@ impl RtxConfig {
                 value: current,
                 text: current_text,
             } = line
+                && existing.as_str() == key
             {
-                if existing.as_str() == key {
-                    *current = value.clone();
-                    *current_text = text.clone();
-                    found = true;
-                }
+                *current = value.clone();
+                *current_text = text.clone();
+                found = true;
             }
         }
         if !found {

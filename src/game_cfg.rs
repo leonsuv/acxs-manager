@@ -111,10 +111,8 @@ pub fn validate_video(settings: &VideoSettings) -> Vec<String> {
     if settings.width.is_some() != settings.height.is_some() {
         errors.push("width and height must be set together".to_string());
     }
-    if let Some(fps) = settings.fps_cap {
-        if fps <= 0 {
-            errors.push(format!("fps cap must be positive, got {fps} (use None for no cap)"));
-        }
+    if let Some(fps) = settings.fps_cap && fps <= 0 {
+        errors.push(format!("fps cap must be positive, got {fps} (use None for no cap)"));
     }
     if !AA_SAMPLES.contains(&settings.aa_samples) {
         errors.push(format!("anti-aliasing samples must be one of {AA_SAMPLES:?}, got {}", settings.aa_samples));
@@ -355,7 +353,7 @@ fn in_range(value: Option<u32>, range: RangeInclusive<u32>, default: u32) -> u32
 /// `FPS_CAP_MS` to frames per second. `None` when there is no cap.
 fn fps_from_ms(ms: f64) -> Option<i32> {
     let ms = ms.abs();
-    if !(ms >= 0.1) {
+    if ms.is_nan() || ms < 0.1 {
         return None;
     }
     let fps = (1000.0 / ms).round();

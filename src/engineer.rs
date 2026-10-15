@@ -223,7 +223,7 @@ pub fn validate(samples: &[Sample], limits: &EngineerLimits) -> Result<(), Engin
             ("z", s.z.is_finite()),
         ];
         if let Some((field, _)) = finite.iter().find(|(_, ok)| !ok) {
-            return Err(EngineerError::NonFinite { index, field: *field });
+            return Err(EngineerError::NonFinite { index, field });
         }
         if s.time_s < previous_time {
             return Err(EngineerError::TimeOutOfOrder { index });
@@ -422,20 +422,18 @@ fn check_brake_stab(samples: &[Sample], limits: &EngineerLimits, out: &mut Vec<A
     for s in samples {
         if s.brake < BRAKE_RELEASED {
             released_at = Some(s.time_s);
-        } else if s.brake >= limits.lockup_threshold {
-            if let Some(t0) = released_at.take() {
-                let elapsed = s.time_s - t0;
-                if elapsed <= STAB_WINDOW_S {
-                    out.push(Advice::Message {
-                        severity: Severity::Warn,
-                        text: format!(
-                            "Brake stabbed to {:.0}% in {elapsed:.2} s: lock-up risk, \
-                             ramp the pedal in",
-                            s.brake * 100.0
-                        ),
-                        t_s: s.time_s,
-                    });
-                }
+        } else if s.brake >= limits.lockup_threshold && let Some(t0) = released_at.take() {
+            let elapsed = s.time_s - t0;
+            if elapsed <= STAB_WINDOW_S {
+                out.push(Advice::Message {
+                    severity: Severity::Warn,
+                    text: format!(
+                        "Brake stabbed to {:.0}% in {elapsed:.2} s: lock-up risk, \
+                         ramp the pedal in",
+                        s.brake * 100.0
+                    ),
+                    t_s: s.time_s,
+                });
             }
         }
     }

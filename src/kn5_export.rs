@@ -177,7 +177,7 @@ fn load_triangles_capped(
             .iter()
             .map(|p| transform(&mesh.transform, p, true))
             .collect();
-        for tri in mesh.indices.chunks_exact(3) {
+        for tri in mesh.indices.as_chunks::<3>().0 {
             out.push(crate::ortho::Triangle {
                 a: world[usize::from(tri[0])],
                 b: world[usize::from(tri[1])],
@@ -521,10 +521,7 @@ fn read_body<R: Read + Seek>(r: &mut Reader<R>) -> Step<Model> {
 
     // Each frame is (world matrix of the owning node, children still to read).
     let mut pending: Vec<(Mat4, usize)> = vec![(root_world, root_children)];
-    loop {
-        let Some(frame) = pending.last_mut() else {
-            break;
-        };
+    while let Some(frame) = pending.last_mut() {
         if frame.1 == 0 {
             pending.pop();
             continue;
@@ -867,7 +864,7 @@ fn write_obj<W: Write>(
             let name = material.map_or_else(|| "Default".to_string(), |m| obj_name(&m.name));
             writeln!(w, "usemtl {name}")?;
         }
-        for tri in mesh.indices.chunks_exact(3) {
+        for tri in mesh.indices.as_chunks::<3>().0 {
             let a = first + usize::from(tri[0]);
             let b = first + usize::from(tri[1]);
             let c = first + usize::from(tri[2]);

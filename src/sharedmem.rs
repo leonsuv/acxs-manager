@@ -701,7 +701,7 @@ impl<'a> Reader<'a> {
     fn read_wstr<const N: usize>(&mut self) -> Result<String, SharedMemError> {
         let raw = self.take(2 * N)?;
         let units: Vec<u16> = raw
-            .chunks_exact(2)
+            .as_chunks::<2>().0.iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .take_while(|&u| u != 0)
             .collect();

@@ -293,16 +293,16 @@ impl CspConfig {
                         let _ = tx.send(Msg::Files { root: root_buf, files });
                     });
                 }
-                if let Some(path) = self.data.selected.clone() {
-                    if self.data.settings_for.as_deref() != Some(path.as_path()) {
-                        self.data.settings_for = Some(path.clone());
-                        self.data.settings = None;
-                        let root_buf = root.to_path_buf();
-                        self.spawn(egui_ctx, move |tx| {
-                            let result = csp_config::read_settings(&path).map_err(|e| e.to_string());
-                            let _ = tx.send(Msg::Settings { root: root_buf, path, result });
-                        });
-                    }
+                if let Some(path) = self.data.selected.clone()
+                    && self.data.settings_for.as_deref() != Some(path.as_path())
+                {
+                    self.data.settings_for = Some(path.clone());
+                    self.data.settings = None;
+                    let root_buf = root.to_path_buf();
+                    self.spawn(egui_ctx, move |tx| {
+                        let result = csp_config::read_settings(&path).map_err(|e| e.to_string());
+                        let _ = tx.send(Msg::Settings { root: root_buf, path, result });
+                    });
                 }
             }
             Tab::Ffb => {
@@ -691,10 +691,10 @@ impl CspConfig {
         if reload {
             self.reload(Tab::Ffb);
         }
-        if save {
-            if let Some(t) = self.data.ffb.clone() {
-                self.save_ffb(egui_ctx, root, t);
-            }
+        if save
+            && let Some(t) = self.data.ffb.clone()
+        {
+            self.save_ffb(egui_ctx, root, t);
         }
         if compare {
             self.start_diff(egui_ctx, root, Tab::Ffb);
@@ -834,10 +834,10 @@ impl CspConfig {
         if reload {
             self.reload(Tab::Gamepad);
         }
-        if save {
-            if let Some(s) = self.data.gamepad.clone() {
-                self.save_gamepad(egui_ctx, root, s);
-            }
+        if save
+            && let Some(s) = self.data.gamepad.clone()
+        {
+            self.save_gamepad(egui_ctx, root, s);
         }
     }
 
@@ -906,10 +906,10 @@ impl CspConfig {
             }
             let car = self.data.class_car.trim().to_string();
             let ready = !busy && !car.is_empty() && year.is_some();
-            if ui.add_enabled(ready, egui::Button::new("Set year")).clicked() {
-                if let Some(year) = year {
-                    write = Some(ClassEdit::SetYear { car, year });
-                }
+            if ui.add_enabled(ready, egui::Button::new("Set year")).clicked()
+                && let Some(year) = year
+            {
+                write = Some(ClassEdit::SetYear { car, year });
             }
         });
         ui.add_space(8.0);

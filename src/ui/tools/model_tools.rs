@@ -250,29 +250,29 @@ impl ModelTools {
                     has_file && !self.fbx_busy,
                     egui::Button::new("Export FBX"),
                 );
-                if fbx.clicked() {
-                    if let Some(kn5_file) = self.kn5_path.clone() {
-                        let stem = default_stem(&kn5_file);
-                        if let Some(fbx_file) = rfd::FileDialog::new()
-                            .add_filter("fbx", &["fbx"])
-                            .set_file_name(format!("{stem}.fbx"))
-                            .save_file()
-                        {
-                            self.fbx_busy = true;
-                            self.spawn(ui.ctx(), move || {
-                                let result = export_fbx(&kn5_file, &fbx_file);
-                                Msg::FbxExported {
-                                    path: fbx_file,
-                                    result,
-                                }
-                            });
-                        }
+                if fbx.clicked()
+                    && let Some(kn5_file) = self.kn5_path.clone()
+                {
+                    let stem = default_stem(&kn5_file);
+                    if let Some(fbx_file) = rfd::FileDialog::new()
+                        .add_filter("fbx", &["fbx"])
+                        .set_file_name(format!("{stem}.fbx"))
+                        .save_file()
+                    {
+                        self.fbx_busy = true;
+                        self.spawn(ui.ctx(), move || {
+                            let result = export_fbx(&kn5_file, &fbx_file);
+                            Msg::FbxExported {
+                                path: fbx_file,
+                                result,
+                            }
+                        });
                     }
                 }
 
                 let import = ui.add_enabled(!self.obj_busy, egui::Button::new("Import OBJ"));
-                if import.clicked() {
-                    if let Some(obj_file) = rfd::FileDialog::new()
+                if import.clicked()
+                    && let Some(obj_file) = rfd::FileDialog::new()
                         .add_filter("obj", &["obj"])
                         .pick_file()
                     {
@@ -293,20 +293,19 @@ impl ModelTools {
                             });
                         }
                     }
-                }
 
                 let ao = ui.add_enabled(has_file && !self.ao_busy, egui::Button::new("Bake AO"));
-                if ao.clicked() {
-                    if let Some(kn5_file) = self.kn5_path.clone() {
-                        self.ao_busy = true;
-                        self.spawn(ui.ctx(), move || {
-                            let result = bake_ao(&kn5_file);
-                            Msg::AoBaked {
-                                kn5: kn5_file,
-                                result,
-                            }
-                        });
-                    }
+                if ao.clicked()
+                    && let Some(kn5_file) = self.kn5_path.clone()
+                {
+                    self.ao_busy = true;
+                    self.spawn(ui.ctx(), move || {
+                        let result = bake_ao(&kn5_file);
+                        Msg::AoBaked {
+                            kn5: kn5_file,
+                            result,
+                        }
+                    });
                 }
 
                 if self.fbx_busy || self.obj_busy || self.ao_busy {
@@ -331,14 +330,13 @@ impl ModelTools {
         widgets::section_title(ui, "KN5 MODEL");
         theme::card().show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Choose .kn5").clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
+                if ui.button("Choose .kn5").clicked()
+                    && let Some(path) = rfd::FileDialog::new()
                         .add_filter("kn5", &["kn5"])
                         .pick_file()
                     {
                         self.kn5_path = Some(path);
                     }
-                }
                 let label = self
                     .kn5_path
                     .as_deref()
@@ -355,39 +353,39 @@ impl ModelTools {
                     has_file && !self.inspect_busy,
                     widgets::primary_button("Inspect"),
                 );
-                if inspect.clicked() {
-                    if let Some(path) = self.kn5_path.clone() {
-                        self.inspect_busy = true;
-                        self.spawn(ui.ctx(), move || {
-                            let result = kn5::inspect(&path).map_err(|e| e.to_string());
-                            Msg::Inspected { path, result }
-                        });
-                    }
+                if inspect.clicked()
+                    && let Some(path) = self.kn5_path.clone()
+                {
+                    self.inspect_busy = true;
+                    self.spawn(ui.ctx(), move || {
+                        let result = kn5::inspect(&path).map_err(|e| e.to_string());
+                        Msg::Inspected { path, result }
+                    });
                 }
 
                 let export = ui.add_enabled(
                     has_file && !self.export_busy,
                     egui::Button::new("Export OBJ"),
                 );
-                if export.clicked() {
-                    if let Some(kn5_file) = self.kn5_path.clone() {
-                        let stem = kn5_file
-                            .file_stem()
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| "model".to_string());
-                        if let Some(obj) = rfd::FileDialog::new()
-                            .add_filter("obj", &["obj"])
-                            .set_file_name(format!("{stem}.obj"))
-                            .save_file()
-                        {
-                            self.export_busy = true;
-                            self.spawn(ui.ctx(), move || {
-                                // export_obj refuses to overwrite an existing file.
-                                let result = kn5_export::export_obj(&kn5_file, &obj, None)
-                                    .map_err(|e| e.to_string());
-                                Msg::Exported { obj, result }
-                            });
-                        }
+                if export.clicked()
+                    && let Some(kn5_file) = self.kn5_path.clone()
+                {
+                    let stem = kn5_file
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "model".to_string());
+                    if let Some(obj) = rfd::FileDialog::new()
+                        .add_filter("obj", &["obj"])
+                        .set_file_name(format!("{stem}.obj"))
+                        .save_file()
+                    {
+                        self.export_busy = true;
+                        self.spawn(ui.ctx(), move || {
+                            // export_obj refuses to overwrite an existing file.
+                            let result = kn5_export::export_obj(&kn5_file, &obj, None)
+                                .map_err(|e| e.to_string());
+                            Msg::Exported { obj, result }
+                        });
                     }
                 }
 
@@ -395,20 +393,20 @@ impl ModelTools {
                     has_file && !self.render_busy,
                     egui::Button::new("Render preview"),
                 );
-                if render.clicked() {
-                    if let Some(kn5_file) = self.kn5_path.clone() {
-                        let stem = default_stem(&kn5_file);
-                        if let Some(png) = rfd::FileDialog::new()
-                            .add_filter("png", &["png"])
-                            .set_file_name(format!("{stem}.png"))
-                            .save_file()
-                        {
-                            self.render_busy = true;
-                            self.spawn(ui.ctx(), move || {
-                                let result = render_preview(&kn5_file, &png);
-                                Msg::Rendered { path: png, result }
-                            });
-                        }
+                if render.clicked()
+                    && let Some(kn5_file) = self.kn5_path.clone()
+                {
+                    let stem = default_stem(&kn5_file);
+                    if let Some(png) = rfd::FileDialog::new()
+                        .add_filter("png", &["png"])
+                        .set_file_name(format!("{stem}.png"))
+                        .save_file()
+                    {
+                        self.render_busy = true;
+                        self.spawn(ui.ctx(), move || {
+                            let result = render_preview(&kn5_file, &png);
+                            Msg::Rendered { path: png, result }
+                        });
                     }
                 }
 
@@ -435,8 +433,8 @@ impl ModelTools {
                     !self.acd_busy,
                     egui::Button::new("Choose .acd file"),
                 );
-                if pick.clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
+                if pick.clicked()
+                    && let Some(path) = rfd::FileDialog::new()
                         .add_filter("acd", &["acd"])
                         .pick_file()
                     {
@@ -446,7 +444,6 @@ impl ModelTools {
                             Msg::Listed { path, result }
                         });
                     }
-                }
                 if self.acd_busy {
                     ui.add(egui::Spinner::new());
                     ui.label(RichText::new("Listing...").color(theme::MUTED));

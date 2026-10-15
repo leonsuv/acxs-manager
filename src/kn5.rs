@@ -374,7 +374,7 @@ fn read_node_header<R: Read + Seek>(r: &mut Reader<R>) -> Step<(String, usize)> 
             )));
         }
     }
-    Ok((name, children as usize))
+    Ok((name, children))
 }
 
 #[cfg(test)]

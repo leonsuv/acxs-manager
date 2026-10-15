@@ -349,10 +349,10 @@ impl ModsPage {
             ui.add_space(8.0);
         }
         ui.horizontal(|ui| {
-            if ui.add_enabled(!locked, widgets::primary_button("Install app...")).clicked() {
-                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                    action = Some(Action::InstallApp(folder));
-                }
+            if ui.add_enabled(!locked, widgets::primary_button("Install app...")).clicked()
+                && let Some(folder) = rfd::FileDialog::new().pick_folder()
+            {
+                action = Some(Action::InstallApp(folder));
             }
             ui.label(
                 RichText::new("Copies a folder with a manifest.ini into apps/lua.")
@@ -416,9 +416,7 @@ impl ModsPage {
             ui.label(RichText::new(format!("Could not read RARE settings: {err}")).color(theme::DANGER));
             return None;
         }
-        let Some(edit) = rare_edit.as_mut() else {
-            return None;
-        };
+        let edit = rare_edit.as_mut()?;
 
         let problems = rare::validate(edit);
         let dirty = rare_disk.as_ref() != Some(&*edit);
@@ -445,10 +443,10 @@ impl ModsPage {
                     .color(theme::MUTED),
             );
         });
-        if revert {
-            if let Some(disk) = rare_disk.as_ref() {
-                *edit = disk.clone();
-            }
+        if revert
+            && let Some(disk) = rare_disk.as_ref()
+        {
+            *edit = disk.clone();
         }
         action
     }

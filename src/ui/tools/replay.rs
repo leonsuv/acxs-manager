@@ -27,7 +27,7 @@ pub fn tool() -> Box<dyn Tool> {
 enum Msg {
     Parsed {
         path: PathBuf,
-        result: Result<ReplaySamples, String>,
+        result: Result<Box<ReplaySamples>, String>,
     },
     Exported(Result<PathBuf, String>),
 }
@@ -66,7 +66,7 @@ impl ReplayViewer {
         self.busy = true;
         let tx = self.tx.clone();
         thread::spawn(move || {
-            let result = read_replay_samples(&path).map_err(|e| e.to_string());
+            let result = read_replay_samples(&path).map(Box::new).map_err(|e| e.to_string());
             let _ = tx.send(Msg::Parsed { path, result });
             ctx.request_repaint();
         });
@@ -136,12 +136,12 @@ impl Tool for ReplayViewer {
         }
 
         // Move the playhead by the frame time while playing, and keep repainting.
-        if let Some(loaded) = &mut self.loaded {
-            if loaded.player.is_playing() {
-                let dt = f64::from(ui.input(|i| i.stable_dt));
-                loaded.player.advance(dt);
-                ui.ctx().request_repaint();
-            }
+        if let Some(loaded) = &mut self.loaded
+            && loaded.player.is_playing()
+        {
+            let dt = f64::from(ui.input(|i| i.stable_dt));
+            loaded.player.advance(dt);
+            ui.ctx().request_repaint();
         }
 
         widgets::heading(

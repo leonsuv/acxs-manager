@@ -696,7 +696,7 @@ mod tests {
         seed(&ac);
         write(&ext.join("a.ini"), "orig");
 
-        let snap = create_snapshot(&ac, &[ext.clone()]).unwrap();
+        let snap = create_snapshot(&ac, std::slice::from_ref(&ext)).unwrap();
         assert_eq!(snap.files, 4);
         assert!(read(&snap.path.join(MANIFEST)).contains("\tabs:"));
 

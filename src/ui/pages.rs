@@ -66,10 +66,10 @@ pub fn home(app: &mut App, ui: &mut egui::Ui) {
                         .desired_width(field_width)
                         .hint_text("Not set"),
                 );
-                if ui.button("Browse").clicked() {
-                    if let Some(path) = app.pick_folder() {
-                        app.ac_input = path.display().to_string();
-                    }
+                if ui.button("Browse").clicked()
+                    && let Some(path) = app.pick_folder()
+                {
+                    app.ac_input = path.display().to_string();
                 }
             });
             ui.add_space(8.0);
@@ -81,10 +81,10 @@ pub fn home(app: &mut App, ui: &mut egui::Ui) {
                         .desired_width(field_width)
                         .hint_text("Default: the folder the program runs from"),
                 );
-                if ui.button("Browse").clicked() {
-                    if let Some(path) = app.pick_folder() {
-                        app.library_input = path.display().to_string();
-                    }
+                if ui.button("Browse").clicked()
+                    && let Some(path) = app.pick_folder()
+                {
+                    app.library_input = path.display().to_string();
                 }
             });
             ui.add_space(8.0);

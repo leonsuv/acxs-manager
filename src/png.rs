@@ -422,8 +422,8 @@ impl Huffman {
         // Reject over-subscribed codes. Incomplete codes are accepted, and any
         // unused code fails when it is decoded.
         let mut left = 1i32;
-        for len in 1..16 {
-            left = (left << 1) - count[len];
+        for &c in &count[1..16] {
+            left = (left << 1) - c;
             if left < 0 {
                 return Err(PngError::Deflate("over-subscribed Huffman code"));
             }

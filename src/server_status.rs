@@ -154,10 +154,8 @@ fn parse_players(json: &str) -> Result<Vec<String>, StatusError> {
         if !connected {
             continue;
         }
-        if let Some(name) = opt_string(car, "DriverName")? {
-            if !name.is_empty() {
-                players.push(name);
-            }
+        if let Some(name) = opt_string(car, "DriverName")? && !name.is_empty() {
+            players.push(name);
         }
     }
     Ok(players)
@@ -396,10 +394,8 @@ fn parse_head(head: &[u8]) -> Result<Framing, StatusError> {
                     framing.unsupported_encoding = true;
                 }
             }
-            "content-encoding" => {
-                if !value.eq_ignore_ascii_case("identity") {
-                    framing.unsupported_encoding = true;
-                }
+            "content-encoding" if !value.eq_ignore_ascii_case("identity") => {
+                framing.unsupported_encoding = true;
             }
             _ => {}
         }

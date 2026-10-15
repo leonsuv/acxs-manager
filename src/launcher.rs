@@ -188,13 +188,11 @@ pub fn spawn(spec: &LaunchSpec) -> io::Result<Child> {
             format!("launcher program not found: {}", spec.program.display()),
         ));
     }
-    if let Some(dir) = &spec.working_dir {
-        if !dir.is_dir() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("launcher working folder not found: {}", dir.display()),
-            ));
-        }
+    if let Some(dir) = &spec.working_dir && !dir.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("launcher working folder not found: {}", dir.display()),
+        ));
     }
 
     let mut command = Command::new(&spec.program);

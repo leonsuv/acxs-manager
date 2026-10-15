@@ -225,10 +225,8 @@ pub fn preset_techniques(path: &Path) -> io::Result<Vec<String>> {
         if line.is_empty() || line.starts_with(';') || line.starts_with('#') || line.starts_with('/') {
             continue;
         }
-        if let Some((key, value)) = line.split_once('=') {
-            if key.trim().eq_ignore_ascii_case("Techniques") {
-                return Ok(split_list(value.trim()));
-            }
+        if let Some((key, value)) = line.split_once('=') && key.trim().eq_ignore_ascii_case("Techniques") {
+            return Ok(split_list(value.trim()));
         }
     }
     Ok(Vec::new())

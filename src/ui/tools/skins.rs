@@ -441,10 +441,10 @@ impl SkinsPage {
             ui.label(RichText::new(mask_name).color(MUTED));
         });
         ui.horizontal(|ui| {
-            if ui.button("Choose mask").clicked() {
-                if let Some(path) = rfd::FileDialog::new().add_filter("PNG", &["png"]).pick_file() {
-                    self.recolour.mask = Some(path);
-                }
+            if ui.button("Choose mask").clicked()
+                && let Some(path) = rfd::FileDialog::new().add_filter("PNG", &["png"]).pick_file()
+            {
+                self.recolour.mask = Some(path);
             }
             if self.recolour.mask.is_some() && ui.button("Clear mask").clicked() {
                 self.recolour.mask = None;
@@ -487,10 +487,10 @@ impl SkinsPage {
                             .desired_width(field_width)
                             .hint_text("Skin folder"),
                     );
-                    if ui.button("Browse").clicked() {
-                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                            self.source_input = path.display().to_string();
-                        }
+                    if ui.button("Browse").clicked()
+                        && let Some(path) = rfd::FileDialog::new().pick_folder()
+                    {
+                        self.source_input = path.display().to_string();
                     }
                     let ready = self
                         .checked
@@ -499,16 +499,16 @@ impl SkinsPage {
                     let can_import =
                         ready && !self.importing && !game_running && self.selected_car.is_some();
                     let label = if self.importing { "Importing..." } else { "Import" };
-                    if ui.add_enabled(can_import, widgets::primary_button(label)).clicked() {
-                        if let Some(car) = self.selected_car.clone() {
-                            self.start_import(
-                                egui_ctx,
-                                root.to_path_buf(),
-                                car,
-                                PathBuf::from(&source),
-                                game_running,
-                            );
-                        }
+                    if ui.add_enabled(can_import, widgets::primary_button(label)).clicked()
+                        && let Some(car) = self.selected_car.clone()
+                    {
+                        self.start_import(
+                            egui_ctx,
+                            root.to_path_buf(),
+                            car,
+                            PathBuf::from(&source),
+                            game_running,
+                        );
                     }
                 });
 
@@ -613,10 +613,10 @@ impl Tool for SkinsPage {
         if self.root.as_ref() != Some(&root) {
             self.spawn_cars(&egui_ctx, root.clone());
         }
-        if let Some(car) = self.selected_car.clone() {
-            if self.skins_car.as_deref() != Some(car.as_str()) {
-                self.spawn_skins(&egui_ctx, root.clone(), car);
-            }
+        if let Some(car) = self.selected_car.clone()
+            && self.skins_car.as_deref() != Some(car.as_str())
+        {
+            self.spawn_skins(&egui_ctx, root.clone(), car);
         }
         let source = self.source_input.trim().to_string();
         if !source.is_empty()

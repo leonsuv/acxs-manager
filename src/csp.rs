@@ -322,11 +322,9 @@ pub fn uninstall_patch(ac_root: &Path, game_running: bool) -> Result<Option<Path
 fn install_footprint(patch: &LightsPatch) -> (u64, u64) {
     let mut count = 0u64;
     let mut bytes = 0u64;
-    if let Ok(meta) = fs::metadata(&patch.dll) {
-        if meta.is_file() {
-            count += 1;
-            bytes += meta.len();
-        }
+    if let Ok(meta) = fs::metadata(&patch.dll) && meta.is_file() {
+        count += 1;
+        bytes += meta.len();
     }
     let mut pending = vec![patch.extension.clone()];
     while let Some(dir) = pending.pop() {
@@ -339,11 +337,9 @@ fn install_footprint(patch: &LightsPatch) -> (u64, u64) {
             };
             if kind.is_dir() {
                 pending.push(entry.path());
-            } else if kind.is_file() {
-                if let Ok(meta) = entry.metadata() {
-                    count += 1;
-                    bytes += meta.len();
-                }
+            } else if kind.is_file() && let Ok(meta) = entry.metadata() {
+                count += 1;
+                bytes += meta.len();
             }
         }
     }
@@ -435,7 +431,7 @@ mod tests {
         let root = temp("discover");
         fake_patch(&root, "lights-patch-v0.3.0-preview999", b"not-real");
         fake_patch(&root, "lights-patch-v0.2.5", b"also-fake");
-        let found = discover_patches(&[root.clone()]);
+        let found = discover_patches(std::slice::from_ref(&root));
         assert_eq!(found.len(), 2);
         assert_eq!(found[0].family, "0.2");
         assert!(found.iter().all(|p| !p.known));

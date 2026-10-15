@@ -120,11 +120,9 @@ impl Ini {
         };
         let lines = &mut self.sections[index].lines;
         for line in lines.iter_mut() {
-            if let Line::Entry { key: k, value: v } = line {
-                if k.eq_ignore_ascii_case(key) {
-                    *v = value;
-                    return;
-                }
+            if let Line::Entry { key: k, value: v } = line && k.eq_ignore_ascii_case(key) {
+                *v = value;
+                return;
             }
         }
         // Insert after the last entry of the section so new keys stay grouped.

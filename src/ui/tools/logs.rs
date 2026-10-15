@@ -108,14 +108,13 @@ impl Tool for LogsTool {
                         .desired_width(field_width)
                         .hint_text("Choose the log file"),
                 );
-                if ui.button("Browse").clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
+                if ui.button("Browse").clicked()
+                    && let Some(path) = rfd::FileDialog::new()
                         .add_filter("Log files", &["txt"])
                         .pick_file()
                     {
                         self.path_input = path.display().to_string();
                     }
-                }
                 let can_read = !busy && !self.path_input.trim().is_empty();
                 if ui.add_enabled(can_read, widgets::primary_button("Read")).clicked() {
                     start_read = true;
@@ -270,10 +269,10 @@ impl LogsTool {
             });
         });
 
-        if start_bundle {
-            if let (Some(ac_root), Some(out_dir)) = (ac_root, pick_bundle_dir()) {
-                self.start_bundle(ui.ctx(), ac_root.to_path_buf(), out_dir);
-            }
+        if start_bundle
+            && let (Some(ac_root), Some(out_dir)) = (ac_root, pick_bundle_dir())
+        {
+            self.start_bundle(ui.ctx(), ac_root.to_path_buf(), out_dir);
         }
     }
 

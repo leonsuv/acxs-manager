@@ -107,14 +107,14 @@ pub fn recolor_png(
                 });
             }
             let weights: Vec<f32> = mask_pixels
-                .chunks_exact(4)
+                .as_chunks::<4>().0.iter()
                 .map(|p| dot(LUMA, [f32::from(p[0]), f32::from(p[1]), f32::from(p[2])]) / 255.0)
                 .collect();
             Some(weights)
         }
     };
 
-    for (index, px) in pixels.chunks_exact_mut(4).enumerate() {
+    for (index, px) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let weight = weights.as_ref().map_or(1.0, |w| w[index]);
         let amount = strength * weight;
         if amount > 0.0 {
@@ -221,7 +221,7 @@ mod tests {
 
     fn decode(bytes: &[u8]) -> Vec<[u8; 4]> {
         let (_, _, rgba) = png::decode_rgba(bytes).unwrap();
-        rgba.chunks_exact(4)
+        rgba.as_chunks::<4>().0.iter()
             .map(|p| [p[0], p[1], p[2], p[3]])
             .collect()
     }

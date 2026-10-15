@@ -354,7 +354,7 @@ fn power_curve_name(engine: &str) -> Result<String, TuneError> {
     if name.is_empty() {
         return Ok(DEFAULT_POWER_CURVE.to_string());
     }
-    if name == ".." || name.contains(|c: char| c == '/' || c == '\\') {
+    if name == ".." || name.contains(['/', '\\']) {
         return Err(TuneError::BadValue {
             section: "HEADER".to_string(),
             key: "POWER_CURVE".to_string(),

@@ -409,12 +409,14 @@ mod tests {
     #[test]
     fn round_trip_on_temp_dir() {
         let root = temp_root("roundtrip");
-        let mut t = FfbTweaks::default();
-        t.range_compression = 2.5;
-        t.clean_ffb = false;
-        t.soft_lock_padding = 12.0;
-        t.skip_damping_frames = 2.0;
-        t.real_feel_enabled = true;
+        let mut t = FfbTweaks {
+            range_compression: 2.5,
+            clean_ffb: false,
+            soft_lock_padding: 12.0,
+            skip_damping_frames: 2.0,
+            real_feel_enabled: true,
+            ..FfbTweaks::default()
+        };
         write(&root, &t).unwrap();
         assert_eq!(read(&root).unwrap(), t);
 
@@ -467,8 +469,10 @@ mod tests {
     #[test]
     fn non_finite_values_are_rejected() {
         let root = temp_root("nan");
-        let mut t = FfbTweaks::default();
-        t.dirt_vibration = f64::NAN;
+        let t = FfbTweaks {
+            dirt_vibration: f64::NAN,
+            ..FfbTweaks::default()
+        };
         let err = write(&root, &t).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(!config_path(&root).exists());
@@ -481,11 +485,13 @@ mod tests {
 
     #[test]
     fn validate_flags_out_of_range() {
-        let mut t = FfbTweaks::default();
-        t.range_compression = 5.0;
-        t.skip_damping_frames = 9.0;
-        t.adaptive_ffb = 4.0;
-        t.soft_lock_damper = f64::INFINITY;
+        let t = FfbTweaks {
+            range_compression: 5.0,
+            skip_damping_frames: 9.0,
+            adaptive_ffb: 4.0,
+            soft_lock_damper: f64::INFINITY,
+            ..FfbTweaks::default()
+        };
         let problems = validate(&t);
         assert_eq!(problems.len(), 4);
         assert!(problems[0].contains("RANGE_COMPRESSION"));

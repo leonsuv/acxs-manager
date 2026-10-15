@@ -285,10 +285,8 @@ impl Track {
         let heading = chord_headings(&t, &x, &z);
         let mut yaw_raw = vec![f64::NAN; n];
         for k in 1..n {
-            if let (Some(prev), Some(cur)) = (heading[k - 1], heading[k]) {
-                if dt[k] > 0.0 {
-                    yaw_raw[k] = wrap_angle(cur - prev) / dt[k];
-                }
+            if let (Some(prev), Some(cur)) = (heading[k - 1], heading[k]) && dt[k] > 0.0 {
+                yaw_raw[k] = wrap_angle(cur - prev) / dt[k];
             }
         }
         let yaw = centred_mean(&t, &yaw_raw, SMOOTH_HALF_S);
@@ -393,10 +391,8 @@ impl Track {
                 continue;
             }
             stats.corner_samples += 1;
-            if let Some((d_yaw, _)) = self.changes(k) {
-                if d_yaw.abs() >= YAW_CHANGE {
-                    stats.sharp += 1;
-                }
+            if let Some((d_yaw, _)) = self.changes(k) && d_yaw.abs() >= YAW_CHANGE {
+                stats.sharp += 1;
             }
         }
         stats

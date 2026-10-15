@@ -98,7 +98,7 @@ pub fn scan(ac_root: &Path) -> io::Result<Vec<ProxyFile>> {
         })
         .collect();
 
-    found.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
+    found.sort_by_key(|a| a.name.to_ascii_lowercase());
     Ok(found)
 }
 

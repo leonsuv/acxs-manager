@@ -91,11 +91,11 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::apply(&cc.egui_ctx);
         let mut settings = Settings::load(&settings::settings_path());
-        if settings.ac_root_path().is_none() {
-            if let Some(found) = settings::detect_ac_root() {
-                settings.ac_root = found.display().to_string();
-                let _ = settings.save(&settings::settings_path());
-            }
+        if settings.ac_root_path().is_none()
+            && let Some(found) = settings::detect_ac_root()
+        {
+            settings.ac_root = found.display().to_string();
+            let _ = settings.save(&settings::settings_path());
         }
         let (tx, rx) = mpsc::channel();
         let mut app = App {

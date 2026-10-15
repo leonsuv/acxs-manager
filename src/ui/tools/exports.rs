@@ -341,10 +341,10 @@ impl Tool for ExportsPage {
         if reload_clicked {
             self.root = None;
         }
-        if export_clicked {
-            if let Ok(query) = &parsed {
-                self.export(ui.ctx(), query);
-            }
+        if export_clicked
+            && let Ok(query) = &parsed
+        {
+            self.export(ui.ctx(), query);
         }
     }
 }
@@ -357,7 +357,7 @@ fn matching_cars<'a>(cars: &'a [CarEntry], members: Option<&[&str]>, query: &Que
         None => cars.iter().collect(),
     };
     base.into_iter()
-        .filter(|car| query::matches(query, &CarRecord(*car)))
+        .filter(|car| query::matches(query, &CarRecord(car)))
         .collect()
 }
 
@@ -369,7 +369,7 @@ fn matching_tracks<'a>(tracks: &'a [TrackEntry], members: Option<&[&str]>, query
         None => tracks.iter().collect(),
     };
     base.into_iter()
-        .filter(|track| query::matches(query, &TrackRecord(*track)))
+        .filter(|track| query::matches(query, &TrackRecord(track)))
         .collect()
 }
 

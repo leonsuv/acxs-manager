@@ -510,49 +510,47 @@ fn build_term(pieces: &[Piece], pos: usize) -> Result<Query, QueryError> {
         .take_while(|p| p.kind == Kind::Bare && p.ch.is_ascii_alphabetic())
         .count();
 
-    if letters > 0 {
-        if let Some((op, len)) = operator_at(pieces, letters) {
-            let field: String = pieces[..letters]
-                .iter()
-                .map(|p| p.ch.to_ascii_lowercase())
-                .collect();
-            let op_text: String = pieces[letters..letters + len]
-                .iter()
-                .map(|p| p.ch)
-                .collect();
-            let value = &pieces[letters + len..];
+    if letters > 0 && let Some((op, len)) = operator_at(pieces, letters) {
+        let field: String = pieces[..letters]
+            .iter()
+            .map(|p| p.ch.to_ascii_lowercase())
+            .collect();
+        let op_text: String = pieces[letters..letters + len]
+            .iter()
+            .map(|p| p.ch)
+            .collect();
+        let value = &pieces[letters + len..];
 
-            // `field:` with nothing after it is an existence check. Comparisons need a number.
-            if value.is_empty() && op == FieldOp::Text {
-                return Ok(Query::Exists { field });
-            }
-            if value.is_empty() {
-                return Err(QueryError::new(
-                    format!("missing value after '{field}{op_text}'"),
-                    pos,
-                ));
-            }
-
-            return match op {
-                FieldOp::Text => Ok(Query::Text {
-                    field: Some(field),
-                    pattern: compile_pattern(value),
-                    exact: is_exact(value),
-                }),
-                FieldOp::Compare(op) => {
-                    let text: String = value.iter().map(|p| p.ch).collect();
-                    let value = text
-                        .trim()
-                        .parse::<f64>()
-                        .ok()
-                        .filter(|v| v.is_finite())
-                        .ok_or_else(|| {
-                            QueryError::new(format!("expected a number after '{field}{op_text}'"), pos)
-                        })?;
-                    Ok(Query::Compare { field, op, value })
-                }
-            };
+        // `field:` with nothing after it is an existence check. Comparisons need a number.
+        if value.is_empty() && op == FieldOp::Text {
+            return Ok(Query::Exists { field });
         }
+        if value.is_empty() {
+            return Err(QueryError::new(
+                format!("missing value after '{field}{op_text}'"),
+                pos,
+            ));
+        }
+
+        return match op {
+            FieldOp::Text => Ok(Query::Text {
+                field: Some(field),
+                pattern: compile_pattern(value),
+                exact: is_exact(value),
+            }),
+            FieldOp::Compare(op) => {
+                let text: String = value.iter().map(|p| p.ch).collect();
+                let value = text
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|v| v.is_finite())
+                    .ok_or_else(|| {
+                        QueryError::new(format!("expected a number after '{field}{op_text}'"), pos)
+                    })?;
+                Ok(Query::Compare { field, op, value })
+            }
+        };
     }
 
     Ok(Query::Text {

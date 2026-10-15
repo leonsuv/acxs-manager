@@ -274,12 +274,10 @@ impl LapTracker {
     /// Zero values are ignored, and the first frame only sets the baseline.
     fn observe(&mut self, frame: &[u8]) -> Result<(), ReplayError> {
         let current_lap = frame_u8(frame, FRAME_CURRENT_LAP)?;
-        if let Some(prev) = self.prev_lap {
-            if prev != current_lap {
-                let last = frame_u32(frame, FRAME_LAST_LAP_TIME)?;
-                if last != 0 {
-                    self.lap_times_ms.push(last);
-                }
+        if let Some(prev) = self.prev_lap && prev != current_lap {
+            let last = frame_u32(frame, FRAME_LAST_LAP_TIME)?;
+            if last != 0 {
+                self.lap_times_ms.push(last);
             }
         }
         self.prev_lap = Some(current_lap);
@@ -508,7 +506,7 @@ mod tests {
         b.extend_from_slice(&6u32.to_le_bytes()); // numFrames
         b.extend_from_slice(&1u32.to_le_bytes()); // numTrackObjects
         // Sun angles and one track object per frame: (2 + 2 + 12) * 6 bytes.
-        b.extend_from_slice(&vec![0u8; 16 * 6]);
+        b.extend_from_slice(&[0u8; 16 * 6]);
 
         // Car 0: no wings.
         push_str(&mut b, "ks_ferrari_488_gt3");
@@ -772,7 +770,7 @@ mod tests {
     fn error_display_and_from_io() {
         assert!(!ReplayError::Truncated.to_string().is_empty());
         assert!(ReplayError::UnsupportedVersion(7).to_string().contains('7'));
-        let e: ReplayError = io::Error::new(io::ErrorKind::Other, "boom").into();
+        let e: ReplayError = io::Error::other("boom").into();
         assert!(matches!(e, ReplayError::Io(_)));
     }
 }

@@ -232,7 +232,7 @@ fn find_entry<'r, 'a>(raw: &'r [RawEntry<'a>], name: &str) -> Result<&'r RawEntr
 fn decode(encoded: &[u8], key: &[u8]) -> Vec<u8> {
     // The key is never empty: it always holds eight decimal octets.
     encoded
-        .chunks_exact(4)
+        .as_chunks::<4>().0.iter()
         .enumerate()
         .map(|(i, c)| c[0].wrapping_sub(key[i % key.len()]))
         .collect()

@@ -272,11 +272,9 @@ impl ServerProcess {
 
     /// Moves a running child to `Exited` when it has finished.
     fn refresh(&mut self) {
-        if let Some(child) = self.child.as_mut() {
-            if let Ok(Some(status)) = child.try_wait() {
-                self.child = None;
-                self.status = Status::Exited(status.code());
-            }
+        if let Some(child) = self.child.as_mut() && let Ok(Some(status)) = child.try_wait() {
+            self.child = None;
+            self.status = Status::Exited(status.code());
         }
     }
 

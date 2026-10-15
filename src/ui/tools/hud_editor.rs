@@ -354,17 +354,17 @@ impl HudEditor {
             }
         }
 
-        if response.clicked() {
-            if let Some(pos) = response.interact_pointer_pos() {
-                self.selected = self
-                    .layout
-                    .widgets
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find(|(_, w)| to_screen(w.rect()).contains(pos))
-                    .map(|(i, _)| i);
-            }
+        if response.clicked()
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            self.selected = self
+                .layout
+                .widgets
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, w)| to_screen(w.rect()).contains(pos))
+                .map(|(i, _)| i);
         }
 
         ui.add_space(8.0);

@@ -211,7 +211,7 @@ fn check_mesh(mesh: &Kn5Mesh) -> Result<(), Kn5WriteError> {
             mesh.vertices.len()
         ));
     }
-    if mesh.indices.len() % 3 != 0 {
+    if !mesh.indices.len().is_multiple_of(3) {
         return invalid(format!(
             "{} indices, which is not a multiple of three",
             mesh.indices.len()
@@ -411,7 +411,7 @@ fn perpendicular(n: V3) -> V3 {
 /// direction perpendicular to their normal.
 fn tangents(vertices: &[Kn5Vertex], indices: &[u32]) -> Vec<V3> {
     let mut sums: Vec<V3> = vec![[0.0; 3]; vertices.len()];
-    for tri in indices.chunks_exact(3) {
+    for tri in indices.as_chunks::<3>().0 {
         let ids = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
         let [a, b, c] = ids.map(|i| &vertices[i]);
         let e1 = sub(b.position, a.position);

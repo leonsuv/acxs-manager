@@ -155,7 +155,7 @@ fn validate(mesh: &FbxMesh) -> Result<(), FbxError> {
     if mesh.name.is_empty() || mesh.name.chars().any(|c| c == '"' || c.is_control()) {
         return Err(FbxError::InvalidName(mesh.name.clone()));
     }
-    if mesh.indices.len() % 3 != 0 {
+    if !mesh.indices.len().is_multiple_of(3) {
         return Err(FbxError::IndexCount {
             mesh: mesh.name.clone(),
             len: mesh.indices.len(),
@@ -339,7 +339,7 @@ fn push_joined(out: &mut String, continuation: &str, items: impl Iterator<Item =
 /// Encodes each triangle as `a, b, -(c + 1)`.
 fn polygon_indices(indices: &[u32]) -> impl Iterator<Item = i64> + '_ {
     indices
-        .chunks_exact(3)
+        .as_chunks::<3>().0.iter()
         .flat_map(|t| [i64::from(t[0]), i64::from(t[1]), -i64::from(t[2]) - 1])
 }
 
