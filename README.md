@@ -3,7 +3,7 @@
 ACXS Manager is one Rust desktop program for Assetto Corsa. It brings several
 separate management jobs into a single window: browsing installed content,
 editing content metadata and CSP settings, managing setups, lap records and
-replays, dedicated server files, and a live telemetry view.
+replays, dedicated server files, graphics injectors, and a live telemetry view.
 
 It is a Windows program. The user interface is built with egui/eframe. The core
 logic is a library (`acxs_manager`) with no UI code, so it can be tested on the
@@ -11,26 +11,33 @@ host and cross-compiled for Windows.
 
 ## What it does today
 
-- **Content:** scans the game folder for cars and tracks, filters them, shows
-  specs, compares two cars or two tracks, edits car and track metadata, runs
-  read-only content checks, enables and disables content without deleting it,
-  keeps named collections, and manages skins.
-- **CSP lights patch:** recognizes the known builds (0.2.11 and 0.3.0-preview675)
-  by SHA-256, and installs, switches or removes the patch. Displaced files are
-  moved to an archive folder, a failed install rolls back, and nothing is deleted.
-- **CSP and game settings:** edits CSP config files, force-feedback tuning and the
-  gamepad assist settings. Edits `video.ini`, and makes and restores configuration
-  snapshots.
-- **Setups:** lists, imports and archives setup files, compares them, and runs a
-  three-way merge.
-- **Racing:** writes a quick-race config and starts the game with named presets.
-  Keeps local lap records with a lap delta trace, and views replay files.
-- **Server:** edits the dedicated server configuration and entry list.
-- **Telemetry:** connects to the game's built-in UDP telemetry, shows the latest
-  car sample and completed laps, and exports telemetry and laps to CSV.
-- **Models:** inspects KN5 models, exports mesh geometry to OBJ, and lists
-  `data.acd` archive entries.
-- **Launch:** checks whether the game is running and starts it from the game folder.
+- **Install and launch:** finds installs through Steam library folders, checks a
+  folder picked by hand, detects whether the game is running, starts the game,
+  and starts it through a third-party launcher profile.
+- **Content:** scans cars and tracks, filters and searches them, shows specs,
+  compares two cars or two tracks, edits car and track metadata, runs content
+  health checks with optional repairs, enables and disables content without
+  deleting it, keeps collections, and exports lists to CSV or JSON.
+- **Skins and tuning:** scans and imports skins, recolours skin textures, makes
+  licence plates, and edits a car's engine, mass, fuel, gear and final drive values.
+- **Models:** inspects KN5 models, exports OBJ and FBX, writes KN5 from OBJ, renders
+  preview images, bakes AO values, and lists `data.acd` entries.
+- **Setups:** lists, imports and archives setup files, compares them, edits values,
+  and runs a three-way merge.
+- **CSP and game settings:** installs, switches and removes the CSP lights patch
+  (with rollback), edits CSP config, force-feedback, car classes and car years,
+  reads weather and gamepad settings, manages user Lua apps, edits `video.ini`,
+  and makes and restores configuration snapshots.
+- **Graphics:** switches the active graphics injector between the lights patch, an
+  injector build folder, a runtime build folder or none, and manages those folders.
+- **Racing:** writes a quick-race config and starts the game with named presets,
+  keeps lap records with a delta trace, views replays, and offers race engineer,
+  setup, strategy and timing-tower views. Championships are scored from CSV results.
+- **Server:** edits the dedicated server configuration and entry list, and starts
+  and stops the server process.
+- **Telemetry and logs:** shows live UDP telemetry with charts and a track map,
+  exports telemetry and laps to CSV, serves a local web dashboard, edits a HUD
+  layout, summarizes game logs, and writes a diagnostics bundle.
 
 The full feature list, with the status of each feature and the reason for anything
 not built, is in [ROADMAP.md](ROADMAP.md).
@@ -51,12 +58,10 @@ cargo test --lib
 ```
 
 This runs the unit tests of the core library modules. The user interface is in the
-binary and has no automated tests. The same command runs in the Windows CI workflow.
+binary and has no automated tests.
 
-Last run: 396 tests, 395 passed, 1 failed. The failing test is
-`csp::tests::patch_differences_cover_version_family_count_and_size`, which expects a
-byte total that does not match the value its fixture computes. The test needs a
-fix before the suite passes.
+Last run: 907 tests, all passed (macOS host, `cargo test --lib --locked`). The
+Windows CI workflow listed in ROADMAP.md is not in the repository yet.
 
 ## Project layout
 
@@ -73,53 +78,53 @@ acxs-manager/
       widgets.rs        pills, stat tiles, section headers, list cards
       tools/            one file per Tools page (registered in tools/mod.rs)
   scripts/
-    build-windows.sh    cross-compile for Windows and copy the executable into dist/
-  .github/workflows/
-    windows-build.yml   Windows CI: library tests, release build, artifact upload
+    build-windows.sh   cross-compile for Windows and copy the executable into dist/
+    package-release.sh zip the executable and write its SHA-256 sum
   docs/
     csp-lights-patch-analysis.md   static analysis notes for the two known patch builds
-  dist/                 release executable from the build script
+  dist/                 release executable, zip and checksums from the scripts
   BUILD.md              build instructions for macOS and Windows
   ROADMAP.md            feature coverage matrix
 ```
 
 Core modules by feature area (all in `src/`):
 
-- **Install and launch:** `steam.rs` (install detection), `settings.rs` (saved
-  folders), `game.rs` (running check and launch), `util.rs` (shared helpers).
-- **Content:** `content.rs` (scan), `content_meta.rs` (metadata edits),
-  `content_repair.rs` (checks), `content_export.rs` (CSV and JSON lists),
-  `query.rs` (search language), `dashboard_stats.rs` (counts), `mods.rs`
-  (enable and disable), `collection.rs`, `cardata.rs`, `car_compare.rs`,
-  `car_classes.rs`, `track_surfaces.rs`, `track_compare.rs`, `skins.rs`,
-  `skin_import.rs`, `kn5.rs`, `kn5_export.rs`, `acd.rs`.
+- **Install and launch:** `steam.rs`, `settings.rs`, `game.rs`, `launcher.rs`,
+  `installer.rs`, `util.rs`.
+- **Content:** `content.rs`, `query.rs`, `dashboard_stats.rs`, `mods.rs`,
+  `collection.rs`, `content_meta.rs`, `content_repair.rs`, `content_export.rs`,
+  `cardata.rs`, `car_compare.rs`, `car_classes.rs`, `track_surfaces.rs`,
+  `track_compare.rs`, `skins.rs`, `skin_import.rs`, `livery.rs`,
+  `license_plate.rs`, `thumbnails.rs`, `png.rs`, `car_tuning.rs`.
+- **Models:** `kn5.rs`, `kn5_export.rs`, `kn5_writer.rs`, `obj_import.rs`, `fbx.rs`,
+  `ao_bake.rs`, `ortho.rs`, `acd.rs`.
 - **Setups:** `setups.rs`, `ini.rs` (lenient INI reader and writer, keeps comments
-  and key order), `ini_merge.rs` (three-way merge).
-- **CSP and settings:** `csp.rs` (lights patch), `csp_config.rs`, `ffb.rs`,
-  `weather.rs`, `gamepad.rs`, `rare.rs` (race rules settings), `lua_apps.rs`,
-  `shift_lights.rs`, `game_cfg.rs` (`video.ini`, `assetto_corsa.ini`), `backup.rs`.
-- **Racing:** `race.rs` (quick-race config), `presets.rs`, `laptimes.rs`, `delta.rs`,
-  `replay.rs`.
-- **Server:** `server.rs`.
-- **Telemetry and logs:** `telemetry.rs` (UDP packet decoder), `udp_client.rs`,
-  `telemetry_csv.rs`, `ac_log.rs`.
-
-Placeholder files, not implemented yet: `car_tuning.rs`, `kn5_writer.rs`, `png.rs`,
-`hud.rs`, `installer.rs`, `license_plate.rs`, `ortho.rs`, `server_process.rs`,
-`strategy.rs`, and the `rtx.rs` tool page. Each is listed as Planned or Not feasible
-in ROADMAP.md.
+  and key order), `ini_merge.rs`, `setup_advice.rs`.
+- **CSP, graphics and settings:** `csp.rs`, `csp_config.rs`, `ffb.rs`, `weather.rs`,
+  `gamepad.rs`, `rare.rs`, `lua_apps.rs`, `shift_lights.rs`, `game_cfg.rs`,
+  `backup.rs`, `graphics_profiles.rs`, `graphics_check.rs`, `reshade.rs`, `remix.rs`.
+- **Racing and server:** `race.rs`, `presets.rs`, `laptimes.rs`, `delta.rs`,
+  `replay.rs`, `replay_player.rs`, `engineer.rs`, `strategy.rs`, `timing.rs`,
+  `championship.rs`, `server.rs`, `server_process.rs`, `server_status.rs`.
+- **Telemetry, logs and updates:** `telemetry.rs`, `udp_client.rs`,
+  `telemetry_csv.rs`, `charts.rs`, `track_map.rs`, `sharedmem.rs`, `hud.rs`,
+  `web_dashboard.rs`, `ac_log.rs`, `diagnostics.rs`, `update.rs`.
 
 ## Status
 
 - Working and reachable from the UI: game folder detection, car and track scan,
   CSP lights patch install, switch, uninstall and rollback, content metadata edits,
-  setups, skins, collections, quick race, dedicated server file editing, lap records,
-  replay viewing, live UDP telemetry view, KN5 OBJ export, configuration snapshots.
-- Partial: several library modules exist without a UI page or with a read-only
-  page. Examples: content export, weather and car class views, the assetto_corsa.ini
-  editor and the Lua app list. ROADMAP.md names what is missing for each.
-- Not started: the placeholder modules above, server process control, shared
-  memory telemetry, and the other Planned rows in ROADMAP.md.
+  health checks with repairs, setups including value edits, skins, collections,
+  quick race, dedicated server files and process control, lap records, replay
+  viewing, live telemetry with charts, KN5 export and preview, graphics injector
+  switching, configuration snapshots, and the diagnostics bundle.
+- Partial: several modules exist without a UI page or with a read-only page, and
+  a few pages stop short of the full feature. Examples: the shared memory reader,
+  live server status, the install-from-zip library, the HUD layout (no in-game
+  drawing), AO baking (values not written), and the game settings file editor.
+  ROADMAP.md names what is missing for each.
+- Not started: the Planned rows in ROADMAP.md, such as the online content catalog,
+  shared leaderboards, server uploads, hardware outputs and the Windows CI workflow.
 
 The CSP gamepad config file location has not yet been checked against a real game
 install. The page shows a warning about this.

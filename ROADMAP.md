@@ -11,8 +11,8 @@ stands. The statuses were checked against `src/lib.rs` (modules) and
 
 ## Status legend
 
-- **Done**: implemented in the core library and reachable from a UI page, or part
-  of the build tooling. Works as described in the row.
+- **Done**: implemented in the core library with unit tests, and reachable from a UI
+  page, or part of the build tooling. Works as described in the row.
 - **Partial**: some of the feature is in code, but a part is missing. Usually the
   library exists and no page uses it, or the page reads but does not write. The
   note says what is missing.
@@ -26,7 +26,7 @@ the registered tool pages named in the "UI page" column below.
 
 ## Summary
 
-Rows: 98. Done: 44. Partial: 10. Planned: 30. Not feasible: 14.
+Rows: 104. Done: 60. Partial: 23. Planned: 9. Not feasible: 12.
 
 Counts are for the rows in the sections below. Each section is one feature area.
 
@@ -39,9 +39,9 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | Find Assetto Corsa installs through Steam library folders | `steam.rs`, `settings.rs` | Install Finder | Done | - |
 | Check a game folder picked by hand | `install` tool, `settings.rs` | Install Finder | Done | - |
 | Saved game folder and patch library | `settings.rs` | Home | Done | - |
-| Detect whether the game is running | `game.rs` | Home, Quick Race, CSP Lights Patch | Done | Uses the Windows process list. Install, uninstall, mod and backup-restore actions refuse while the game runs. |
-| Launch the game from the manager | `game.rs` | Home, Quick Race | Done | - |
-| Launch a third-party launcher instead of the game | none | - | Planned | Not started. Only direct launch of the game exists. |
+| Detect whether the game is running | `game.rs` | Home, Quick Race, Mods, Game Settings, RTX & ReShade | Partial | Uses the Windows process list. Install, uninstall, mod and backup-restore actions refuse while the game runs. `game.rs` has no unit tests yet. |
+| Launch the game from the manager | `game.rs` | Home, Quick Race | Partial | Same module as the running check. `game.rs` has no unit tests yet. |
+| Launch a third-party launcher instead of the game | `launcher.rs` | External Launcher | Done | Starts the game through a saved launch profile: an external program with its arguments. |
 
 ## 2. Content browsing
 
@@ -49,25 +49,26 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | --- | --- | --- | --- | --- |
 | Scan installed cars and tracks (ui JSON, folder fallback) | `content.rs` | Cars, Tracks | Done | - |
 | Text filter over cars and tracks | `content.rs`, `util.rs` | Cars, Tracks | Done | - |
-| Field search query language | `query.rs` | Collections | Done | - |
-| Content counts on the Home page | `dashboard_stats.rs` | Home | Partial | Home shows car and track counts itself. The per-category statistics module is not used by any page. |
+| Field search query language | `query.rs` | Collections, Exports | Done | - |
+| Content counts on the Home page | `dashboard_stats.rs` | Home | Done | Category totals for cars, tracks and skins. |
 | Car specs (headline values from the car data files) | `cardata.rs` | Car Specs | Done | - |
 | Compare two installed cars | `car_compare.rs` | Car Specs | Done | - |
 | Track info, layouts and surface table | `track_surfaces.rs`, `content.rs` | Track Info | Done | - |
 | Compare two installed tracks | `track_compare.rs` | Track Info | Done | - |
-| Export the car and track lists to CSV or JSON | `content_export.rs` | none | Partial | The export functions exist and are tested. No page has an export action. |
+| Export the car and track lists to CSV or JSON | `content_export.rs` | Exports | Done | - |
 | Enable and disable cars and tracks without deleting | `mods.rs` | Mods | Done | Disabled items move into a folder inside the game root. Nothing is deleted. |
 | Collections of cars and tracks | `collection.rs` | Collections | Done | - |
-| Read-only health checks on installed content | `content_repair.rs` | Metadata & Checks | Partial | Reports issues with severity. No automatic repair. |
+| Health checks on installed content, with safe repairs | `content_repair.rs` | Metadata & Checks | Done | Reports issues with severity. Repairs are planned first and start selected, so each one can be unticked before it runs. |
+| Install a car or track from a zip archive | `installer.rs` | none | Partial | Installer and its unit tests exist. No page calls it. |
 | Curated online content catalog | none | - | Planned | Not started. Needs a data source and a license check for each item. |
-| Car and track thumbnails and brand badges | `png.rs` (placeholder) | - | Planned | Not started. Image output module is a placeholder. |
+| Car and track thumbnails and brand badges | `thumbnails.rs`, `png.rs` | Car Specs | Partial | Car thumbnails are drawn from the car's KN5 model and saved as PNG in the car folder. Track thumbnails and brand badges are not started. |
 
 ## 3. Car and track metadata
 
 | Feature | ACXS module(s) | UI page | Status | Note |
 | --- | --- | --- | --- | --- |
 | Edit car and track metadata (`ui_car.json`, `ui_track.json`) | `content_meta.rs` | Metadata & Checks | Done | Edits keep the fields the page does not touch. |
-| Car physics tuning (tyre, suspension, drivetrain values) | `car_tuning.rs` (placeholder) | - | Planned | Not started. The Car Specs page reads values only. |
+| Car physics tuning (tyre, suspension, drivetrain values) | `car_tuning.rs` | Car Tuning | Partial | Engine power and torque, total mass, fuel tank, forward gear ratios and final drive can be edited and applied. The previous file is kept. Tyre and suspension values are not covered. |
 
 ## 4. Skins and liveries
 
@@ -75,7 +76,8 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | --- | --- | --- | --- | --- |
 | Scan skins per car, with preview and texture counts | `skins.rs` | Skins | Done | - |
 | Import a skin folder into an installed car | `skin_import.rs` | Skins | Done | Refuses while the game runs. |
-| Paint or edit liveries | none | - | Planned | Not started. |
+| Paint or edit liveries | `livery.rs` | Skins | Partial | Hue recolour of a skin texture, written to a new PNG file. No painting tools. |
+| Licence plate designer | `license_plate.rs`, `png.rs` | Plate Designer | Done | Plate style, text validation and glyph layout. Output is a PNG written to a new file; an existing file is never overwritten. |
 
 ## 5. Setups
 
@@ -84,7 +86,7 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | List, import and archive setup files | `setups.rs` | Setups | Done | - |
 | Compare two setup files key by key | `setups.rs`, `ini.rs` | Setups | Done | - |
 | Three-way merge of setup files | `ini_merge.rs` | Setups | Done | Conflicting keys are written only when the user allows it. |
-| Edit single setup values in the page | none | - | Planned | Not started. The page browses, compares, imports, archives and merges. It does not edit values. |
+| Edit single setup values in the page | `setups.rs` | Setups | Done | Values open in an editor. Nothing is written until Save; earlier versions are kept as backups. |
 
 ## 6. Models and archives
 
@@ -92,10 +94,11 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | --- | --- | --- | --- | --- |
 | Inspect a KN5 model (header, textures, materials, node tree) | `kn5.rs` | Model Tools | Done | Read-only. |
 | Export KN5 mesh geometry to OBJ | `kn5_export.rs` | Model Tools | Done | Geometry only. Refuses to overwrite an existing file. |
-| Export KN5 models to FBX | none | - | Planned | Not started. OBJ only. |
-| Write KN5 models from a 3D source | `kn5_writer.rs` (placeholder) | - | Planned | Not started. The writer module is a placeholder. |
+| Export KN5 models to FBX | `fbx.rs` | Model Tools | Done | ASCII FBX 7.4. The page writes one mesh with no normals. |
+| Write KN5 models from a 3D source | `obj_import.rs`, `kn5_writer.rs` | Model Tools | Done | Reads OBJ files and writes a KN5 model. |
 | List entries of a `data.acd` archive | `acd.rs` | Model Tools | Done | Lists entries. Extraction is in the library only. |
-| Bake vertex ambient occlusion for tracks and cars | none | - | Planned | Not started. Needs an external GPU baking tool. |
+| Preview image of a KN5 model | `ortho.rs`, `png.rs` | Model Tools | Done | Flat-shaded view from a fixed angle, saved as PNG. |
+| Bake vertex ambient occlusion for tracks and cars | `ao_bake.rs` | Model Tools | Partial | CPU bake. The values are computed and reported. They are not written to a file. |
 
 ## 7. CSP lights patch
 
@@ -111,13 +114,13 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | --- | --- | --- | --- | --- |
 | Edit CSP config files (key, value, documentation) | `csp_config.rs` | CSP Config | Done | - |
 | Force-feedback tuning | `ffb.rs` | CSP Config (FFB) | Done | - |
-| Weather presets and weather effects | `weather.rs` | CSP Config (Weather) | Partial | Read-only. Presets cannot be edited. |
-| Car classes and car years | `car_classes.rs` | CSP Config (Car classes) | Partial | Read and compare only. Classes cannot be edited. |
-| Gamepad and keyboard assist settings | `gamepad.rs` | CSP Config (Gamepad) | Partial | Settings editor only. The assist app is not installed by the manager. The config file location is not yet checked against a real install. |
+| Weather presets and weather effects | `weather.rs` | CSP Config (Weather) | Partial | Weather effect values can be edited. Presets are read-only. Two versions can be compared. |
+| Car classes and car years | `car_classes.rs` | CSP Config (Car classes) | Partial | Cars can be added to a class and given a year. Classes cannot be created or removed in the page. |
+| Gamepad and keyboard assist settings | `gamepad.rs` | CSP Config (Gamepad) | Partial | Settings editor. The config file location is not yet checked against a real install; the page shows a warning. The assist app is not installed by the manager. |
 | Race rules settings for the rules mod | `rare.rs` | Mods | Partial | Installed check and settings editor. The rules app itself is not installed by the manager. |
-| List CSP apps and user apps | `lua_apps.rs` | Mods | Partial | List only. Install and removal are not implemented. |
-| Install and manage CSP apps | none | - | Planned | Not started. |
-| Shift-light thresholds per car | `shift_lights.rs` | Car Specs | Partial | Preview of the LED thresholds only. |
+| List CSP apps and user apps | `lua_apps.rs` | Mods | Done | Lists the apps shipped with CSP and the apps the user installed. |
+| Install and manage CSP apps | `lua_apps.rs` | Mods | Partial | User apps can be installed and removed. CSP-shipped apps are listed and protected; the page cannot install or remove them. |
+| Shift-light thresholds per car | `shift_lights.rs` | Car Specs | Partial | Preview of the LED thresholds only. Not written to the car. |
 | Shift-light output to steering wheel LEDs | none | - | Planned | Not started. Needs a hardware bridge. |
 | Video settings editor (`video.ini`) | `game_cfg.rs` | Game Settings | Done | - |
 | Game settings file editor (`assetto_corsa.ini`) | `game_cfg.rs` | none | Partial | Read, write and validation exist in the library. No page edits this file. |
@@ -127,7 +130,7 @@ Counts are for the rows in the sections below. Each section is one feature area.
 
 | Feature | ACXS module(s) | UI page | Status | Note |
 | --- | --- | --- | --- | --- |
-| Write `race.ini` and start the game | `race.rs`, `game.rs` | Quick Race | Done | - |
+| Write `race.ini` and start the game | `race.rs`, `game.rs` | Quick Race | Partial | Writes the config. The start step is in `game.rs`, which has no unit tests yet. |
 | Named race presets | `presets.rs` | Quick Race | Done | Replacing a preset keeps the old value. |
 
 ## 10. Dedicated server
@@ -136,9 +139,9 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | --- | --- | --- | --- | --- |
 | Edit `server_cfg.ini` | `server.rs` | Dedicated Server | Done | - |
 | Edit `entry_list.ini` | `server.rs` | Dedicated Server | Done | - |
-| Start and stop the server process | `server_process.rs` (placeholder) | - | Planned | Not started. |
-| Live server status over HTTP | none | - | Planned | Not started. |
-| Championships, results and race history | none | - | Planned | Not started. |
+| Start and stop the server process | `server_process.rs` | Dedicated Server | Done | Starts the server from the game's server folder, keeps recent log lines, and asks for confirmation before stopping. |
+| Live server status over HTTP | `server_status.rs` | none | Partial | Status queries are written and unit-tested. No page calls them yet. |
+| Championships, results and race history | `championship.rs` | Championships | Partial | Standings, round results from CSV and JSON storage are on the Championships page. Server result files and race history are not read. |
 | Upload content to the server | none | - | Planned | Not started. |
 | Server plugins (AI traffic, dynamic weather, plugin API) | none | - | Planned | Not started. The reference server is large. Would run as an external process, not be ported. |
 
@@ -147,20 +150,21 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | Feature | ACXS module(s) | UI page | Status | Note |
 | --- | --- | --- | --- | --- |
 | Summarize game and CSP logs (errors, warnings, info counts) | `ac_log.rs` | Logs | Done | - |
+| Diagnostic bundle for bug reports | `diagnostics.rs` | Logs | Done | Writes a zip with diagnostic information. An existing bundle file is never overwritten. |
 
 ## 12. Telemetry and HUD
 
 | Feature | ACXS module(s) | UI page | Status | Note |
 | --- | --- | --- | --- | --- |
 | Decode the built-in UDP telemetry protocol | `telemetry.rs` | Live Telemetry | Done | - |
-| UDP client: handshake, car samples, completed laps | `udp_client.rs` | Live Telemetry | Done | Shows the latest sample only. |
+| UDP client: handshake, car samples, completed laps | `udp_client.rs` | Live Telemetry | Done | Feeds the live charts and the latest values. |
 | Telemetry CSV export | `telemetry_csv.rs` | Live Telemetry | Done | - |
-| Shared memory reader (static, physics, graphics data) | none | - | Planned | Not started. Would be a Windows memory-mapped reader. |
-| Live charts (throttle, brake, steering, gear) | none | - | Planned | Not started. |
-| Track map and friction circle | none | - | Planned | Not started. |
+| Shared memory reader (static, physics, graphics data) | `sharedmem.rs` | none | Partial | The Windows reader and the page parsers are written and unit-tested. No page reads them yet. |
+| Live charts (throttle, brake, steering, gear) | `charts.rs` | Live Telemetry | Done | Speed is plotted too. |
+| Track map and friction circle | `track_map.rs` | Live Telemetry | Done | - |
 | Telemetry output to hardware gauges | none | - | Planned | Not started. Needs a microcontroller bridge. |
-| Telemetry web dashboard for other devices | none | - | Planned | Not started. |
-| In-game HUD and overlays | `hud.rs` (placeholder) | - | Planned | Not started. Would be a CSP app. The manager does not draw overlays itself. |
+| Telemetry web dashboard for other devices | `web_dashboard.rs` | Live Telemetry | Done | Local HTTP server, started from the page. |
+| In-game HUD and overlays | `hud.rs` | HUD Layout | Partial | Layout model, validation, JSON save and load, and a preview on the page. Nothing is drawn in the game: that needs a CSP app, which is not built. |
 
 ## 13. Laps, delta and replay
 
@@ -172,15 +176,16 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | Shared leaderboard across users | none | - | Planned | Not started. Needs a server. |
 | Replay header and lap table parsing | `replay.rs` | Replay Viewer | Done | Format version 16. |
 | Replay lap table to CSV | `telemetry_csv.rs` | Replay Viewer | Done | - |
-| Replay playback | none | - | Planned | Not started. |
+| Replay playback | `replay_player.rs` | Replay Viewer | Done | Play and pause, speed selector, seek slider. |
 
 ## 14. Race engineering and broadcast
 
 | Feature | ACXS module(s) | UI page | Status | Note |
 | --- | --- | --- | --- | --- |
-| Race engineer advice from telemetry | none | - | Planned | Not started. |
-| Broadcast timing overlay (timing tower, speed trap, session timer) | none | - | Planned | Not started. |
-| Setup advice from telemetry analysis | none | - | Planned | Not started. The reference claims for this are not visible in the reference code, so they need review first. |
+| Race engineer advice from telemetry | `engineer.rs` | Race Engineer | Done | Rule-based advice from one replay. |
+| Broadcast timing overlay (timing tower, speed trap, session timer) | `timing.rs` | Timing Tower | Partial | Race order, gaps and the session fastest lap are on the Timing Tower page. Speed trap, session timer and an on-screen overlay are not built. |
+| Setup advice from telemetry analysis | `setup_advice.rs` | Setup Advice | Done | Heuristic estimate of understeer or oversteer in corners, from one replay. The thresholds are not validated against real sessions. |
+| Race strategy: fuel, pit window and stop plan | `strategy.rs` | Strategy | Done | Fuel use, laps covered by a tank, pit window and stop plan. |
 
 ## 15. Input
 
@@ -193,9 +198,10 @@ Counts are for the rows in the sections below. Each section is one feature area.
 
 | Feature | ACXS module(s) | UI page | Status | Note |
 | --- | --- | --- | --- | --- |
-| Post-processing shader injection | `rtx.rs` (placeholder) | Tools: graphics placeholder page | Not feasible | The page shows "Not implemented yet". Injection runs inside the game process and competes with CSP for the rendering path. |
-| DirectX-to-Vulkan translation layer (DX8/DX9 path-tracing runtime) | none | - | Not feasible | A graphics runtime that replaces the game's rendering path. It would have to be injected into the game. Assetto Corsa is not a DX8 or DX9 title, so the runtime has no role here. |
+| Post-processing shader injection | `reshade.rs`, `graphics_check.rs` | RTX & ReShade | Partial | Installs and removes an injector build folder, edits its config, lists presets and reports proxy DLL clashes. The shader injection is done by the third-party runtime, which this project does not build. |
+| DirectX-to-Vulkan translation layer (DX8/DX9 path-tracing runtime) | `remix.rs` | RTX & ReShade | Partial | Installs and removes a runtime build folder and writes its quality settings. The translation runtime itself is third-party and is not built here. |
 | Remaster toolkit for DX8/DX9 game assets | none | - | Not feasible | A separate large editor platform for other games' assets. |
+| Switch the active graphics injector (lights patch, injector build, runtime build or none) | `graphics_profiles.rs`, `graphics_check.rs` | Graphics Profile | Done | Keeps one injector active and archives whatever it replaces. |
 
 ## 17. Content protection and licensing
 
@@ -217,8 +223,8 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | Feature | ACXS module(s) | UI page | Status | Note |
 | --- | --- | --- | --- | --- |
 | Windows cross-compile from macOS | `scripts/build-windows.sh` | - | Done | Output copied to `dist/ACXS-Manager.exe`. |
-| Windows CI: library tests and release build | `.github/workflows/windows-build.yml` | - | Done | Runs `cargo test --lib`, then a release build, and uploads the executable. |
-| Signed release builds and an update channel | none | - | Planned | Not started. |
+| Windows CI: library tests and release build | `.github/workflows/windows-build.yml` | - | Planned | Not started. The workflow file is not in the repository. |
+| Signed release builds and an update channel | `update.rs`, `scripts/package-release.sh` | Home | Partial | The opt-in update check reads a JSON feed. The packaging script writes a SHA-256 sum. Builds are not signed. |
 | Linux installer (game under a compatibility layer) | none | - | Not feasible | ACXS targets Windows. The Linux setup depends on a compatibility layer and would be a separate project. |
 | Browser extension to open content in a third-party manager | none | - | Not feasible | Depends on a third-party launcher and third-party sites. Not a manager feature. |
 
