@@ -4,16 +4,19 @@
 use super::{Tool, ToolContext};
 use crate::ui::{theme, widgets, Notice};
 use acxs_manager::content::{filter_tracks, scan_tracks, TrackEntry};
+use acxs_manager::thumbnails;
 use acxs_manager::track_compare::{compare_tracks, surface_changes, TrackDiff};
 use acxs_manager::track_surfaces::{read_surfaces, summarize, Surface};
 use eframe::egui::{self, RichText};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 /// Upper bound for compare rows and surface-change lines shown at once.
 const MAX_LINES: usize = 200;
 const BASE_LAYOUT: &str = "Track (base)";
+/// Edge length in pixels of the square thumbnail made by the "Make thumbnail" button.
+const THUMB_SIZE: u32 = 512;
 
 pub fn tool() -> Box<dyn Tool> {
     let (tx, rx) = mpsc::channel();
@@ -34,6 +37,7 @@ pub fn tool() -> Box<dyn Tool> {
         compare_key: None,
         compare_seq: 0,
         compare: Load::Idle,
+        thumb_busy: false,
     })
 }
 
@@ -56,6 +60,8 @@ enum Msg {
     Tracks { root: PathBuf, tracks: Vec<TrackEntry> },
     Surfaces { seq: u64, result: Result<Vec<Surface>, String> },
     Compare { seq: u64, result: Result<Comparison, String> },
+    /// A thumbnail was made or found in the cache: its file path and size in bytes.
+    Thumbnail { result: Result<(PathBuf, usize), String> },
 }
 
 /// What the surfaces read was requested for.
@@ -86,6 +92,8 @@ struct TrackInfo {
     compare_key: Option<(String, String)>,
     compare_seq: u64,
     compare: Load<Comparison>,
+    /// A thumbnail job is running.
+    thumb_busy: bool,
 }
 
 fn find<'a>(tracks: &'a [TrackEntry], id: Option<&str>) -> Option<&'a TrackEntry> {
@@ -121,9 +129,25 @@ impl TrackInfo {
     }
 
     /// Applies finished background work. Results for superseded requests are dropped.
-    fn poll(&mut self) {
+    fn poll(&mut self, notices: &mut Vec<Notice>) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
+                Msg::Thumbnail { result } => {
+                    self.thumb_busy = false;
+                    match result {
+                        Ok((path, size)) => notices.push(Notice {
+                            text: format!(
+                                "Thumbnail saved to {} ({THUMB_SIZE}x{THUMB_SIZE}, {size} bytes)",
+                                path.display()
+                            ),
+                            ok: true,
+                        }),
+                        Err(e) => notices.push(Notice {
+                            text: format!("Thumbnail failed: {e}"),
+                            ok: false,
+                        }),
+                    }
+                }
                 Msg::Tracks { root, tracks } => {
                     if self.tracks_root.as_ref() == Some(&root) {
                         self.tracks_loading = false;
@@ -411,6 +435,49 @@ impl TrackInfo {
         }
     }
 
+    /// Thumbnail button for the selected track and the cached thumbnail path.
+    fn thumbnail_section(&mut self, ui: &mut egui::Ui, root: &Path) {
+        let Some(track) = find(&self.tracks, self.selected.as_deref()) else {
+            return;
+        };
+        let id = track.id.clone();
+        let cache = thumbnails::track_cache_path(root, &id);
+        let thumb_file = cache.join(format!("{THUMB_SIZE}.png"));
+        let shown = if thumb_file.is_file() {
+            thumb_file.display().to_string()
+        } else {
+            "not made yet".to_string()
+        };
+
+        ui.add_space(12.0);
+        widgets::section_title(ui, "Thumbnail");
+        theme::card().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let make = ui.add_enabled(!self.thumb_busy, widgets::primary_button("Make thumbnail"));
+                if make.clicked() {
+                    self.thumb_busy = true;
+                    let root = root.to_path_buf();
+                    let id = id.clone();
+                    self.spawn(ui.ctx(), move || Msg::Thumbnail {
+                        result: thumbnails::track_thumbnail(&root, &id, THUMB_SIZE)
+                            .map(|bytes| {
+                                let saved = thumbnails::track_cache_path(&root, &id)
+                                    .join(format!("{THUMB_SIZE}.png"));
+                                (saved, bytes.len())
+                            })
+                            .map_err(|e| e.to_string()),
+                    });
+                }
+                if self.thumb_busy {
+                    ui.add(egui::Spinner::new());
+                    ui.label(RichText::new("Working...").color(theme::MUTED));
+                }
+            });
+            ui.add_space(8.0);
+            widgets::key_value(ui, "Cached thumbnail", &shown);
+        });
+    }
+
     fn compare_section(&mut self, ui: &mut egui::Ui) {
         widgets::section_title(ui, "Compare");
         let Some(left) = find(&self.tracks, self.selected.as_deref()) else {
@@ -533,10 +600,10 @@ impl Tool for TrackInfo {
         "Content"
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, ctx: &ToolContext, _notices: &mut Vec<Notice>) {
+    fn ui(&mut self, ui: &mut egui::Ui, ctx: &ToolContext, notices: &mut Vec<Notice>) {
         let egui_ctx = ui.ctx().clone();
         let root = ctx.ac_root.as_ref().filter(|_| ctx.ac_valid);
-        self.poll();
+        self.poll(notices);
         self.sync(&egui_ctx, root);
 
         widgets::heading(ui, "Track Info", "Details, surfaces and comparisons for installed tracks");
@@ -551,6 +618,9 @@ impl Tool for TrackInfo {
                 self.list_section(ui);
                 ui.add_space(12.0);
                 self.details_section(ui);
+                if let Some(root) = root {
+                    self.thumbnail_section(ui, root);
+                }
                 ui.add_space(12.0);
                 self.compare_section(ui);
             });

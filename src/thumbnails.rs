@@ -1,6 +1,9 @@
-//! Car thumbnails. A car's main KN5 model is loaded, drawn from a fixed
-//! three-quarter view, and saved as a PNG in the car folder's `acxs-thumbnails`
-//! subfolder. That folder doubles as the cache.
+//! Car and track thumbnails. A main KN5 model is loaded, drawn from a fixed
+//! view, and saved as a PNG in the item folder's `acxs-thumbnails` subfolder.
+//! That folder doubles as the cache.
+//!
+//! Cars are drawn from a three-quarter view. Tracks are drawn top-down, which
+//! reads as a plan of the circuit.
 //!
 //! Thumbnail files are only ever created, never overwritten. A thumbnail that
 //! already exists for the requested size is returned as it is.
@@ -14,12 +17,17 @@ use std::path::{Path, PathBuf};
 use crate::kn5_export::{self, ExportError};
 use crate::ortho::{self, OrthoError, View};
 
-/// Name of the cache subfolder inside each car folder.
+/// Name of the cache subfolder inside each car or track folder.
 const CACHE_DIR: &str = "acxs-thumbnails";
 
-/// Fixed three-quarter view: 45 degrees of yaw and 20 degrees of pitch.
-const VIEW_YAW_DEG: f32 = 45.0;
-const VIEW_PITCH_DEG: f32 = 20.0;
+/// Car view: 45 degrees of yaw and 20 degrees of pitch.
+const CAR_VIEW_YAW_DEG: f32 = 45.0;
+const CAR_VIEW_PITCH_DEG: f32 = 20.0;
+
+/// Track view: straight down. Pitch 90 tilts the model's up axis toward the viewer.
+const TRACK_VIEW_YAW_DEG: f32 = 0.0;
+const TRACK_VIEW_PITCH_DEG: f32 = 90.0;
+
 const VIEW_PADDING: f32 = 0.08;
 
 /// Why a thumbnail could not be produced.
@@ -27,11 +35,15 @@ const VIEW_PADDING: f32 = 0.08;
 pub enum ThumbError {
     /// The car id is empty or would leave the cars folder.
     InvalidCarId(String),
+    /// The track id is empty or would leave the tracks folder.
+    InvalidTrackId(String),
     /// The requested size is zero or above the renderer's limit.
     InvalidSize(u32),
     /// The car folder does not exist.
     CarNotFound(PathBuf),
-    /// The car folder has no `.kn5` file at its root.
+    /// The track folder does not exist.
+    TrackNotFound(PathBuf),
+    /// The folder has no `.kn5` model that can stand for the item.
     NoModel(PathBuf),
     /// The model file could not be read.
     Model(ExportError),
@@ -45,6 +57,7 @@ impl fmt::Display for ThumbError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ThumbError::InvalidCarId(id) => write!(f, "invalid car id {id:?}"),
+            ThumbError::InvalidTrackId(id) => write!(f, "invalid track id {id:?}"),
             ThumbError::InvalidSize(size) => write!(
                 f,
                 "thumbnail size {size} must be between 1 and {}",
@@ -53,10 +66,13 @@ impl fmt::Display for ThumbError {
             ThumbError::CarNotFound(path) => {
                 write!(f, "car folder not found: {}", path.display())
             }
+            ThumbError::TrackNotFound(path) => {
+                write!(f, "track folder not found: {}", path.display())
+            }
             ThumbError::NoModel(path) => {
                 write!(f, "no .kn5 model in {}", path.display())
             }
-            ThumbError::Model(e) => write!(f, "could not read car model: {e}"),
+            ThumbError::Model(e) => write!(f, "could not read model: {e}"),
             ThumbError::Render(e) => write!(f, "could not render thumbnail: {e}"),
             ThumbError::Io(e) => write!(f, "I/O error: {e}"),
         }
@@ -102,6 +118,16 @@ pub fn cache_path(ac_root: &Path, car_id: &str) -> PathBuf {
         .join(CACHE_DIR)
 }
 
+/// The folder that holds a track's thumbnails: `<ac_root>/content/tracks/<track_id>/acxs-thumbnails`.
+/// Each size is stored as `<size>.png` inside it.
+pub fn track_cache_path(ac_root: &Path, track_id: &str) -> PathBuf {
+    ac_root
+        .join("content")
+        .join("tracks")
+        .join(track_id)
+        .join(CACHE_DIR)
+}
+
 /// Returns a PNG thumbnail of `size` by `size` pixels for the car.
 ///
 /// The main model is the `.kn5` at the car folder's root whose name matches the
@@ -109,19 +135,61 @@ pub fn cache_path(ac_root: &Path, car_id: &str) -> PathBuf {
 /// [`cache_path`] as `<size>.png`. If that file already exists, its bytes are
 /// returned and nothing is rendered or written.
 pub fn car_thumbnail(ac_root: &Path, car_id: &str, size: u32) -> Result<Vec<u8>, ThumbError> {
-    if !is_safe_car_id(car_id) {
+    if !is_safe_id(car_id) {
         return Err(ThumbError::InvalidCarId(car_id.to_string()));
     }
-    if size == 0 || size > ortho::MAX_DIMENSION {
-        return Err(ThumbError::InvalidSize(size));
-    }
+    check_size(size)?;
 
     let car_dir = ac_root.join("content").join("cars").join(car_id);
     if !car_dir.is_dir() {
         return Err(ThumbError::CarNotFound(car_dir));
     }
 
-    let cache_dir = cache_path(ac_root, car_id);
+    cached_or_render(
+        &cache_path(ac_root, car_id),
+        size,
+        (CAR_VIEW_YAW_DEG, CAR_VIEW_PITCH_DEG),
+        || find_main_model(&car_dir, &[]),
+    )
+}
+
+/// Returns a top-down PNG thumbnail of `size` by `size` pixels for the track.
+///
+/// The main model is the root-level `.kn5` of the track folder whose name matches
+/// the folder, or else the largest root-level `.kn5`. A `.kn5` named after one of
+/// the track's layout folders belongs to that layout and is never chosen. The PNG
+/// is written to [`track_cache_path`] as `<size>.png`. If that file already
+/// exists, its bytes are returned and nothing is rendered or written.
+pub fn track_thumbnail(ac_root: &Path, track_id: &str, size: u32) -> Result<Vec<u8>, ThumbError> {
+    if !is_safe_id(track_id) {
+        return Err(ThumbError::InvalidTrackId(track_id.to_string()));
+    }
+    check_size(size)?;
+
+    let track_dir = ac_root.join("content").join("tracks").join(track_id);
+    if !track_dir.is_dir() {
+        return Err(ThumbError::TrackNotFound(track_dir));
+    }
+
+    cached_or_render(
+        &track_cache_path(ac_root, track_id),
+        size,
+        (TRACK_VIEW_YAW_DEG, TRACK_VIEW_PITCH_DEG),
+        || {
+            let layouts = layout_names(&track_dir)?;
+            find_main_model(&track_dir, &layouts)
+        },
+    )
+}
+
+/// Returns the cached `<size>.png` in `cache_dir` when it exists. Otherwise
+/// finds the model, renders it at the given yaw and pitch, and creates the file.
+fn cached_or_render(
+    cache_dir: &Path,
+    size: u32,
+    (yaw_deg, pitch_deg): (f32, f32),
+    find_model: impl FnOnce() -> Result<PathBuf, ThumbError>,
+) -> Result<Vec<u8>, ThumbError> {
     let target = cache_dir.join(format!("{size}.png"));
     match fs::read(&target) {
         Ok(bytes) => return Ok(bytes),
@@ -129,18 +197,18 @@ pub fn car_thumbnail(ac_root: &Path, car_id: &str, size: u32) -> Result<Vec<u8>,
         Err(e) => return Err(e.into()),
     }
 
-    let model = find_main_model(&car_dir)?;
+    let model = find_model()?;
     let triangles = kn5_export::load_triangles(&model)?;
     let view = View {
-        yaw_deg: VIEW_YAW_DEG,
-        pitch_deg: VIEW_PITCH_DEG,
+        yaw_deg,
+        pitch_deg,
         width: size,
         height: size,
         padding: VIEW_PADDING,
     };
     let png = ortho::render_png(&triangles, &view)?;
 
-    fs::create_dir_all(&cache_dir)?;
+    fs::create_dir_all(cache_dir)?;
     match OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -161,21 +229,43 @@ pub fn car_thumbnail(ac_root: &Path, car_id: &str, size: u32) -> Result<Vec<u8>,
     }
 }
 
-/// A car id is one plain folder name: no separators, no `.`/`..`, no drive colons.
-fn is_safe_car_id(id: &str) -> bool {
+fn check_size(size: u32) -> Result<(), ThumbError> {
+    if size == 0 || size > ortho::MAX_DIMENSION {
+        Err(ThumbError::InvalidSize(size))
+    } else {
+        Ok(())
+    }
+}
+
+/// An item id is one plain folder name: no separators, no `.`/`..`, no drive colons.
+fn is_safe_id(id: &str) -> bool {
     !id.is_empty() && id != "." && id != ".." && !id.contains(['/', '\\', '\0', ':'])
 }
 
-/// Picks the car's model: a root-level `.kn5` whose stem matches the folder name,
-/// otherwise the largest root-level `.kn5` (ties broken by path).
-fn find_main_model(car_dir: &Path) -> Result<PathBuf, ThumbError> {
-    let car_name = car_dir
+/// Names of the layout folders under a track: subfolders that hold a `ui` folder.
+fn layout_names(track_dir: &Path) -> Result<Vec<String>, ThumbError> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(track_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() && path.join("ui").is_dir() {
+            names.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    Ok(names)
+}
+
+/// Picks the main model in `dir`: a root-level `.kn5` whose stem matches the
+/// folder name, otherwise the largest root-level `.kn5` (ties broken by path).
+/// `skip` lists stems that are never chosen.
+fn find_main_model(dir: &Path, skip: &[String]) -> Result<PathBuf, ThumbError> {
+    let folder_name = dir
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
 
     let mut largest: Option<(u64, PathBuf)> = None;
-    for entry in fs::read_dir(car_dir)? {
+    for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         let is_kn5 = path
@@ -185,10 +275,14 @@ fn find_main_model(car_dir: &Path) -> Result<PathBuf, ThumbError> {
             continue;
         }
 
-        let stem_matches = path
+        let stem = path
             .file_stem()
-            .is_some_and(|stem| stem.to_string_lossy().eq_ignore_ascii_case(&car_name));
-        if stem_matches {
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if skip.iter().any(|s| s.eq_ignore_ascii_case(&stem)) {
+            continue;
+        }
+        if stem.eq_ignore_ascii_case(&folder_name) {
             return Ok(path);
         }
 
@@ -206,7 +300,7 @@ fn find_main_model(car_dir: &Path) -> Result<PathBuf, ThumbError> {
 
     largest
         .map(|(_, path)| path)
-        .ok_or_else(|| ThumbError::NoModel(car_dir.to_path_buf()))
+        .ok_or_else(|| ThumbError::NoModel(dir.to_path_buf()))
 }
 
 #[cfg(test)]
@@ -236,6 +330,13 @@ mod tests {
         dir
     }
 
+    /// Creates `<root>/content/tracks/<track>` and returns it.
+    fn make_track(root: &Path, track: &str) -> PathBuf {
+        let dir = root.join("content").join("tracks").join(track);
+        fs::create_dir_all(&dir).expect("create track dir");
+        dir
+    }
+
     #[test]
     fn cache_path_is_thumbnail_folder_under_car() {
         let expected = PathBuf::from("/ac")
@@ -244,6 +345,16 @@ mod tests {
             .join("abc")
             .join("acxs-thumbnails");
         assert_eq!(cache_path(Path::new("/ac"), "abc"), expected);
+    }
+
+    #[test]
+    fn track_cache_path_is_thumbnail_folder_under_track() {
+        let expected = PathBuf::from("/ac")
+            .join("content")
+            .join("tracks")
+            .join("monza")
+            .join("acxs-thumbnails");
+        assert_eq!(track_cache_path(Path::new("/ac"), "monza"), expected);
     }
 
     #[test]
@@ -365,6 +476,49 @@ mod tests {
 
         let png = car_thumbnail(&root, "abc", 16).expect("thumbnail");
         assert!(png.starts_with(&PNG_SIGNATURE));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn track_renders_png_and_caches_it() {
+        let root = scratch_root("track_render");
+        let track = make_track(&root, "abc");
+        fs::write(track.join("abc.kn5"), triangle_kn5()).expect("write model");
+
+        let png = track_thumbnail(&root, "abc", 64).expect("thumbnail");
+        assert!(png.starts_with(&PNG_SIGNATURE));
+        let cached = track_cache_path(&root, "abc").join("64.png");
+        assert_eq!(fs::read(&cached).expect("cached file"), png);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn track_layout_model_is_never_chosen() {
+        let root = scratch_root("track_layout");
+        let track = make_track(&root, "abc");
+        fs::write(track.join("x.kn5"), triangle_kn5()).expect("write model");
+        // A layout folder with a larger, unreadable model named after it.
+        fs::create_dir_all(track.join("gp").join("ui")).expect("layout ui");
+        fs::write(track.join("gp.kn5"), vec![0u8; 10_000]).expect("write layout decoy");
+
+        assert!(track_thumbnail(&root, "abc", 32).is_ok());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn missing_track_and_bad_track_ids_are_reported() {
+        let root = scratch_root("track_bad");
+        make_track(&root, "abc");
+        assert!(matches!(
+            track_thumbnail(&root, "nope", 32),
+            Err(ThumbError::TrackNotFound(_))
+        ));
+        for id in ["", "..", "a/b", "c:x"] {
+            assert!(
+                matches!(track_thumbnail(&root, id, 32), Err(ThumbError::InvalidTrackId(_))),
+                "id {id:?} accepted"
+            );
+        }
         fs::remove_dir_all(&root).ok();
     }
 }

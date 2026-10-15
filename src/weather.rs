@@ -9,12 +9,14 @@
 //! - `extension/config/weather_fx.ini` selects them through `[BASIC] CONTROLLER=`
 //!   and `IMPLEMENTATION=`.
 //!
-//! Reads never write to disk. The one write, [`set_weather_value`], edits
-//! `weather_fx.ini` and nothing else. Missing folders are treated as empty.
+//! Reads never write to disk. The writes are [`set_weather_value`] (`weather_fx.ini`),
+//! [`set_preset_value`] (a preset's `settings.ini`), and [`create_preset`] and
+//! [`copy_preset`], which only add new preset folders. Edits to existing files go
+//! through [`Ini::save_with_backup`]. Missing folders are treated as empty.
 
 use std::collections::HashSet;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::ini::Ini;
@@ -86,8 +88,12 @@ pub fn list_controllers(ac_root: &Path) -> Vec<String> {
 /// the CSP files put their explanations there. A missing or unreadable file is
 /// returned as the io error. Nothing is written.
 pub fn read_weather_fx(ac_root: &Path) -> io::Result<Vec<(String, String, String)>> {
-    let path = ac_root.join("extension").join("config").join("weather_fx.ini");
-    let ini = Ini::load(&path)?;
+    read_entries(&ac_root.join("extension").join("config").join("weather_fx.ini"))
+}
+
+/// Every `(section, key, value)` of the ini file at `path`, in file order, with inline comments cut.
+fn read_entries(path: &Path) -> io::Result<Vec<(String, String, String)>> {
+    let ini = Ini::load(path)?;
 
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
@@ -135,6 +141,13 @@ pub fn set_weather_value(
     value: &str,
     allow_new_key: bool,
 ) -> io::Result<()> {
+    let path = ac_root.join("extension").join("config").join("weather_fx.ini");
+    edit_ini_value(&path, section, key, value, allow_new_key)
+}
+
+/// Checks one value edit and applies it to the ini file at `path`, saving through
+/// [`Ini::save_with_backup`]. Used by the `weather_fx.ini` and preset writers.
+fn edit_ini_value(path: &Path, section: &str, key: &str, value: &str, allow_new_key: bool) -> io::Result<()> {
     let (section, key, value) = (section.trim(), key.trim(), value.trim());
     let invalid = |msg: String| io::Error::new(io::ErrorKind::InvalidInput, msg);
     if section.is_empty() || section.chars().any(|c| c.is_control() || c == '[' || c == ']') {
@@ -147,8 +160,7 @@ pub fn set_weather_value(
         return Err(invalid(format!("value for {key} must be one line without a ';' comment")));
     }
 
-    let path = ac_root.join("extension").join("config").join("weather_fx.ini");
-    let before = Ini::load(&path)?;
+    let before = Ini::load(path)?;
     let mut ini = before.clone();
     match ini.get(section, key).map(str::to_owned) {
         Some(raw) => ini.set(section, key, keep_inline_comment(&raw, value)),
@@ -163,7 +175,7 @@ pub fn set_weather_value(
     if ini == before {
         return Ok(());
     }
-    ini.save_with_backup(&path)
+    ini.save_with_backup(path)
 }
 
 /// `new_value` followed by the trailing comment of `raw`, when `raw` has one.
@@ -172,6 +184,140 @@ fn keep_inline_comment(raw: &str, new_value: &str) -> String {
         Some(cut) => format!("{new_value}{}", &raw[cut..]),
         None => new_value.to_string(),
     }
+}
+
+/// File in each preset folder that holds the preset's parameters.
+const PARAMETER_FILE: &str = "settings.ini";
+
+/// New preset names become folder names, so they use only ASCII letters, digits, `-` and `_`.
+fn validate_new_preset_name(name: &str) -> io::Result<()> {
+    if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("invalid preset name {name:?}: use letters, digits, '-' and '_' only"),
+    ))
+}
+
+/// Existing preset names are used as paths, so they only need to be one plain path component.
+fn check_folder_name(name: &str) -> io::Result<()> {
+    let plain = !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.chars().any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'));
+    if plain {
+        return Ok(());
+    }
+    Err(io::Error::new(io::ErrorKind::InvalidInput, format!("invalid preset name {name:?}")))
+}
+
+fn preset_folder(ac_root: &Path, name: &str) -> PathBuf {
+    weather_dir(ac_root).join(name)
+}
+
+/// True when the weather folder already has a folder with this name, ignoring case.
+fn preset_name_taken(ac_root: &Path, name: &str) -> bool {
+    subfolders(&weather_dir(ac_root))
+        .iter()
+        .any(|(existing, _)| existing.eq_ignore_ascii_case(name))
+}
+
+/// Writes `bytes` to a file that must not exist yet.
+fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(bytes)
+}
+
+/// Copies the folder `from` to the not yet existing folder `to`, file by file, subfolders included.
+/// Symbolic links are skipped.
+fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
+    fs::create_dir(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else if kind.is_file() {
+            write_new(&target, &fs::read(entry.path())?)?;
+        }
+    }
+    Ok(())
+}
+
+/// Creates `extension/weather/<name>` with a copy of the parameter file (`settings.ini`) of the
+/// first preset, in name order, that has one. Returns the new folder.
+///
+/// The name must use only ASCII letters, digits, `-` and `_` (`InvalidInput` otherwise). A name
+/// already taken, ignoring case, gives `AlreadyExists`. With no preset to copy from, `NotFound`.
+/// Nothing is overwritten or deleted.
+pub fn create_preset(ac_root: &Path, name: &str) -> io::Result<PathBuf> {
+    validate_new_preset_name(name)?;
+    if preset_name_taken(ac_root, name) {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("preset {name} already exists")));
+    }
+    let weather = weather_dir(ac_root);
+    let source = subfolders(&weather)
+        .into_iter()
+        .map(|(_, path)| path.join(PARAMETER_FILE))
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no preset under {} has a {PARAMETER_FILE} to copy", weather.display()),
+            )
+        })?;
+    let bytes = fs::read(&source)?;
+    let folder = preset_folder(ac_root, name);
+    fs::create_dir(&folder)?;
+    write_new(&folder.join(PARAMETER_FILE), &bytes)?;
+    Ok(folder)
+}
+
+/// Copies the preset folder `from` to a new preset `to`, every file and subfolder included.
+///
+/// Each file is created new, so nothing in the target is overwritten, and the source is only read.
+/// `from` must exist (`NotFound`), `to` must be a valid new name (`InvalidInput`) that is not taken,
+/// ignoring case (`AlreadyExists`). If a copy fails part way, the files already written stay.
+pub fn copy_preset(ac_root: &Path, from: &str, to: &str) -> io::Result<()> {
+    check_folder_name(from)?;
+    validate_new_preset_name(to)?;
+    let source = preset_folder(ac_root, from);
+    if !source.is_dir() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, format!("no preset named {from}")));
+    }
+    if preset_name_taken(ac_root, to) {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("preset {to} already exists")));
+    }
+    copy_tree(&source, &preset_folder(ac_root, to))
+}
+
+/// Every `(section, key, value)` of a preset's `settings.ini`, in file order.
+/// Values have their inline comment removed, as in [`read_weather_fx`]. Nothing is written.
+pub fn read_preset_values(ac_root: &Path, preset: &str) -> io::Result<Vec<(String, String, String)>> {
+    check_folder_name(preset)?;
+    read_entries(&preset_folder(ac_root, preset).join(PARAMETER_FILE))
+}
+
+/// Sets one value in a preset's `settings.ini` and saves it through [`Ini::save_with_backup`].
+///
+/// The rules are those of [`set_weather_value`]: the key must exist unless `allow_new_key` is
+/// true, and an unchanged value does not save. A preset with no `settings.ini` gives `NotFound`.
+pub fn set_preset_value(
+    ac_root: &Path,
+    preset: &str,
+    section: &str,
+    key: &str,
+    value: &str,
+    allow_new_key: bool,
+) -> io::Result<()> {
+    check_folder_name(preset)?;
+    let path = preset_folder(ac_root, preset).join(PARAMETER_FILE);
+    if !path.is_file() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, format!("{} has no {PARAMETER_FILE}", path.display())));
+    }
+    edit_ini_value(&path, section, key, value, allow_new_key)
 }
 
 /// Lines describing presets and controllers present in only one of the two roots.
@@ -389,6 +535,110 @@ mod tests {
         }
         assert_eq!(fs::read_to_string(&fx).unwrap(), "[BASIC]\r\nENABLED=1\r\n");
         assert_eq!(fs::read_dir(fx.parent().unwrap()).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// `base` has a settings.ini, a manifest and a shader; `empty` has no settings.ini.
+    fn preset_root(tag: &str) -> PathBuf {
+        let root = temp_root(tag);
+        write(
+            &root.join("extension/weather/base/settings.ini"),
+            "[PARAMETERS]\r\nSUN_ANGLE=12 ; degrees\r\nHUMIDITY=0.5\r\n",
+        );
+        write(&root.join("extension/weather/base/manifest.ini"), "[ABOUT]\r\nNAME=Base\r\n");
+        write(&root.join("extension/weather/base/shaders/sky.fx"), "float x;");
+        mkdirs(&root, &["extension/weather/empty"]);
+        root
+    }
+
+    fn backups_in(dir: &Path, file: &str) -> usize {
+        let prefix = format!("{file}.acxs-backup-");
+        fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+            .count()
+    }
+
+    #[test]
+    fn create_preset_copies_the_parameter_file_and_refuses_taken_or_bad_names() {
+        let root = preset_root("create");
+        let folder = create_preset(&root, "Storm_2-b").unwrap();
+        assert_eq!(folder, root.join("extension/weather/Storm_2-b"));
+        assert_eq!(
+            fs::read_to_string(folder.join("settings.ini")).unwrap(),
+            "[PARAMETERS]\r\nSUN_ANGLE=12 ; degrees\r\nHUMIDITY=0.5\r\n"
+        );
+        assert!(!folder.join("manifest.ini").exists());
+
+        assert_eq!(create_preset(&root, "BASE").unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        for bad in ["", "two words", "../up", "dot.name", "sl/ash"] {
+            let err = create_preset(&root, bad).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
+        }
+        assert_eq!(list_presets(&root).len(), 3); // base, empty, Storm_2-b
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn create_preset_needs_a_parameter_file_to_copy() {
+        let root = temp_root("create-none");
+        mkdirs(&root, &["extension/weather/bare"]);
+        let err = create_preset(&root, "fresh").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(!root.join("extension/weather/fresh").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copy_preset_copies_every_file_and_never_overwrites() {
+        let root = preset_root("copy");
+        copy_preset(&root, "base", "wet").unwrap();
+        let wet = root.join("extension/weather/wet");
+        assert_eq!(fs::read_to_string(wet.join("manifest.ini")).unwrap(), "[ABOUT]\r\nNAME=Base\r\n");
+        assert_eq!(fs::read_to_string(wet.join("shaders/sky.fx")).unwrap(), "float x;");
+        assert_eq!(
+            fs::read_to_string(wet.join("settings.ini")).unwrap(),
+            fs::read_to_string(root.join("extension/weather/base/settings.ini")).unwrap()
+        );
+
+        assert_eq!(copy_preset(&root, "base", "Wet").unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(copy_preset(&root, "missing", "other").unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(copy_preset(&root, "base", "bad name").unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert!(root.join("extension/weather/base/shaders/sky.fx").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn set_preset_value_edits_settings_ini_and_keeps_a_backup() {
+        let root = preset_root("preset-set");
+        let dir = root.join("extension/weather/base");
+        assert_eq!(
+            read_preset_values(&root, "base").unwrap()[0],
+            ("PARAMETERS".to_string(), "SUN_ANGLE".to_string(), "12".to_string())
+        );
+
+        set_preset_value(&root, "base", "parameters", "sun_angle", "30", false).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join("settings.ini")).unwrap(),
+            "[PARAMETERS]\r\nSUN_ANGLE=30 ; degrees\r\nHUMIDITY=0.5\r\n"
+        );
+        assert_eq!(backups_in(&dir, "settings.ini"), 1);
+
+        let err = set_preset_value(&root, "base", "PARAMETERS", "NEW", "1", false).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        set_preset_value(&root, "base", "PARAMETERS", "NEW", "1", true).unwrap();
+        assert!(read_preset_values(&root, "base")
+            .unwrap()
+            .iter()
+            .any(|(s, k, v)| s == "PARAMETERS" && k == "NEW" && v == "1"));
+
+        assert_eq!(
+            set_preset_value(&root, "empty", "A", "B", "1", true).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert!(set_preset_value(&root, "../base", "PARAMETERS", "HUMIDITY", "1", false).is_err());
+        assert!(read_preset_values(&root, "").is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }

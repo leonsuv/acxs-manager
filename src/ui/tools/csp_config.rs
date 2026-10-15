@@ -64,6 +64,11 @@ enum Msg {
         controllers: Vec<String>,
         fx: Result<Vec<(String, String, String)>, String>,
     },
+    PresetValues {
+        root: PathBuf,
+        preset: String,
+        result: Result<Vec<(String, String, String)>, String>,
+    },
     Gamepad { root: PathBuf, result: Result<GamepadSettings, String> },
     Classes { root: PathBuf, result: Result<(Vec<CarClass>, Vec<CarYear>), String> },
     Diff { root: PathBuf, tab: Tab, lines: Vec<String> },
@@ -121,6 +126,16 @@ struct Data {
     fx: Vec<(String, String, String)>,
     /// Edited weather_fx values by (section, key). Only values that differ from `fx` are changes.
     weather_edits: HashMap<(String, String), String>,
+    /// Preset picked in the Weather tab.
+    selected_preset: Option<String>,
+    /// The preset whose settings.ini values were requested last.
+    preset_values_for: Option<String>,
+    preset_values: Option<Vec<(String, String, String)>>,
+    /// Edited preset values by (section, key), as for `weather_edits`.
+    preset_edits: HashMap<(String, String), String>,
+    preset_error: Option<String>,
+    /// Name typed for a new or duplicated preset.
+    preset_name: String,
 
     classes_requested: bool,
     classes: Vec<CarClass>,
@@ -231,6 +246,17 @@ impl CspConfig {
                     if self.is_current(&root) {
                         self.data.presets = presets;
                         self.data.controllers = controllers;
+                        let selected_gone = self
+                            .data
+                            .selected_preset
+                            .as_ref()
+                            .is_some_and(|name| !self.data.presets.iter().any(|p| &p.name == name));
+                        if selected_gone {
+                            self.data.selected_preset = None;
+                            self.data.preset_values_for = None;
+                            self.data.preset_values = None;
+                            self.data.preset_edits.clear();
+                        }
                         match fx {
                             Ok(rows) => {
                                 self.data.fx = rows;
@@ -239,6 +265,20 @@ impl CspConfig {
                             Err(e) => {
                                 self.data.fx.clear();
                                 self.data.errors.insert(Tab::Weather, format!("weather_fx.ini: {e}"));
+                            }
+                        }
+                    }
+                }
+                Msg::PresetValues { root, preset, result } => {
+                    if self.is_current(&root) && self.data.selected_preset.as_deref() == Some(preset.as_str()) {
+                        match result {
+                            Ok(values) => {
+                                self.data.preset_values = Some(values);
+                                self.data.preset_error = None;
+                            }
+                            Err(e) => {
+                                self.data.preset_values = Some(Vec::new());
+                                self.data.preset_error = Some(e);
                             }
                         }
                     }
@@ -324,6 +364,17 @@ impl CspConfig {
                         let _ = tx.send(weather_msg(root_buf));
                     });
                 }
+                if let Some(preset) = self.data.selected_preset.clone()
+                    && self.data.preset_values_for.as_deref() != Some(preset.as_str())
+                {
+                    self.data.preset_values_for = Some(preset.clone());
+                    self.data.preset_values = None;
+                    let root_buf = root.to_path_buf();
+                    self.spawn(egui_ctx, move |tx| {
+                        let result = weather::read_preset_values(&root_buf, &preset).map_err(|e| e.to_string());
+                        let _ = tx.send(Msg::PresetValues { root: root_buf, preset, result });
+                    });
+                }
             }
             Tab::Gamepad => {
                 if !self.data.gamepad_requested {
@@ -363,6 +414,10 @@ impl CspConfig {
             Tab::Weather => {
                 d.weather_requested = false;
                 d.weather_edits.clear();
+                d.preset_values_for = None;
+                d.preset_values = None;
+                d.preset_edits.clear();
+                d.preset_error = None;
             }
             Tab::Gamepad => d.gamepad_requested = false,
             Tab::Classes => d.classes_requested = false,
@@ -440,6 +495,63 @@ impl CspConfig {
             match weather::set_weather_value(&root_buf, &section, &key, &value, allow_new) {
                 Ok(()) => note(tx, format!("Saved [{section}] {key}."), true),
                 Err(e) => note(tx, format!("Not saved: [{section}] {key}: {e}"), false),
+            }
+            let _ = tx.send(weather_msg(root_buf));
+        });
+    }
+
+    /// Pick a preset in the Weather tab and read its values.
+    fn select_preset(&mut self, egui_ctx: &egui::Context, root: &Path, name: String) {
+        let d = &mut self.data;
+        d.selected_preset = Some(name);
+        d.preset_values_for = None;
+        d.preset_values = None;
+        d.preset_edits.clear();
+        d.preset_error = None;
+        self.ensure(egui_ctx, root);
+    }
+
+    /// Write one preset settings.ini value on a background thread, then read the preset again.
+    fn save_preset_value(
+        &mut self,
+        egui_ctx: &egui::Context,
+        root: &Path,
+        preset: String,
+        section: String,
+        key: String,
+        value: String,
+    ) {
+        let root_buf = root.to_path_buf();
+        let allow_new = self.allow_new_key;
+        self.spawn(egui_ctx, move |tx| {
+            match weather::set_preset_value(&root_buf, &preset, &section, &key, &value, allow_new) {
+                Ok(()) => note(tx, format!("Saved {preset} [{section}] {key}."), true),
+                Err(e) => note(tx, format!("Not saved: {preset} [{section}] {key}: {e}"), false),
+            }
+            let result = weather::read_preset_values(&root_buf, &preset).map_err(|e| e.to_string());
+            let _ = tx.send(Msg::PresetValues { root: root_buf, preset, result });
+        });
+    }
+
+    /// Create a preset from the default parameter file, on a background thread.
+    fn new_preset(&mut self, egui_ctx: &egui::Context, root: &Path, name: String) {
+        let root_buf = root.to_path_buf();
+        self.spawn(egui_ctx, move |tx| {
+            match weather::create_preset(&root_buf, &name) {
+                Ok(_) => note(tx, format!("Created preset {name}."), true),
+                Err(e) => note(tx, format!("Preset not created: {e}"), false),
+            }
+            let _ = tx.send(weather_msg(root_buf));
+        });
+    }
+
+    /// Copy the preset `from` to a new preset `to`, on a background thread.
+    fn duplicate_preset(&mut self, egui_ctx: &egui::Context, root: &Path, from: String, to: String) {
+        let root_buf = root.to_path_buf();
+        self.spawn(egui_ctx, move |tx| {
+            match weather::copy_preset(&root_buf, &from, &to) {
+                Ok(()) => note(tx, format!("Copied {from} to {to}."), true),
+                Err(e) => note(tx, format!("Preset not copied: {e}"), false),
             }
             let _ = tx.send(weather_msg(root_buf));
         });
@@ -705,6 +817,10 @@ impl CspConfig {
         let mut reload = false;
         let mut compare = false;
         let mut save: Option<(String, String, String)> = None;
+        let mut preset_save: Option<(String, String, String, String)> = None;
+        let mut picked: Option<String> = None;
+        let mut create: Option<String> = None;
+        let mut duplicate: Option<(String, String)> = None;
         ui.horizontal(|ui| {
             if ui.add_enabled(!busy, egui::Button::new("Reload")).clicked() {
                 reload = true;
@@ -716,7 +832,11 @@ impl CspConfig {
                 compare = true;
             }
             ui.checkbox(&mut self.allow_new_key, "Allow creating new keys");
-            ui.label(RichText::new("Presets are read only. Selection values can be saved.").small().color(MUTED));
+            ui.label(
+                RichText::new("Select a preset to edit its settings.ini values. Selection values can be saved.")
+                    .small()
+                    .color(MUTED),
+            );
         });
         show_error(ui, &self.data, Tab::Weather);
         diff_card(ui, &self.data.diff, Tab::Weather);
@@ -726,15 +846,89 @@ impl CspConfig {
             if self.data.presets.is_empty() {
                 ui.label(RichText::new(if busy { "Loading..." } else { "No presets found." }).color(MUTED));
             }
+            let selected_name = self.data.selected_preset.clone();
             for preset in &self.data.presets {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(preset.name.as_str()).strong());
+                    let is_selected = selected_name.as_deref() == Some(preset.name.as_str());
+                    if ui.selectable_label(is_selected, preset.name.as_str()).clicked() && !is_selected && !busy {
+                        picked = Some(preset.name.clone());
+                    }
                     if preset.has_controller {
                         widgets::pill(ui, "has controller", OK);
                     } else {
                         widgets::pill(ui, "no controller", MUTED);
                     }
                 });
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.data.preset_name)
+                        .desired_width(200.0)
+                        .hint_text("New preset name"),
+                );
+                let name = self.data.preset_name.trim().to_string();
+                let name_ok = !name.is_empty();
+                if ui
+                    .add_enabled(!busy && name_ok, egui::Button::new("New preset"))
+                    .on_hover_text("Creates the preset with a copy of the default settings.ini")
+                    .clicked()
+                {
+                    create = Some(name.clone());
+                }
+                if ui
+                    .add_enabled(!busy && name_ok && selected_name.is_some(), egui::Button::new("Duplicate"))
+                    .on_hover_text("Copies every file of the selected preset to the name above")
+                    .clicked()
+                    && let Some(from) = selected_name.clone()
+                {
+                    duplicate = Some((from, name));
+                }
+            });
+            ui.add_space(12.0);
+
+            widgets::section_title(ui, "Preset values (settings.ini of the selected preset)");
+            if let Some(err) = &self.data.preset_error {
+                ui.label(RichText::new(err.as_str()).color(DANGER));
+            }
+            let Data { selected_preset, preset_values, preset_edits, .. } = &mut self.data;
+            match (selected_preset.as_deref(), preset_values.as_ref()) {
+                (None, _) => {
+                    ui.label(RichText::new("Select a preset to edit its values.").color(MUTED));
+                }
+                (Some(_), None) => {
+                    ui.label(RichText::new(if busy { "Loading..." } else { "Not loaded." }).color(MUTED));
+                }
+                (Some(preset), Some(values)) => {
+                    egui::Grid::new("preset_values")
+                        .num_columns(4)
+                        .spacing([14.0, 6.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            ui.label(RichText::new("Section").small().color(MUTED));
+                            ui.label(RichText::new("Key").small().color(MUTED));
+                            ui.label(RichText::new("Value").small().color(MUTED));
+                            ui.label("");
+                            ui.end_row();
+                            for (section, key, value) in values.iter() {
+                                ui.label(RichText::new(section.as_str()).color(MUTED));
+                                ui.label(key.as_str());
+                                let text = preset_edits
+                                    .entry((section.clone(), key.clone()))
+                                    .or_insert_with(|| value.clone());
+                                ui.add(egui::TextEdit::singleline(&mut *text).desired_width(200.0));
+                                let pending = text.trim().to_string();
+                                let changed = pending != value.as_str();
+                                if ui.add_enabled(!busy && changed, egui::Button::new("Save")).clicked() {
+                                    preset_save = Some((preset.to_string(), section.clone(), key.clone(), pending));
+                                }
+                                ui.end_row();
+                            }
+                        });
+                    if values.is_empty() {
+                        ui.label(RichText::new("No values in this preset.").color(MUTED));
+                    }
+                }
             }
             ui.add_space(12.0);
 
@@ -781,6 +975,18 @@ impl CspConfig {
         }
         if let Some((section, key, value)) = save {
             self.save_weather_value(egui_ctx, root, section, key, value);
+        }
+        if let Some(name) = picked {
+            self.select_preset(egui_ctx, root, name);
+        }
+        if let Some((preset, section, key, value)) = preset_save {
+            self.save_preset_value(egui_ctx, root, preset, section, key, value);
+        }
+        if let Some(name) = create {
+            self.new_preset(egui_ctx, root, name);
+        }
+        if let Some((from, to)) = duplicate {
+            self.duplicate_preset(egui_ctx, root, from, to);
         }
         if compare {
             self.start_diff(egui_ctx, root, Tab::Weather);
