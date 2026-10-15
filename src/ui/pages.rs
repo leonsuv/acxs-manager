@@ -10,8 +10,10 @@ use crate::content::{self, CarEntry, TrackEntry};
 use crate::csp::{self, LightsPatch, UNRECOGNIZED};
 use acxs_manager::dashboard_stats::{self, ContentStats, CountEntry};
 use acxs_manager::skins;
+use acxs_manager::update::{self, Release, Version};
 use eframe::egui::{self, RichText};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// Row height for `show_rows` (without item spacing). Matches the two-line list rows.
 const ROW_HEIGHT: f32 = 60.0;
@@ -19,6 +21,10 @@ const ROW_HEIGHT: f32 = 60.0;
 const TOP_N: usize = 5;
 /// egui memory id of the cached home statistics.
 const STATS_ID: &str = "home_content_stats";
+/// egui memory id of the update check card state.
+const UPDATE_STATE_ID: &str = "home_update_check";
+/// Upper bound for one update check, connect through reply.
+const UPDATE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub fn home(app: &mut App, ui: &mut egui::Ui) {
     widgets::heading(ui, "Home", "Point the manager at your Assetto Corsa install, then launch.");
@@ -92,6 +98,9 @@ pub fn home(app: &mut App, ui: &mut egui::Ui) {
                 }
             });
         });
+
+        ui.add_space(16.0);
+        update_card(app, ui);
 
         ui.add_space(16.0);
         ui.horizontal(|ui| {
@@ -325,6 +334,108 @@ pub fn patches(app: &mut App, ui: &mut egui::Ui) {
     if let Some(patch) = to_install {
         app.install_patch(patch);
     }
+}
+
+/// Result of one update check: a newer release, no newer release, or an error text.
+type UpdateOutcome = Result<Option<Release>, String>;
+
+/// Update check state kept in egui memory between frames.
+#[derive(Clone, Default)]
+struct UpdateCheck {
+    /// Nothing is requested until this is ticked.
+    opt_in: bool,
+    feed: String,
+    /// Filled by the worker thread while a check runs.
+    pending: Option<Arc<Mutex<Option<UpdateOutcome>>>>,
+}
+
+/// Opt-in update check. The request runs on a worker thread and its result is
+/// shown once as a notice.
+fn update_card(app: &mut App, ui: &mut egui::Ui) {
+    let id = egui::Id::unique(UPDATE_STATE_ID);
+    let mut state: UpdateCheck = ui.ctx().data_mut(|data| data.get_temp(id)).unwrap_or_default();
+
+    if let Some(slot) = state.pending.clone() {
+        let done = slot.lock().ok().and_then(|mut guard| guard.take());
+        if let Some(outcome) = done {
+            state.pending = None;
+            match outcome {
+                Ok(Some(release)) => app.push_notice(
+                    format!("Version {} is available: {}", release.version, release.url),
+                    true,
+                ),
+                Ok(None) => app.push_notice(
+                    format!("You are on the latest version ({}).", env!("CARGO_PKG_VERSION")),
+                    true,
+                ),
+                Err(e) => app.push_notice(format!("Update check failed: {e}"), false),
+            }
+        }
+    }
+
+    let feed_ok = state.feed.trim().starts_with("http://");
+    let checking = state.pending.is_some();
+    let can_check = state.opt_in && feed_ok && !checking;
+
+    theme::card().show(ui, |ui| {
+        widgets::section_title(ui, "Update check");
+        ui.checkbox(&mut state.opt_in, "Check for updates when I press Check");
+        ui.label(
+            RichText::new("Off by default. Nothing is contacted until this is ticked and you press Check.")
+                .small()
+                .color(MUTED),
+        );
+        ui.add_space(8.0);
+        ui.label(RichText::new("Feed URL (http:// only)").color(MUTED));
+        ui.add_enabled(
+            state.opt_in,
+            egui::TextEdit::singleline(&mut state.feed)
+                .desired_width(f32::INFINITY)
+                .hint_text("http://updates.example.com/latest.json"),
+        );
+        if !state.feed.trim().is_empty() && !feed_ok {
+            ui.label(RichText::new("The feed URL must start with http://. https:// is not supported.").color(DANGER));
+        }
+        ui.label(
+            RichText::new(
+                "HTTPS is not supported, so the request and the reply travel unencrypted. The feed \
+                 must return JSON with version, url and notes fields.",
+            )
+            .small()
+            .color(WARN),
+        );
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.add_enabled(can_check, egui::Button::new("Check")).clicked() {
+                state.pending = Some(start_update_check(state.feed.trim().to_string(), ui.ctx()));
+            }
+            if checking {
+                ui.spinner();
+                ui.label(RichText::new("Checking…").color(MUTED));
+            }
+        });
+    });
+
+    ui.ctx().data_mut(|data| data.insert_temp(id, state));
+}
+
+/// Runs `update::check` for the running version on a worker thread.
+fn start_update_check(feed: String, ctx: &egui::Context) -> Arc<Mutex<Option<UpdateOutcome>>> {
+    let slot = Arc::new(Mutex::new(None));
+    let worker = Arc::clone(&slot);
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        let outcome = Version::parse(env!("CARGO_PKG_VERSION"))
+            .map_err(|e| e.to_string())
+            .and_then(|current| {
+                update::check(&feed, UPDATE_TIMEOUT, &current).map_err(|e| e.to_string())
+            });
+        if let Ok(mut guard) = worker.lock() {
+            *guard = Some(outcome);
+        }
+        ctx.request_repaint();
+    });
+    slot
 }
 
 /// A fixed-width status tile on the home dashboard.

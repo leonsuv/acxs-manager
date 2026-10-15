@@ -14,6 +14,7 @@ use acxs_manager::telemetry::{CarUpdate, HandshakeInfo, LapInfo, Packet, summari
 use acxs_manager::telemetry_csv;
 use acxs_manager::track_map::{friction_circle_outline, friction_circle_points, project_lap};
 use acxs_manager::udp_client::{ClientError, DEFAULT_GAME_PORT, TelemetryClient};
+use acxs_manager::web_dashboard::{self, Dashboard};
 use eframe::egui::{self, RichText};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -38,6 +39,12 @@ const FRICTION_MAX_G: f32 = 2.0;
 /// Positions kept for the lap trail. Recording stops at this count until the
 /// car starts a new lap.
 const TRAIL_CAPACITY: usize = 20_000;
+
+/// Port the web dashboard listens on until the user changes it.
+const WEB_DEFAULT_PORT: &str = "8080";
+
+/// Bind address that makes the web dashboard reachable from other devices.
+const WEB_LAN_BIND: &str = "0.0.0.0";
 
 pub fn tool() -> Box<dyn Tool> {
     Box::new(LiveTelemetry::default())
@@ -78,6 +85,14 @@ struct LiveTelemetry {
     /// the file is being written.
     export_rx: Option<mpsc::Receiver<Notice>>,
     charts: LiveCharts,
+    /// Running web dashboard, if any. It outlives the telemetry connection.
+    web: Option<Dashboard>,
+    web_port: String,
+    /// Bind address chosen in the web dashboard card.
+    web_bind: String,
+    /// Set when the user ticks the local network checkbox. Gates `WEB_LAN_BIND`.
+    web_lan: bool,
+    web_status: String,
 }
 
 /// Chart and map state built from the car updates of one connection.
@@ -144,6 +159,11 @@ impl Default for LiveTelemetry {
             ignored: 0,
             export_rx: None,
             charts: LiveCharts::new(),
+            web: None,
+            web_port: WEB_DEFAULT_PORT.to_string(),
+            web_bind: web_dashboard::DEFAULT_BIND.to_string(),
+            web_lan: false,
+            web_status: String::new(),
         }
     }
 }
@@ -175,6 +195,8 @@ impl Tool for LiveTelemetry {
         );
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             self.connection_card(ui, &ctx, notices);
+            ui.add_space(16.0);
+            self.web_card(ui, notices);
             ui.add_space(16.0);
             self.session_card(ui);
             ui.add_space(16.0);
@@ -209,6 +231,9 @@ impl LiveTelemetry {
                 Ok(Msg::Handshake(h)) => self.handshake = Some(h),
                 Ok(Msg::Car(c)) => {
                     self.charts.record(&c);
+                    if let Some(dash) = &self.web {
+                        dash.publish(web_snapshot(&c, self.laps.len()));
+                    }
                     self.car = Some(c);
                     self.car_updates += 1;
                 }
@@ -316,6 +341,112 @@ impl LiveTelemetry {
             ctx.request_repaint();
         });
         self.export_rx = Some(rx);
+    }
+
+    fn start_web(&mut self, notices: &mut Vec<Notice>) {
+        let port = match parse_port(&self.web_port) {
+            Ok(port) => port,
+            Err(e) => {
+                notices.push(Notice { text: e, ok: false });
+                return;
+            }
+        };
+        // The public bind is used only when the checkbox is ticked and the selector picked it.
+        let bind = if self.web_lan && self.web_bind == WEB_LAN_BIND {
+            WEB_LAN_BIND
+        } else {
+            web_dashboard::DEFAULT_BIND
+        };
+        match Dashboard::start(bind, port) {
+            Ok(dash) => {
+                if let Some(car) = &self.car {
+                    dash.publish(web_snapshot(car, self.laps.len()));
+                }
+                self.web_status = format!("Listening on {}.", dash.local_addr());
+                self.web = Some(dash);
+            }
+            Err(e) => notices.push(Notice {
+                text: format!("Could not start the web dashboard on {bind}:{port}: {e}"),
+                ok: false,
+            }),
+        }
+    }
+
+    fn stop_web(&mut self) {
+        if let Some(dash) = self.web.take() {
+            dash.stop();
+            self.web_status = "Stopped.".to_string();
+        }
+    }
+
+    fn web_card(&mut self, ui: &mut egui::Ui, notices: &mut Vec<Notice>) {
+        let running = self.web.is_some();
+        theme::card().show(ui, |ui| {
+            widgets::section_title(ui, "Web dashboard");
+            ui.label(
+                RichText::new(
+                    "Serves the latest car sample as JSON at /api/latest and as a page that \
+                     refreshes every second. Plain HTTP with no password.",
+                )
+                .color(MUTED),
+            );
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Port").color(MUTED));
+                ui.add_enabled(
+                    !running,
+                    egui::TextEdit::singleline(&mut self.web_port).desired_width(70.0),
+                );
+                ui.add_enabled_ui(!running, |ui| {
+                    ui.radio_value(
+                        &mut self.web_bind,
+                        web_dashboard::DEFAULT_BIND.to_string(),
+                        "127.0.0.1 (this computer)",
+                    );
+                    ui.add_enabled_ui(self.web_lan, |ui| {
+                        ui.radio_value(
+                            &mut self.web_bind,
+                            WEB_LAN_BIND.to_string(),
+                            "0.0.0.0 (local network)",
+                        );
+                    });
+                });
+            });
+            ui.add_space(6.0);
+            let lan_box = egui::Checkbox::new(
+                &mut self.web_lan,
+                "Allow other devices on my local network (binds 0.0.0.0)",
+            );
+            if ui.add_enabled(!running, lan_box).changed() && !self.web_lan {
+                self.web_bind = web_dashboard::DEFAULT_BIND.to_string();
+            }
+            if self.web_lan {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(
+                        "Warning: this exposes live telemetry to every device on your local \
+                         network. Anyone who can reach the port can read it. There is no password \
+                         and no encryption, so enable this only on a network you trust.",
+                    )
+                    .color(WARN),
+                );
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!running, widgets::primary_button("Start")).clicked() {
+                    self.start_web(notices);
+                }
+                if ui.add_enabled(running, egui::Button::new("Stop")).clicked() {
+                    self.stop_web();
+                }
+                let (text, color) = if running { ("serving", OK) } else { ("stopped", MUTED) };
+                widgets::pill(ui, text, color);
+            });
+            if !self.web_status.is_empty() {
+                ui.add_space(6.0);
+                ui.label(RichText::new(&self.web_status).color(TEXT));
+            }
+        });
     }
 
     fn link_label(&self) -> (&'static str, egui::Color32) {
@@ -626,13 +757,41 @@ fn parse_target(host: &str, port: &str) -> Result<SocketAddr, String> {
         .trim()
         .parse()
         .map_err(|_| "Host must be an IP address, for example 127.0.0.1.".to_string())?;
-    let port: u16 = port
-        .trim()
-        .parse()
+    let port = parse_port(port)?;
+    Ok(SocketAddr::new(ip, port))
+}
+
+/// Parses a port field. Port 0 is refused so the dashboard address is predictable.
+fn parse_port(text: &str) -> Result<u16, String> {
+    text.trim()
+        .parse::<u16>()
         .ok()
         .filter(|&p| p != 0)
-        .ok_or_else(|| "Port must be a number from 1 to 65535.".to_string())?;
-    Ok(SocketAddr::new(ip, port))
+        .ok_or_else(|| "Port must be a number from 1 to 65535.".to_string())
+}
+
+/// The web dashboard view of one car sample. `CarUpdate` has no lap counter or
+/// race position, so `lap` is the number of laps completed this session and
+/// `position` stays 0.
+fn web_snapshot(car: &CarUpdate, completed_laps: usize) -> web_dashboard::Snapshot {
+    // The game's raw gear: 0 reverse, 1 neutral, 2 and up forward (as in `gear_label`).
+    // The dashboard uses -1 reverse, 0 neutral, 1 and up forward.
+    let gear = match car.gear {
+        0 => -1,
+        1 => 0,
+        g if g >= 2 => i32::from(g) - 1,
+        _ => 0,
+    };
+    web_dashboard::Snapshot {
+        speed_kmh: car.speed_kmh,
+        gear,
+        rpm: f32::from(car.rpm),
+        throttle: car.throttle,
+        brake: car.brake,
+        lap: u32::try_from(completed_laps).unwrap_or(u32::MAX),
+        lap_time_ms: car.lap_time_ms,
+        position: 0,
+    }
 }
 
 /// Body of the socket thread. Owns the client, forwards packets, and sends a

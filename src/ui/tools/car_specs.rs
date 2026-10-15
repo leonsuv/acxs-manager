@@ -11,11 +11,14 @@ use acxs_manager::car_compare::{self, IniChange, SpecDiff};
 use acxs_manager::cardata::{self, CarSpecs};
 use acxs_manager::content::{self, CarEntry};
 use acxs_manager::shift_lights::{self, ShiftProfile};
+use acxs_manager::thumbnails;
 use eframe::egui::{self, Color32, RichText};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 const ROW_HEIGHT: f32 = 56.0;
+/// Edge length in pixels of the square thumbnail made by the "Make thumbnail" button.
+const THUMB_SIZE: u32 = 512;
 const COMPARE_ROW_HEIGHT: f32 = 44.0;
 const COMPARE_LIST_HEIGHT: f32 = 220.0;
 /// Most data-file changes drawn at once. The rest are counted, not drawn.
@@ -39,6 +42,7 @@ pub fn tool() -> Box<dyn Tool> {
         compare_id: None,
         compare: None,
         pending_compare: None,
+        thumb_busy: false,
         tx,
         rx,
     })
@@ -49,6 +53,8 @@ enum Msg {
     Cars { root: PathBuf, cars: Vec<CarEntry> },
     Specs { id: String, specs: CarSpecs, rev_limit: Option<f64> },
     Compare { left: String, right: String, diffs: Vec<SpecDiff>, changes: Result<Vec<IniChange>, String> },
+    /// A thumbnail was made or found in the cache: its file path and size in bytes.
+    Thumbnail { result: Result<(PathBuf, usize), String> },
 }
 
 /// Specs of the selected car, once read.
@@ -82,6 +88,8 @@ struct CarSpecsPage {
     compare_id: Option<String>,
     compare: Option<Comparison>,
     pending_compare: Option<(String, String)>,
+    /// A thumbnail is being made for the selected car.
+    thumb_busy: bool,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
 }
@@ -135,9 +143,25 @@ impl CarSpecsPage {
     }
 
     /// Apply finished jobs. Results for a car that is no longer selected are dropped.
-    fn poll(&mut self) {
+    fn poll(&mut self, notices: &mut Vec<Notice>) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
+                Msg::Thumbnail { result } => {
+                    self.thumb_busy = false;
+                    match result {
+                        Ok((path, size)) => notices.push(Notice {
+                            text: format!(
+                                "Thumbnail saved to {} ({THUMB_SIZE}x{THUMB_SIZE}, {size} bytes)",
+                                path.display()
+                            ),
+                            ok: true,
+                        }),
+                        Err(e) => notices.push(Notice {
+                            text: format!("Thumbnail failed: {e}"),
+                            ok: false,
+                        }),
+                    }
+                }
                 Msg::Cars { root, cars } => {
                     if self.root.as_deref() == Some(root.as_path()) {
                         self.cars = cars;
@@ -195,9 +219,57 @@ impl CarSpecsPage {
         }
     }
 
+    /// Thumbnail button, the cached thumbnail path and a button to open its folder.
+    fn thumbnail_section(&mut self, ui: &mut egui::Ui, id: &str, notices: &mut Vec<Notice>) {
+        let Some(root) = self.root.clone() else { return };
+        let cache = thumbnails::cache_path(&root, id);
+        let thumb_file = cache.join(format!("{THUMB_SIZE}.png"));
+        let shown = if thumb_file.is_file() {
+            thumb_file.display().to_string()
+        } else {
+            "not made yet".to_string()
+        };
+
+        ui.add_space(16.0);
+        widgets::section_title(ui, "Thumbnail");
+        theme::card().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let make = ui.add_enabled(!self.thumb_busy, widgets::primary_button("Make thumbnail"));
+                if make.clicked() {
+                    self.thumb_busy = true;
+                    let id = id.to_string();
+                    spawn_job(ui.ctx(), &self.tx, move || {
+                        let saved = thumbnails::cache_path(&root, &id).join(format!("{THUMB_SIZE}.png"));
+                        let result = thumbnails::car_thumbnail(&root, &id, THUMB_SIZE)
+                            .map(|bytes| (saved, bytes.len()))
+                            .map_err(|e| e.to_string());
+                        Msg::Thumbnail { result }
+                    });
+                }
+                if self.thumb_busy {
+                    ui.add(egui::Spinner::new());
+                    ui.label(RichText::new("Working...").color(theme::MUTED));
+                }
+            });
+            ui.add_space(8.0);
+            widgets::key_value(ui, "Cached thumbnail", &shown);
+            ui.horizontal(|ui| {
+                let open = ui.add_enabled(cache.is_dir(), egui::Button::new("Open folder"));
+                if open.clicked() {
+                    if let Err(e) = open_folder(&cache) {
+                        notices.push(Notice {
+                            text: format!("Could not open {}: {e}", cache.display()),
+                            ok: false,
+                        });
+                    }
+                }
+            });
+        });
+    }
+
     /// Right-hand column: the selected car, its specs, shift lights and the comparison.
     /// Returns a car id when the compare list was clicked this frame.
-    fn detail(&mut self, ui: &mut egui::Ui) -> Option<String> {
+    fn detail(&mut self, ui: &mut egui::Ui, notices: &mut Vec<Notice>) -> Option<String> {
         let Some(selected) = self.selected.clone() else {
             widgets::empty_state(ui, "Pick a car from the list to see its specs.");
             return None;
@@ -207,6 +279,7 @@ impl CarSpecsPage {
             return None;
         };
         car_header(ui, &car);
+        self.thumbnail_section(ui, &selected, notices);
 
         let loaded = self.loaded.as_ref().filter(|l| l.id == selected);
         ui.add_space(16.0);
@@ -302,7 +375,7 @@ impl Tool for CarSpecsPage {
         "Content"
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, ctx: &ToolContext, _notices: &mut Vec<Notice>) {
+    fn ui(&mut self, ui: &mut egui::Ui, ctx: &ToolContext, notices: &mut Vec<Notice>) {
         widgets::heading(
             ui,
             "Car Specs",
@@ -314,7 +387,7 @@ impl Tool for CarSpecsPage {
         };
         let egui_ctx = ui.ctx().clone();
 
-        self.poll();
+        self.poll(notices);
         if self.root.as_deref() != Some(root) {
             self.root = Some(root.to_path_buf());
             self.cars.clear();
@@ -360,7 +433,7 @@ impl Tool for CarSpecsPage {
                     .id_salt("car_specs_detail")
                     .auto_shrink([false, false])
                     .show(right, |ui| {
-                        picked_compare = self.detail(ui);
+                        picked_compare = self.detail(ui, notices);
                     });
             }
         });
@@ -457,6 +530,18 @@ fn car_header(ui: &mut egui::Ui, car: &CarEntry) {
 
 fn dash_if_empty(text: &str) -> &str {
     if text.is_empty() { "—" } else { text }
+}
+
+/// Opens a folder in the platform file manager.
+#[cfg(windows)]
+fn open_folder(path: &Path) -> std::io::Result<()> {
+    std::process::Command::new("explorer").arg(path).spawn().map(|_| ())
+}
+
+/// Opens a folder in the platform file manager.
+#[cfg(not(windows))]
+fn open_folder(path: &Path) -> std::io::Result<()> {
+    std::process::Command::new("open").arg(path).spawn().map(|_| ())
 }
 
 /// LED row, the rpm slider that drives it, and the thresholds behind it.

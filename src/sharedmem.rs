@@ -3,8 +3,9 @@
 //! The game publishes three read-only pages: physics (updated every physics
 //! step), graphics (HUD and timing state) and static (session and car limits
 //! that stay fixed for a session). This module turns the bytes of one page
-//! into a typed struct. It makes no OS calls: opening and mapping the memory
-//! belongs to the caller.
+//! into a typed struct. The parsers make no OS calls. On Windows,
+//! [`open_pages`] and [`read_snapshot`] open and map the pages, then hand the
+//! bytes to the parsers.
 //!
 //! Layout rules, which match a record with a maximum field alignment of 4:
 //! little-endian integers and floats are aligned to 4 bytes, UTF-16 string
@@ -37,6 +38,21 @@ pub enum SharedMemError {
         /// Bytes actually supplied.
         got: usize,
     },
+    /// The game's mapping for this page does not exist, usually because the
+    /// game is not running.
+    NotRunning {
+        /// Which page was being opened.
+        page: &'static str,
+    },
+    /// A Windows call failed.
+    Os {
+        /// The call that failed.
+        call: &'static str,
+        /// The value of `GetLastError` after the failure.
+        code: u32,
+    },
+    /// Shared memory is only available on Windows.
+    Unsupported,
 }
 
 impl fmt::Display for SharedMemError {
@@ -46,6 +62,16 @@ impl fmt::Display for SharedMemError {
                 f,
                 "{page} page too short: need {needed} bytes, got {got}"
             ),
+            SharedMemError::NotRunning { page } => write!(
+                f,
+                "{page} page is not mapped: is the game running?"
+            ),
+            SharedMemError::Os { call, code } => {
+                write!(f, "{call} failed with Windows error {code}")
+            }
+            SharedMemError::Unsupported => {
+                write!(f, "shared memory pages are only available on Windows")
+            }
         }
     }
 }
@@ -453,6 +479,136 @@ pub fn parse_static(bytes: &[u8]) -> Result<StaticPage, SharedMemError> {
     })
 }
 
+/// All three pages parsed from one read.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Snapshot {
+    pub physics: PhysicsPage,
+    pub graphics: GraphicsPage,
+    pub static_page: StaticPage,
+}
+
+#[cfg(windows)]
+const PHYSICS_MAPPING: &str = "acpmf_physics";
+#[cfg(windows)]
+const GRAPHICS_MAPPING: &str = "acpmf_graphics";
+#[cfg(windows)]
+const STATIC_MAPPING: &str = "acpmf_static";
+
+/// Owned copies of the raw bytes of each page, read from the game's mappings.
+#[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedPages {
+    pub physics: Vec<u8>,
+    pub graphics: Vec<u8>,
+    pub static_page: Vec<u8>,
+}
+
+/// Opens the game's physics, graphics and static mappings read-only and copies
+/// the bytes of each page. The mappings and handles are released before this
+/// returns, so the result owns its data.
+///
+/// Fails with [`SharedMemError::NotRunning`] when a mapping is missing.
+#[cfg(windows)]
+pub fn open_pages() -> Result<SharedPages, SharedMemError> {
+    Ok(SharedPages {
+        physics: read_mapping(PHYSICS_MAPPING, PHYSICS_PAGE_LEN, "physics")?,
+        graphics: read_mapping(GRAPHICS_MAPPING, GRAPHICS_PAGE_LEN, "graphics")?,
+        static_page: read_mapping(STATIC_MAPPING, STATIC_PAGE_LEN, "static")?,
+    })
+}
+
+/// Opens and parses all three pages in one call.
+#[cfg(windows)]
+pub fn read_snapshot() -> Result<Snapshot, SharedMemError> {
+    let pages = open_pages()?;
+    Ok(Snapshot {
+        physics: parse_physics(&pages.physics)?,
+        graphics: parse_graphics(&pages.graphics)?,
+        static_page: parse_static(&pages.static_page)?,
+    })
+}
+
+/// Off Windows there is no shared memory, so this always returns
+/// [`SharedMemError::Unsupported`].
+#[cfg(not(windows))]
+pub fn read_snapshot() -> Result<Snapshot, SharedMemError> {
+    Err(SharedMemError::Unsupported)
+}
+
+/// Owns a file mapping handle and closes it on drop.
+#[cfg(windows)]
+struct MappingHandle(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for MappingHandle {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from a successful OpenFileMappingW and is
+        // closed only here.
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+/// Owns a mapped view and unmaps it on drop.
+#[cfg(windows)]
+struct MappedView(*mut std::ffi::c_void);
+
+#[cfg(windows)]
+impl Drop for MappedView {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Memory::{MEMORY_MAPPED_VIEW_ADDRESS, UnmapViewOfFile};
+        // SAFETY: the address came from a successful MapViewOfFile and is
+        // unmapped only here.
+        unsafe {
+            UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: self.0 });
+        }
+    }
+}
+
+/// Opens the named mapping, maps `len` bytes read-only and copies them out.
+/// The view is dropped before the handle, so both are released on every path.
+#[cfg(windows)]
+fn read_mapping(name: &str, len: usize, page: &'static str) -> Result<Vec<u8>, SharedMemError> {
+    use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, GetLastError};
+    use windows_sys::Win32::System::Memory::{FILE_MAP_READ, MapViewOfFile, OpenFileMappingW};
+
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+
+    // SAFETY: `wide` is NUL-terminated and lives across the call.
+    let raw_handle = unsafe { OpenFileMappingW(FILE_MAP_READ, 0, wide.as_ptr()) };
+    if raw_handle.is_null() {
+        // SAFETY: plain query of the calling thread's last error.
+        let code = unsafe { GetLastError() };
+        return Err(if code == ERROR_FILE_NOT_FOUND {
+            SharedMemError::NotRunning { page }
+        } else {
+            SharedMemError::Os {
+                call: "OpenFileMappingW",
+                code,
+            }
+        });
+    }
+    let handle = MappingHandle(raw_handle);
+
+    // SAFETY: `handle` is an open file mapping object.
+    let addr = unsafe { MapViewOfFile(handle.0, FILE_MAP_READ, 0, 0, len) };
+    if addr.Value.is_null() {
+        // SAFETY: plain query of the calling thread's last error.
+        let code = unsafe { GetLastError() };
+        return Err(SharedMemError::Os {
+            call: "MapViewOfFile",
+            code,
+        });
+    }
+    let view = MappedView(addr.Value);
+
+    // SAFETY: the view maps at least `len` readable bytes and stays mapped
+    // until `view` is dropped at the end of this function.
+    let bytes = unsafe { std::slice::from_raw_parts(view.0 as *const u8, len) }.to_vec();
+    Ok(bytes)
+}
+
 fn check_len(bytes: &[u8], needed: usize, page: &'static str) -> Result<(), SharedMemError> {
     if bytes.len() < needed {
         Err(SharedMemError::TooShort {
@@ -844,5 +1000,12 @@ mod tests {
         assert!(msg.contains("graphics"));
         assert!(msg.contains("288"));
         assert!(msg.contains("10"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn read_snapshot_returns_error_off_windows() {
+        let result = read_snapshot();
+        assert!(matches!(result, Err(SharedMemError::Unsupported)));
     }
 }

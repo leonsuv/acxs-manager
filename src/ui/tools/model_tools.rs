@@ -8,7 +8,10 @@ use crate::ui::{theme, widgets, Notice};
 use acxs_manager::acd::{self, AcdEntry};
 use acxs_manager::kn5::{self, Kn5Info};
 use acxs_manager::kn5_export::{self, ObjStats};
+use acxs_manager::ortho::{self, View};
 use eframe::egui::{self, RichText};
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -17,6 +20,9 @@ use std::thread;
 const LIST_CAP: usize = 500;
 /// Height of each scrollable list box.
 const LIST_HEIGHT: f32 = 240.0;
+/// Size of the preview PNG written by "Render preview".
+const PREVIEW_WIDTH: u32 = 800;
+const PREVIEW_HEIGHT: u32 = 600;
 
 pub fn tool() -> Box<dyn Tool> {
     Box::new(ModelTools::new())
@@ -36,6 +42,11 @@ enum Msg {
         path: PathBuf,
         result: Result<Vec<AcdEntry>, String>,
     },
+    /// A preview PNG was written; the result is its size in bytes.
+    Rendered {
+        path: PathBuf,
+        result: Result<usize, String>,
+    },
 }
 
 struct ModelTools {
@@ -45,6 +56,7 @@ struct ModelTools {
     kn5_path: Option<PathBuf>,
     inspect_busy: bool,
     export_busy: bool,
+    render_busy: bool,
     /// Last successful inspection, with the file it came from.
     inspected: Option<(PathBuf, Kn5Info)>,
     /// Last successful export: output path and counts.
@@ -63,6 +75,7 @@ impl ModelTools {
             kn5_path: None,
             inspect_busy: false,
             export_busy: false,
+            render_busy: false,
             inspected: None,
             exported: None,
             acd_busy: false,
@@ -120,6 +133,19 @@ impl ModelTools {
                             self.exported = None;
                             notices.push(notice(format!("OBJ export failed: {e}"), false));
                         }
+                    }
+                }
+                Msg::Rendered { path, result } => {
+                    self.render_busy = false;
+                    match result {
+                        Ok(bytes) => notices.push(notice(
+                            format!(
+                                "Saved preview {} ({PREVIEW_WIDTH}x{PREVIEW_HEIGHT}, {bytes} bytes)",
+                                path.display()
+                            ),
+                            true,
+                        )),
+                        Err(e) => notices.push(notice(format!("Render preview failed: {e}"), false)),
                     }
                 }
                 Msg::Listed { path, result } => {
@@ -209,7 +235,28 @@ impl ModelTools {
                     }
                 }
 
-                if self.inspect_busy || self.export_busy {
+                let render = ui.add_enabled(
+                    has_file && !self.render_busy,
+                    egui::Button::new("Render preview"),
+                );
+                if render.clicked() {
+                    if let Some(kn5_file) = self.kn5_path.clone() {
+                        let stem = default_stem(&kn5_file);
+                        if let Some(png) = rfd::FileDialog::new()
+                            .add_filter("png", &["png"])
+                            .set_file_name(format!("{stem}.png"))
+                            .save_file()
+                        {
+                            self.render_busy = true;
+                            self.spawn(ui.ctx(), move || {
+                                let result = render_preview(&kn5_file, &png);
+                                Msg::Rendered { path: png, result }
+                            });
+                        }
+                    }
+                }
+
+                if self.inspect_busy || self.export_busy || self.render_busy {
                     ui.add(egui::Spinner::new());
                     ui.label(RichText::new("Working...").color(theme::MUTED));
                 }
@@ -404,6 +451,41 @@ fn name_list(ui: &mut egui::Ui, title: &str, names: &[String]) {
 
 fn notice(text: String, ok: bool) -> Notice {
     Notice { text, ok }
+}
+
+/// Loads the model, renders it from the fixed preview view and writes the PNG
+/// as a new file. An existing file is never overwritten. Returns the byte count.
+fn render_preview(kn5_file: &Path, png: &Path) -> Result<usize, String> {
+    let triangles = kn5_export::load_triangles(kn5_file).map_err(|e| e.to_string())?;
+    let view = View {
+        yaw_deg: 45.0,
+        pitch_deg: 20.0,
+        width: PREVIEW_WIDTH,
+        height: PREVIEW_HEIGHT,
+        padding: 0.08,
+    };
+    let bytes = ortho::render_png(&triangles, &view).map_err(|e| e.to_string())?;
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(png)
+        .map_err(|e| match e.kind() {
+            io::ErrorKind::AlreadyExists => format!("{} already exists, choose another name", file_name(png)),
+            _ => format!("could not create {}: {e}", file_name(png)),
+        })?;
+    if let Err(e) = file.write_all(&bytes) {
+        let _ = fs::remove_file(png);
+        return Err(format!("could not write {}: {e}", file_name(png)));
+    }
+    Ok(bytes.len())
+}
+
+/// File stem of `path`, or "model" when it has none. Used as the default save name.
+fn default_stem(path: &Path) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "model".to_string())
 }
 
 fn file_name(path: &Path) -> String {

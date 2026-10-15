@@ -1,9 +1,13 @@
-//! Replay Viewer tool page: opens an `.acreplay` file, shows its summary and
-//! exports the lap table as CSV. Parsing and writing run on background threads.
+//! Replay Viewer tool page: opens an `.acreplay` file, plays back its telemetry,
+//! shows its summary and exports the lap table as CSV. Parsing and writing run on
+//! background threads.
 
 use super::{Tool, ToolContext};
 use crate::ui::{theme, widgets, Notice};
-use acxs_manager::replay::{format_lap_time, read_replay, ReplayInfo};
+use acxs_manager::replay::{
+    format_lap_time, read_replay_samples, ReplayInfo, ReplaySamples, Sample,
+};
+use acxs_manager::replay_player::Player;
 use acxs_manager::telemetry::LapInfo;
 use acxs_manager::telemetry_csv::{laps_to_csv, write_csv};
 use eframe::egui::{self, RichText};
@@ -11,6 +15,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
+
+/// Playback speeds offered by the speed selector. The player clamps them to its own range.
+const SPEEDS: [f64; 5] = [0.25, 0.5, 1.0, 2.0, 4.0];
 
 pub fn tool() -> Box<dyn Tool> {
     Box::new(ReplayViewer::new())
@@ -20,9 +27,18 @@ pub fn tool() -> Box<dyn Tool> {
 enum Msg {
     Parsed {
         path: PathBuf,
-        result: Result<ReplayInfo, String>,
+        result: Result<ReplaySamples, String>,
     },
     Exported(Result<PathBuf, String>),
+}
+
+/// A replay shown in the viewer: its summary plus the playback model over its samples.
+struct Loaded {
+    path: PathBuf,
+    info: ReplayInfo,
+    player: Player,
+    /// True when the file had more frames than were stored.
+    capped: bool,
 }
 
 struct ReplayViewer {
@@ -30,8 +46,8 @@ struct ReplayViewer {
     rx: Receiver<Msg>,
     /// True while a background parse or export is running.
     busy: bool,
-    /// The replay currently shown, with the path it was read from.
-    loaded: Option<(PathBuf, ReplayInfo)>,
+    /// The replay currently shown, with its playback state.
+    loaded: Option<Loaded>,
 }
 
 impl ReplayViewer {
@@ -45,12 +61,12 @@ impl ReplayViewer {
         }
     }
 
-    /// Parse `path` on a background thread.
+    /// Parse `path` and decode its samples on a background thread.
     fn start_parse(&mut self, path: PathBuf, ctx: egui::Context) {
         self.busy = true;
         let tx = self.tx.clone();
         thread::spawn(move || {
-            let result = read_replay(&path).map_err(|e| e.to_string());
+            let result = read_replay_samples(&path).map_err(|e| e.to_string());
             let _ = tx.send(Msg::Parsed { path, result });
             ctx.request_repaint();
         });
@@ -89,12 +105,20 @@ impl Tool for ReplayViewer {
         while let Ok(msg) = self.rx.try_recv() {
             self.busy = false;
             match msg {
-                Msg::Parsed { path, result: Ok(info) } => {
+                Msg::Parsed { path, result: Ok(replay) } => {
                     notices.push(Notice {
                         text: format!("Opened {}", file_name(&path)),
                         ok: true,
                     });
-                    self.loaded = Some((path, info));
+                    let capped = replay.is_capped();
+                    let info = replay.info().clone();
+                    let player = Player::new(replay.into_samples());
+                    self.loaded = Some(Loaded {
+                        path,
+                        info,
+                        player,
+                        capped,
+                    });
                 }
                 Msg::Parsed { path, result: Err(e) } => {
                     self.loaded = None;
@@ -111,10 +135,19 @@ impl Tool for ReplayViewer {
             }
         }
 
+        // Move the playhead by the frame time while playing, and keep repainting.
+        if let Some(loaded) = &mut self.loaded {
+            if loaded.player.is_playing() {
+                let dt = f64::from(ui.input(|i| i.stable_dt));
+                loaded.player.advance(dt);
+                ui.ctx().request_repaint();
+            }
+        }
+
         widgets::heading(
             ui,
             "Replay Viewer",
-            "Open an Assetto Corsa .acreplay file to see its summary and export the lap times.",
+            "Open an Assetto Corsa .acreplay file to play back its telemetry, see its summary and export the lap times.",
         );
 
         ui.horizontal(|ui| {
@@ -134,7 +167,7 @@ impl Tool for ReplayViewer {
                 let laps = self
                     .loaded
                     .as_ref()
-                    .map(|(_, info)| lap_rows(info))
+                    .map(|loaded| lap_rows(&loaded.info))
                     .unwrap_or_default();
                 let picked = rfd::FileDialog::new()
                     .add_filter("CSV", &["csv"])
@@ -154,11 +187,99 @@ impl Tool for ReplayViewer {
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
-            .show(ui, |ui| match &self.loaded {
+            .show(ui, |ui| match &mut self.loaded {
                 None => widgets::empty_state(ui, "No replay loaded."),
-                Some((path, info)) => summary(ui, path, info),
+                Some(loaded) => {
+                    playback(ui, loaded);
+                    ui.add_space(12.0);
+                    summary(ui, &loaded.path, &loaded.info);
+                }
             });
     }
+}
+
+/// Play/pause, speed selector, seek slider and the readout of the sample at the playhead.
+fn playback(ui: &mut egui::Ui, loaded: &mut Loaded) {
+    let capped = loaded.capped;
+    let player = &mut loaded.player;
+    let duration = player.duration_s();
+
+    theme::card().show(ui, |ui| {
+        widgets::section_title(ui, "Playback");
+        if player.samples().is_empty() {
+            ui.label(RichText::new("No telemetry samples in this replay.").color(theme::MUTED));
+            return;
+        }
+
+        ui.horizontal(|ui| {
+            let label = if player.is_playing() { "Pause" } else { "Play" };
+            if ui.add(widgets::primary_button(label)).clicked() {
+                if player.is_playing() {
+                    player.pause();
+                } else {
+                    player.play();
+                }
+            }
+            ui.add_space(12.0);
+            ui.label(RichText::new("Speed").color(theme::MUTED));
+            let mut speed = player.speed();
+            egui::ComboBox::from_id_salt("replay_speed")
+                .selected_text(format_speed(speed))
+                .show_ui(ui, |ui| {
+                    for choice in SPEEDS {
+                        ui.selectable_value(&mut speed, choice, format_speed(choice));
+                    }
+                });
+            player.set_speed(speed);
+        });
+
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let seekable = duration > 0.0;
+            let max = if seekable { duration } else { 1.0 };
+            let mut position = player.position_s();
+            ui.label(RichText::new(format_duration_ms(position)).monospace());
+            ui.spacing_mut().slider_width = (ui.available_width() - 90.0).max(120.0);
+            let slider = egui::Slider::new(&mut position, 0.0..=max).show_value(false);
+            if ui.add_enabled(seekable, slider).changed() {
+                player.seek(position);
+            }
+            ui.label(RichText::new(format_duration_ms(duration)).monospace());
+        });
+
+        ui.add_space(8.0);
+        match player.current_sample() {
+            Some(sample) => sample_readout(ui, sample),
+            None => {
+                ui.label(RichText::new("No sample at the playhead.").color(theme::MUTED));
+            }
+        }
+
+        if capped {
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(
+                    "This file has more frames than are stored, so playback ends at the last stored sample.",
+                )
+                .small()
+                .color(theme::MUTED),
+            );
+        }
+    });
+}
+
+/// Rows for the telemetry values of one sample.
+fn sample_readout(ui: &mut egui::Ui, sample: &Sample) {
+    widgets::key_value(ui, "Speed", &format!("{:.1} km/h", sample.speed_kmh));
+    widgets::key_value(ui, "Gear", &gear_label(sample.gear));
+    widgets::key_value(ui, "RPM", &format!("{:.0}", sample.rpm));
+    widgets::key_value(ui, "Throttle", &format!("{:.0}%", sample.throttle * 100.0));
+    widgets::key_value(ui, "Brake", &format!("{:.0}%", sample.brake * 100.0));
+    widgets::key_value(
+        ui,
+        "Position",
+        &format!("x {:.1}, y {:.1}, z {:.1} m", sample.x, sample.y, sample.z),
+    );
 }
 
 /// Converts the replay's lap times into the rows the telemetry CSV writer expects.
@@ -236,6 +357,20 @@ fn summary(ui: &mut egui::Ui, path: &Path, info: &ReplayInfo) {
             .color(theme::MUTED),
         );
     });
+}
+
+/// Speed multiplier as shown in the selector, e.g. `0.5x`.
+fn format_speed(multiplier: f64) -> String {
+    format!("{multiplier}x")
+}
+
+/// Gear label from the raw gear code: 0 = reverse, 1 = neutral, 2 and up = forward gears.
+fn gear_label(gear: u8) -> String {
+    match gear {
+        0 => "R".to_owned(),
+        1 => "N".to_owned(),
+        n => (n - 1).to_string(),
+    }
 }
 
 /// Formats a duration in seconds as `M:SS.mmm`, the same style as lap times.
