@@ -47,6 +47,7 @@ mod championship;
 mod exports;
 mod car_tuning;
 mod strategy;
+mod lights_profile;
 
 pub trait Tool {
     /// Label in the tool list.
@@ -93,5 +94,6 @@ pub fn registry() -> Vec<Box<dyn Tool>> {
         exports::tool(),
         car_tuning::tool(),
         strategy::tool(),
+        lights_profile::tool(),
     ]
 }
