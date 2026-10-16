@@ -42,6 +42,7 @@ pub mod kn5_writer;
 pub mod laptimes;
 pub mod launcher;
 pub mod license_plate;
+pub mod lights_profile;
 pub mod livery;
 pub mod lua_apps;
 pub mod mods;
