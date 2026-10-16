@@ -229,7 +229,12 @@ impl QuickRacePage {
                     ok: false,
                 }
             } else {
-                match race::write_race_ini(&root, &form) {
+                let written = acxs_manager::settings::ac_user_cfg_dir()
+                    .ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::NotFound, "the Documents folder was not found")
+                    })
+                    .and_then(|cfg| race::write_race_ini(&cfg, &form));
+                match written {
                     Err(err) => Notice {
                         text: format!("Could not write race.ini. {err}"),
                         ok: false,

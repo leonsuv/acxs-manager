@@ -91,9 +91,42 @@ pub fn read_weather_fx(ac_root: &Path) -> io::Result<Vec<(String, String, String
     read_entries(&ac_root.join("extension").join("config").join("weather_fx.ini"))
 }
 
+/// Path of `weather_fx.ini` under an AC root.
+pub fn weather_fx_path(ac_root: &Path) -> std::path::PathBuf {
+    ac_root.join("extension").join("config").join("weather_fx.ini")
+}
+
+/// Like [`read_weather_fx`], with the user's override file
+/// (`Documents/Assetto Corsa/cfg/extension/weather_fx.ini`) laid over the defaults.
+pub fn read_weather_fx_effective(ac_root: &Path, user: Option<&Path>) -> io::Result<Vec<(String, String, String)>> {
+    let ini = crate::csp_config::load_effective(&weather_fx_path(ac_root), user)?;
+    Ok(entries_of(&ini))
+}
+
+/// Sets one `weather_fx.ini` value in the user's override file `user`, which CSP
+/// reads over the defaults. With `user` set to `None` this is [`set_weather_value`].
+pub fn set_weather_value_user(
+    ac_root: &Path,
+    user: Option<&Path>,
+    section: &str,
+    key: &str,
+    value: &str,
+    allow_new_key: bool,
+) -> io::Result<()> {
+    match user {
+        Some(user) => {
+            crate::csp_config::write_user_setting(&weather_fx_path(ac_root), user, section, key, value, allow_new_key)
+        }
+        None => set_weather_value(ac_root, section, key, value, allow_new_key),
+    }
+}
+
 /// Every `(section, key, value)` of the ini file at `path`, in file order, with inline comments cut.
 fn read_entries(path: &Path) -> io::Result<Vec<(String, String, String)>> {
-    let ini = Ini::load(path)?;
+    Ok(entries_of(&Ini::load(path)?))
+}
+
+fn entries_of(ini: &Ini) -> Vec<(String, String, String)> {
 
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
@@ -106,7 +139,7 @@ fn read_entries(path: &Path) -> io::Result<Vec<(String, String, String)>> {
             out.push((section.to_string(), key.to_string(), strip_inline_comment(value)));
         }
     }
-    Ok(out)
+    out
 }
 
 /// Byte index where a trailing ` ;...` (or tab-prefixed) comment starts, if there is one.

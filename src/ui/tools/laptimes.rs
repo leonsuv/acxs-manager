@@ -670,17 +670,17 @@ fn number(text: &str) -> Option<u32> {
 fn parse_lap_time(text: &str) -> Result<u32, String> {
     let trimmed = text.trim();
     let bad = || format!("\"{trimmed}\" is not a lap time. Use m:ss.mmm, for example 1:23.456.");
-    let (minutes, rest) = trimmed.split_once(':').ok_or_else(&bad)?;
-    let minutes = number(minutes).ok_or_else(&bad)?;
+    let (minutes, rest) = trimmed.split_once(':').ok_or_else(bad)?;
+    let minutes = number(minutes).ok_or_else(bad)?;
     let (seconds, fraction) = match rest.split_once('.') {
         Some((s, f)) => (s, Some(f)),
         None => (rest, None),
     };
-    let seconds = number(seconds).filter(|&s| s < 60).ok_or_else(&bad)?;
+    let seconds = number(seconds).filter(|&s| s < 60).ok_or_else(bad)?;
     let millis = match fraction {
         None => 0,
         Some(f) if (1..=3).contains(&f.len()) => {
-            number(f).ok_or_else(&bad)? * 10u32.pow(3 - f.len() as u32)
+            number(f).ok_or_else(bad)? * 10u32.pow(3 - f.len() as u32)
         }
         Some(_) => return Err(bad()),
     };

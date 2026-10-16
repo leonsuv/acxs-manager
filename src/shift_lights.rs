@@ -10,7 +10,6 @@
 use std::fmt;
 use std::path::Path;
 
-use crate::ini::Ini;
 
 /// Largest LED count accepted by [`profile_for`].
 pub const MAX_LED_COUNT: usize = 64;
@@ -128,7 +127,7 @@ pub fn shift_point(profile: &ShiftProfile) -> f64 {
 /// `LIMITER`. Returns `None` if the file, the key or the value is missing or
 /// not a finite number above zero.
 pub fn read_rev_limit(car_dir: &Path) -> Option<f64> {
-    let ini = Ini::load(&car_dir.join("data").join("engine.ini")).ok()?;
+    let ini = crate::cardata::load_data_ini(car_dir, "engine.ini").ok()?;
     let limit = ini.get_f64("ENGINE_DATA", "LIMITER")?;
     (limit.is_finite() && limit > 0.0).then_some(limit)
 }

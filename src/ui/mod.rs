@@ -47,8 +47,14 @@ pub struct Snapshot {
 
 enum Msg {
     Notice(Notice),
-    Snapshot(Snapshot),
+    /// A rescan result, tagged with the generation of the request that made it.
+    Snapshot(u64, Snapshot),
+    /// The current answer of the periodic game check.
+    GameRunning(bool),
 }
+
+/// How often the background thread checks whether the game is running.
+const GAME_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub struct App {
     settings: Settings,
@@ -62,6 +68,10 @@ pub struct App {
     confirm_uninstall: bool,
     snapshot: Snapshot,
     busy: bool,
+    /// Number of background jobs started by [`App::spawn`] that have not reported yet.
+    pending: usize,
+    /// Generation of the newest rescan request; older snapshots are dropped.
+    generation: u64,
     notices: VecDeque<Notice>,
     ctx: egui::Context,
     tools: Vec<Box<dyn tools::Tool>>,
@@ -87,6 +97,25 @@ fn gather(ac_root: Option<PathBuf>, library: PathBuf) -> Snapshot {
     snapshot
 }
 
+/// Checks every [`GAME_POLL`] whether the game runs and reports changes, so the
+/// "running" state the pages and tools rely on never goes stale.
+fn start_game_watch(tx: Sender<Msg>, ctx: egui::Context) {
+    thread::spawn(move || {
+        let mut last = None;
+        loop {
+            thread::sleep(GAME_POLL);
+            let running = game::is_game_running();
+            if last != Some(running) {
+                if tx.send(Msg::GameRunning(running)).is_err() {
+                    return;
+                }
+                last = Some(running);
+                ctx.request_repaint();
+            }
+        }
+    });
+}
+
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::apply(&cc.egui_ctx);
@@ -110,6 +139,8 @@ impl App {
             confirm_uninstall: false,
             snapshot: Snapshot::default(),
             busy: false,
+            pending: 0,
+            generation: 0,
             notices: VecDeque::new(),
             ctx: cc.egui_ctx.clone(),
             tools: tools::registry(),
@@ -118,6 +149,7 @@ impl App {
             rx,
         };
         app.refresh();
+        start_game_watch(app.tx.clone(), app.ctx.clone());
         app
     }
 
@@ -133,6 +165,9 @@ impl App {
     /// Run `work` on a background thread, then rescan and send the new snapshot.
     fn spawn(&mut self, work: impl FnOnce(Option<PathBuf>, PathBuf) -> Option<Notice> + Send + 'static) {
         self.busy = true;
+        self.pending += 1;
+        self.generation += 1;
+        let generation = self.generation;
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         let ac_root = self.settings.ac_root_path();
@@ -141,7 +176,7 @@ impl App {
             if let Some(notice) = work(ac_root.clone(), library.clone()) {
                 let _ = tx.send(Msg::Notice(notice));
             }
-            let _ = tx.send(Msg::Snapshot(gather(ac_root, library)));
+            let _ = tx.send(Msg::Snapshot(generation, gather(ac_root, library)));
             ctx.request_repaint();
         });
     }
@@ -154,9 +189,15 @@ impl App {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Msg::Notice(notice) => self.push_notice(notice.text, notice.ok),
-                Msg::Snapshot(snapshot) => {
+                Msg::GameRunning(running) => self.snapshot.game_running = running,
+                Msg::Snapshot(generation, snapshot) => {
+                    self.pending = self.pending.saturating_sub(1);
+                    self.busy = self.pending > 0;
+                    // A slower, older rescan must not replace a newer result.
+                    if generation < self.generation {
+                        continue;
+                    }
                     self.snapshot = snapshot;
-                    self.busy = false;
                     let car_ids: Vec<&str> = self.snapshot.cars.iter().map(|c| c.id.as_str()).collect();
                     if self.selected_car.as_deref().is_some_and(|id| !car_ids.contains(&id)) {
                         self.selected_car = None;
@@ -334,6 +375,9 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll();
+        for tool in &mut self.tools {
+            tool.tick();
+        }
 
         egui::Panel::left("nav")
             .exact_size(210.0)

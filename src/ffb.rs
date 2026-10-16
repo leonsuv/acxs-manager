@@ -155,6 +155,61 @@ pub fn read(ac_root: &Path) -> io::Result<FfbTweaks> {
     }
 }
 
+/// Reads the values CSP uses: the tuning file under `ac_root` overlaid with the
+/// user's override file (`Documents/Assetto Corsa/cfg/extension/ffb_tweaks.ini`)
+/// when `user` is given.
+pub fn read_with_user(ac_root: &Path, user: Option<&Path>) -> io::Result<FfbTweaks> {
+    match crate::csp_config::load_effective(&config_path(ac_root), user) {
+        Ok(ini) => Ok(from_ini(&ini)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(FfbTweaks::default()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Writes the values that differ from what CSP currently uses into the user's
+/// override file `user`, so the defaults under `ac_root` stay as shipped. With
+/// `user` set to `None` this is [`write`].
+pub fn write_with_user(ac_root: &Path, user: Option<&Path>, tweaks: &FfbTweaks) -> io::Result<()> {
+    let Some(user) = user else {
+        return write(ac_root, tweaks);
+    };
+    let mut current = read_with_user(ac_root, Some(user))?;
+    let mut want = tweaks.clone();
+    let mut ini = match Ini::load(user) {
+        Ok(ini) => ini,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ini::default(),
+        Err(e) => return Err(e),
+    };
+    let mut changed = false;
+    for (w, c) in slots(&mut want).into_iter().zip(slots(&mut current)) {
+        match (w, c) {
+            (Slot::Float { section, key, value: w }, Slot::Float { value: c, .. }) => {
+                if !w.is_finite() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("{section}.{key} is not a finite number"),
+                    ));
+                }
+                if *w != *c {
+                    ini.set(section, key, (*w).to_string());
+                    changed = true;
+                }
+            }
+            (Slot::Flag { section, key, value: w }, Slot::Flag { value: c, .. }) => {
+                if *w != *c {
+                    ini.set(section, key, if *w { "1" } else { "0" });
+                    changed = true;
+                }
+            }
+            _ => unreachable!("slots() yields the same order for every instance"),
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    ini.save_with_backup(user)
+}
+
 /// Write the tuning file under `ac_root`, and nothing else on disk.
 ///
 /// Only keys whose value differs from what is in the file are touched, so a file that

@@ -139,12 +139,19 @@ pub enum TuneError {
     NoGears,
     /// The power curve has fewer than two `rpm|torque` points.
     NoCurve,
+    /// The car ships `data.acd`, which the game reads instead of `data/`.
+    PackedData,
     Io(io::Error),
 }
 
 impl fmt::Display for TuneError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            TuneError::PackedData => write!(
+                f,
+                "this car uses a packed data.acd, which the game reads instead of data/; \
+                 edits to data/ would have no effect"
+            ),
             TuneError::InvalidFactor(v) => {
                 write!(f, "factor must be between {MIN_FACTOR} and {MAX_FACTOR}, got {v}")
             }
@@ -304,6 +311,9 @@ pub fn set_base_height(suspensions_ini: &str, axle: Axle, metres: f64) -> Result
 /// whose operation needs a data file that is missing (`tyres.ini` or `suspensions.ini`).
 pub fn apply(car_dir: &Path, tuning: Tuning) -> Result<Vec<Change>, TuneError> {
     let data = car_dir.join("data");
+    if crate::cardata::uses_packed_data(car_dir) {
+        return Err(TuneError::PackedData);
+    }
     if !data.join(CAR_FILE).is_file() {
         return Err(TuneError::MissingFile(CAR_FILE.to_string()));
     }
@@ -352,7 +362,11 @@ pub fn apply(car_dir: &Path, tuning: Tuning) -> Result<Vec<Change>, TuneError> {
     }
     // The curve file has no sections. The INI writer keeps lines that have no `=` verbatim,
     // so the same save path works for it.
-    Ini::parse(&tuned.text).save_with_backup(&data.join(&file))?;
+    let target = data.join(&file);
+    let mut ini = Ini::parse(&tuned.text);
+    // Keep a Windows ANSI file in its encoding, as it was read.
+    ini.set_latin1(fs::read(&target).is_ok_and(|bytes| std::str::from_utf8(&bytes).is_err()));
+    ini.save_with_backup(&target)?;
     Ok(tuned
         .changes
         .into_iter()
@@ -431,12 +445,17 @@ fn is_forward_gear_key(key: &str) -> bool {
 
 /// Reads a file from `data/`. A missing file becomes [`TuneError::MissingFile`].
 fn read_data_file(data: &Path, name: &str) -> Result<String, TuneError> {
-    fs::read_to_string(data.join(name)).map_err(|e| {
+    let bytes = fs::read(data.join(name)).map_err(|e| {
         if e.kind() == io::ErrorKind::NotFound {
             TuneError::MissingFile(name.to_string())
         } else {
             TuneError::Io(e)
         }
+    })?;
+    // Mod files are often Windows ANSI; read them byte for byte as Latin-1.
+    Ok(match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(err) => err.into_bytes().iter().map(|&b| char::from(b)).collect(),
     })
 }
 

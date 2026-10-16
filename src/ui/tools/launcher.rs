@@ -557,6 +557,10 @@ fn profiles_path(root: &Path) -> PathBuf {
     root.join(PROFILES_FILE)
 }
 
+/// The race file the game reads: `<Documents>/Assetto Corsa/cfg/race.ini`.
+/// Falls back to `<AC root>/cfg/race.ini` only when no Documents folder is known.
 fn race_ini_path(root: &Path) -> PathBuf {
-    root.join("settings").join("cfg").join("race.ini")
+    acxs_manager::settings::ac_user_cfg_dir()
+        .unwrap_or_else(|| root.join("cfg"))
+        .join("race.ini")
 }

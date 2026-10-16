@@ -83,6 +83,14 @@ pub fn build_command(exe: &Path, cfg_dir: &Path, launch: &LaunchArgs) -> Command
     if let Some(dir) = exe.parent() {
         cmd.current_dir(dir);
     }
+    // acServer is a console program. The manager is a GUI program, so without this
+    // flag Windows opens an empty console window next to it; the output is piped anyway.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
     cmd
 }
 
@@ -316,6 +324,7 @@ fn spawn_reader<R: Read + Send + 'static>(pipe: R, sink: Arc<Mutex<LineBuffer>>)
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
     /// A unique directory under the system temp dir, removed on drop.

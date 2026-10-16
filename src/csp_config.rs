@@ -5,6 +5,12 @@
 //! on the same line (for example `ENABLED=1 ; Active; 1 or 0`), which is shown
 //! as the setting's doc when no `_doc_config_<name>.ini` entry exists for it.
 //!
+//! Those files are the patch's defaults. CSP reads the user's own values from
+//! `<Documents>/Assetto Corsa/cfg/extension/<same name>.ini`, which override the
+//! defaults and survive patch updates (CSP's own settings UI writes there). The
+//! `*_effective` readers overlay that user file, and [`write_user_setting`]
+//! writes into it, so an edit takes effect and is not hidden by an override.
+//!
 //! Editing goes through `crate::ini::Ini`, so comments, key order and the
 //! trailing inline comment of an edited line are kept, and every save first
 //! moves the previous file to a `.acxs-backup-<stamp>` copy.
@@ -37,6 +43,131 @@ pub struct Setting {
     /// Description from a `_doc_config_*.ini` entry if one exists, otherwise
     /// the trailing `; comment` of the line in the config file.
     pub doc: Option<String>,
+}
+
+/// CSP's user config folder, `<Documents>/Assetto Corsa/cfg/extension`.
+pub fn user_config_dir() -> Option<PathBuf> {
+    crate::settings::ac_user_cfg_dir().map(|cfg| cfg.join("extension"))
+}
+
+/// The user override file for the default config file `default_path`
+/// (same file name, inside [`user_config_dir`]).
+pub fn user_config_path(default_path: &Path) -> Option<PathBuf> {
+    Some(user_config_dir()?.join(default_path.file_name()?))
+}
+
+/// `defaults` with every value of `user` laid over it: keys present in both take
+/// the user's value (keeping the default's inline comment), keys only in `user`
+/// are added.
+pub fn overlay(defaults: &Ini, user: &Ini) -> Ini {
+    let mut out = defaults.clone();
+    for section in unique_sections(user) {
+        for (key, raw) in user.entries(section) {
+            let value = split_inline(raw).0;
+            let rendered = render_value(out.get(section, key), value);
+            out.set(section, key, rendered);
+        }
+    }
+    out
+}
+
+/// The default file at `default_path` overlaid with the user file `user_path`.
+/// Fails with `NotFound` only when neither file exists.
+pub fn load_effective(default_path: &Path, user_path: Option<&Path>) -> io::Result<Ini> {
+    let defaults = match Ini::load(default_path) {
+        Ok(ini) => Some(ini),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    let user = match user_path.map(Ini::load) {
+        Some(Ok(ini)) => Some(ini),
+        Some(Err(e)) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => None,
+    };
+    match (defaults, user) {
+        (Some(d), Some(u)) => Ok(overlay(&d, &u)),
+        (Some(d), None) => Ok(d),
+        (None, Some(u)) => Ok(u),
+        (None, None) => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{} not found", default_path.display()),
+        )),
+    }
+}
+
+/// Settings of `default_path` as CSP sees them: defaults overlaid with the
+/// user file. Docs come from the default file's folder.
+pub fn read_effective_settings(default_path: &Path, user_path: Option<&Path>) -> io::Result<Vec<Setting>> {
+    let mut settings = match read_settings(default_path) {
+        Ok(list) => list,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    let Some(user_path) = user_path else {
+        return Ok(settings);
+    };
+    let user = match Ini::load(user_path) {
+        Ok(ini) => ini,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(settings),
+        Err(e) => return Err(e),
+    };
+    for section in unique_sections(&user) {
+        for (key, raw) in user.entries(section) {
+            let value = split_inline(raw).0.to_string();
+            match settings
+                .iter_mut()
+                .find(|s| s.section.eq_ignore_ascii_case(section) && s.key.eq_ignore_ascii_case(key))
+            {
+                Some(existing) => existing.value = value,
+                None => settings.push(Setting {
+                    section: section.to_string(),
+                    key: key.to_string(),
+                    value,
+                    doc: None,
+                }),
+            }
+        }
+    }
+    Ok(settings)
+}
+
+/// Sets one value in the user override file `user_path` for the default file
+/// `default_path`, creating the override file when needed. The key must exist in
+/// the defaults or the override unless `allow_new_key` is true. Setting the value
+/// CSP already uses saves nothing. The previous override file is backed up.
+pub fn write_user_setting(
+    default_path: &Path,
+    user_path: &Path,
+    section: &str,
+    key: &str,
+    value: &str,
+    allow_new_key: bool,
+) -> io::Result<()> {
+    let (section, key, value) = (section.trim(), key.trim(), value.trim());
+    validate(section, key, value)?;
+    let effective = match load_effective(default_path, Some(user_path)) {
+        Ok(ini) => ini,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ini::default(),
+        Err(e) => return Err(e),
+    };
+    match effective.get(section, key) {
+        Some(raw) if split_inline(raw).0 == value => return Ok(()),
+        Some(_) => {}
+        None if !allow_new_key => {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{key} is not set in [{section}] of {}; refusing to create a new key", default_path.display()),
+            ));
+        }
+        None => {}
+    }
+    let mut user = match Ini::load(user_path) {
+        Ok(ini) => ini,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ini::default(),
+        Err(e) => return Err(e),
+    };
+    user.set(section, key, value);
+    user.save_with_backup(user_path)
 }
 
 /// The `.ini` files directly inside `extension_config_dir`, sorted by name.
@@ -290,6 +421,32 @@ fn parse_docs(text: &str) -> HashMap<(String, String), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_override_wins_and_receives_writes() {
+        let dir = std::env::temp_dir().join(format!("acxs-csp-user-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("defaults")).unwrap();
+        fs::create_dir_all(dir.join("user")).unwrap();
+        let default_path = dir.join("defaults").join("general.ini");
+        let user_path = dir.join("user").join("general.ini");
+        fs::write(&default_path, "[BASIC]\nENABLED=1 ; Active\nOTHER=5\n").unwrap();
+        fs::write(&user_path, "[BASIC]\nENABLED=0\n").unwrap();
+
+        let settings = read_effective_settings(&default_path, Some(&user_path)).unwrap();
+        let enabled = settings.iter().find(|s| s.key == "ENABLED").unwrap();
+        assert_eq!(enabled.value, "0");
+        assert_eq!(enabled.doc.as_deref(), Some("Active"));
+
+        write_user_setting(&default_path, &user_path, "BASIC", "OTHER", "7", false).unwrap();
+        let user = Ini::load(&user_path).unwrap();
+        assert_eq!(user.get("BASIC", "OTHER"), Some("7"));
+        assert_eq!(user.get("BASIC", "ENABLED"), Some("0"));
+        // The defaults stay untouched.
+        assert_eq!(fs::read_to_string(&default_path).unwrap(), "[BASIC]\nENABLED=1 ; Active\nOTHER=5\n");
+        assert!(write_user_setting(&default_path, &user_path, "BASIC", "NOPE", "1", false).is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     const GENERAL: &str = "[BASIC]\r\nENABLED=1 ; Active (set to 0 to disable); 1 or 0\r\nNAME=Lights\r\n\r\n[CONFIGURATIONS]\r\nADAPTER_NAME= ; Internet adapter\r\n";
 

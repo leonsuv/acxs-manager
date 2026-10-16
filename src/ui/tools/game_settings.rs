@@ -59,11 +59,9 @@ pub fn tool() -> Box<dyn Tool> {
 
 /// `video.ini` lives in `Documents/Assetto Corsa/cfg/` (see `game_cfg` module docs).
 fn default_video_dir() -> String {
-    let home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    home.join("Documents").join("Assetto Corsa").join("cfg").display().to_string()
+    acxs_manager::settings::ac_user_cfg_dir()
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_default()
 }
 
 /// `assetto_corsa.ini` lives in `<AC root>/system/cfg/` (see `game_cfg` module docs).
@@ -336,7 +334,10 @@ impl GameSettings {
     fn create_snapshot(&mut self, ctx: &egui::Context, root: PathBuf) {
         self.snap_pending += 1;
         self.spawn(ctx, move || {
-            Event::SnapshotCreated(backup::create_snapshot(&root, &[]).map_err(|e| e.to_string()))
+            // The game keeps the user's own settings (video.ini, controls.ini, race.ini,
+            // CSP's cfg/extension) in Documents, so that folder is part of every snapshot.
+            let extra: Vec<PathBuf> = acxs_manager::settings::ac_user_cfg_dir().into_iter().collect();
+            Event::SnapshotCreated(backup::create_snapshot(&root, &extra).map_err(|e| e.to_string()))
         });
     }
 

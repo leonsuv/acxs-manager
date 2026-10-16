@@ -115,6 +115,12 @@ impl TelemetryClient {
         Ok(telemetry::decode(&buf[..n])?)
     }
 
+    /// Sends the handshake request (operation 0) again, for example when the game
+    /// was not running yet when [`TelemetryClient::connect`] sent the first one.
+    pub fn send_handshake(&self) -> io::Result<()> {
+        self.send_request(telemetry::OP_HANDSHAKE)
+    }
+
     /// Asks the game to send car updates (operation 1).
     ///
     /// The request layout has no field for a rate, so `interval_ms` is not sent
@@ -150,6 +156,21 @@ fn is_timeout(e: &io::Error) -> bool {
     matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
 }
 
+/// True for the errors a connected UDP socket reports when nothing listens on the
+/// game port yet (an ICMP port-unreachable reply). Windows reports it as
+/// `ConnectionReset` on the next receive, Linux as `ConnectionRefused`. The game
+/// may simply not be running yet, so callers retry instead of giving up.
+pub fn is_unreachable(e: &io::Error) -> bool {
+    matches!(e.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionRefused)
+}
+
+impl ClientError {
+    /// True when the game port did not answer yet; see [`is_unreachable`].
+    pub fn is_unreachable(&self) -> bool {
+        matches!(self, ClientError::Io(e) if is_unreachable(e))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,11 +187,13 @@ mod tests {
 
     /// A 208-byte handshake response with a few name fields set.
     fn handshake_response() -> Vec<u8> {
+        // wchar_t[50] names (UTF-16LE): car at 0, driver at 100, track at 208, layout at 308.
         let mut b = vec![0u8; telemetry::HANDSHAKE_RESPONSE_LEN];
-        b[..17].copy_from_slice(b"ks_ferrari_488gt3");
-        b[50..54].copy_from_slice(b"Leon");
-        b[108..113].copy_from_slice(b"monza");
-        b[158..160].copy_from_slice(b"gp");
+        for (off, text) in [(0, "ks_ferrari_488gt3"), (100, "Leon"), (208, "monza"), (308, "gp")] {
+            for (i, unit) in text.encode_utf16().enumerate() {
+                b[off + i * 2..off + i * 2 + 2].copy_from_slice(&unit.to_le_bytes());
+            }
+        }
         b
     }
 

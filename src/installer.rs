@@ -254,13 +254,15 @@ fn read_entries<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<Vec<Entry
 /// inside it. Folders leading to it (`content/`, `content/cars/`) may be listed as well.
 fn analyse(entries: &[Entry]) -> Result<Layout, InstallError> {
     // Form 1: content/cars/<id>/... or content/tracks/<id>/...
+    // Folder names are matched ignoring case, as Windows does (`Content/Cars/...`).
     let mut found: Vec<(ContentKind, String)> = Vec::new();
+    let mut spelling: Option<(String, String)> = None;
     for entry in entries {
         let parts = &entry.parts;
-        if parts.len() < 3 || parts[0] != "content" {
+        if parts.len() < 3 || !parts[0].eq_ignore_ascii_case("content") {
             continue;
         }
-        let kind = match parts[1].as_str() {
+        let kind = match parts[1].to_ascii_lowercase().as_str() {
             "cars" => ContentKind::Car,
             "tracks" => ContentKind::Track,
             _ => continue,
@@ -272,6 +274,7 @@ fn analyse(entries: &[Entry]) -> Result<Layout, InstallError> {
         let candidate = (kind, parts[2].clone());
         if !found.contains(&candidate) {
             found.push(candidate);
+            spelling = Some((parts[0].clone(), parts[1].clone()));
         }
     }
     if found.len() > 1 {
@@ -281,9 +284,10 @@ fn analyse(entries: &[Entry]) -> Result<Layout, InstallError> {
         )));
     }
     if let Some((kind, id)) = found.pop() {
-        let prefix = vec!["content".to_string(), kind.folder().to_string(), id.clone()];
+        let (content, folder) = spelling.unwrap_or_else(|| ("content".to_string(), kind.folder().to_string()));
+        let prefix = vec![content, folder, id.clone()];
         for entry in entries {
-            if entry.parts.is_empty() {
+            if entry.parts.is_empty() || is_loose_root_file(entry) {
                 continue;
             }
             if entry.parts == prefix && !entry.is_dir {
@@ -302,7 +306,7 @@ fn analyse(entries: &[Entry]) -> Result<Layout, InstallError> {
 
     // Form 2: <id>/... at the archive root, with the kind read from the files inside.
     let mut root: Option<String> = None;
-    for entry in entries.iter().filter(|e| !e.parts.is_empty()) {
+    for entry in entries.iter().filter(|e| !e.parts.is_empty() && !is_loose_root_file(e)) {
         let first = &entry.parts[0];
         match &root {
             None => root = Some(first.clone()),
@@ -310,9 +314,6 @@ fn analyse(entries: &[Entry]) -> Result<Layout, InstallError> {
                 return Err(InstallError::UnexpectedEntry(entry.name.clone()));
             }
             Some(_) => {}
-        }
-        if entry.parts.len() == 1 && !entry.is_dir {
-            return Err(InstallError::UnexpectedEntry(entry.name.clone()));
         }
     }
     let Some(id) = root else {
@@ -327,7 +328,8 @@ fn analyse(entries: &[Entry]) -> Result<Layout, InstallError> {
         if *first != id {
             continue;
         }
-        let names: Vec<&str> = rest.iter().map(String::as_str).collect();
+        let names: Vec<String> = rest.iter().map(|n| n.to_ascii_lowercase()).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
         match names.as_slice() {
             ["ui", "ui_car.json"] => has_car = true,
             ["ui", "ui_track.json"] => has_track = true,
@@ -347,6 +349,12 @@ fn analyse(entries: &[Entry]) -> Result<Layout, InstallError> {
     };
     let prefix = vec![id.clone()];
     Ok(Layout { kind, id, prefix })
+}
+
+/// A plain file at the archive root, such as `readme.txt` or a licence. Mod
+/// archives often carry one next to the content folder; it is not installed.
+fn is_loose_root_file(entry: &Entry) -> bool {
+    entry.parts.len() == 1 && !entry.is_dir
 }
 
 /// File count and total uncompressed size of the entries that will be installed.
@@ -594,10 +602,34 @@ mod tests {
         let dir = TempDir::new("outside");
         let zip = dir.0.join("mixed.zip");
         let mut files = CAR.to_vec();
-        files.push(("readme.txt", "hi"));
+        files.push(("extras/readme.txt", "hi"));
         make_zip(&zip, &files);
 
         assert!(matches!(inspect_archive(&zip), Err(InstallError::UnexpectedEntry(_))));
+    }
+
+    #[test]
+    fn loose_root_files_are_skipped_and_case_is_ignored() {
+        let dir = TempDir::new("loose");
+        let ac = ac_root(&dir);
+        let zip = dir.0.join("car.zip");
+        make_zip(
+            &zip,
+            &[
+                ("readme.txt", "hi"),
+                ("Content/Cars/abc/UI/ui_car.json", "{}"),
+                ("Content/Cars/abc/abc.kn5", "kn5"),
+            ],
+        );
+        let report = install_archive(&ac, &zip, false).unwrap();
+        assert_eq!(report.kind, ContentKind::Car);
+        assert_eq!(report.file_count, 2);
+        assert!(ac.join("content/cars/abc/abc.kn5").is_file());
+        assert!(!ac.join("readme.txt").exists());
+
+        let root_zip = dir.0.join("root.zip");
+        make_zip(&root_zip, &[("license.txt", "x"), ("xyz/UI/UI_CAR.JSON", "{}")]);
+        assert_eq!(inspect_archive(&root_zip).unwrap().kind, ContentKind::Car);
     }
 
     #[test]

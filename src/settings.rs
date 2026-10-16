@@ -87,15 +87,72 @@ pub fn default_library() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// The user's Documents folder. On Windows this asks the shell for the known
+/// folder, so a Documents folder moved to OneDrive or another drive is found.
+/// Falls back to `<home>/OneDrive/Documents` or `<home>/Documents`, whichever
+/// holds an `Assetto Corsa` folder, then to `<home>/Documents`.
+pub fn documents_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    if let Some(dir) = known_documents_dir() {
+        return Some(dir);
+    }
+    let home = PathBuf::from(std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?);
+    let candidates = [home.join("Documents"), home.join("OneDrive").join("Documents")];
+    candidates
+        .iter()
+        .find(|dir| dir.join("Assetto Corsa").is_dir())
+        .cloned()
+        .or_else(|| Some(candidates[0].clone()))
+}
+
+#[cfg(windows)]
+fn known_documents_dir() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{FOLDERID_Documents, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+
+    let mut raw: windows_sys::core::PWSTR = std::ptr::null_mut();
+    // SAFETY: the GUID lives for the call, `raw` receives a CoTaskMemAlloc'd,
+    // NUL-terminated string that is freed below on every path.
+    let hr = unsafe { SHGetKnownFolderPath(&FOLDERID_Documents, KF_FLAG_DEFAULT as u32, std::ptr::null_mut(), &mut raw) };
+    let path = if hr >= 0 && !raw.is_null() {
+        // SAFETY: `raw` is NUL-terminated, so the scan stops inside the allocation.
+        let len = unsafe { (0..).take_while(|&i| *raw.add(i) != 0).count() };
+        // SAFETY: `len` units were just read from `raw`.
+        let units = unsafe { std::slice::from_raw_parts(raw, len) };
+        Some(PathBuf::from(std::ffi::OsString::from_wide(units)))
+    } else {
+        None
+    };
+    // SAFETY: freeing null is allowed; otherwise `raw` came from the shell.
+    unsafe { CoTaskMemFree(raw as *const _) };
+    path.filter(|p| !p.as_os_str().is_empty())
+}
+
+/// `<Documents>/Assetto Corsa`, where the game keeps the user's config
+/// (`cfg/`: `race.ini`, `video.ini`, `controls.ini`, CSP's `cfg/extension/`),
+/// setups, logs, replays and screenshots.
+pub fn ac_documents_dir() -> Option<PathBuf> {
+    documents_dir().map(|docs| docs.join("Assetto Corsa"))
+}
+
+/// `<Documents>/Assetto Corsa/cfg`, the user config folder the game reads.
+pub fn ac_user_cfg_dir() -> Option<PathBuf> {
+    ac_documents_dir().map(|dir| dir.join("cfg"))
+}
+
 pub fn is_ac_root(path: &Path) -> bool {
     path.join(AC_EXECUTABLE).is_file()
 }
 
+/// The first Assetto Corsa install found: the usual Steam folders first, then
+/// every Steam library listed in `libraryfolders.vdf` (installs on other drives).
 pub fn detect_ac_root() -> Option<PathBuf> {
     DEFAULT_AC_ROOTS
         .iter()
         .map(PathBuf::from)
         .find(|path| is_ac_root(path))
+        .or_else(|| crate::steam::find_ac_installs(&crate::steam::default_steam_roots()).into_iter().next())
 }
 
 #[cfg(test)]

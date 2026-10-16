@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+Fixes:
+
+- Live UDP telemetry: the client now subscribes to car updates after the handshake (no data arrived before), repeats the handshake until the game answers, and keeps retrying while the game port is unreachable. Handshake (408 bytes) and lap packets (212 bytes) are decoded with UTF-16 names, as the game sends them.
+- Live telemetry and the web dashboard keep updating while another page is shown.
+- The "game running" state is checked every 2 seconds instead of only on rescan; skin import and graphics profile switches check it again when they run. Older rescans no longer overwrite newer ones.
+- Quick Race and launcher profiles write `race.ini` to `Documents/Assetto Corsa/cfg`, where the game reads it, using the keys the game reads (`[WEATHER]`, `SUN_ANGLE`, `RACE_LAPS`, `STARTING_POSITION`, `[HEADER]`, ...).
+- The Documents folder is resolved through Windows (OneDrive and moved folders work).
+- Tracks with layouts (`ui/<layout>/ui_track.json`) show their layouts, name, country and length.
+- Car specs, car comparison and shift lights read packed `data.acd` (all Kunos cars). Car tuning refuses cars with `data.acd`, because the game ignores `data/` then.
+- INI files saved as Windows ANSI are read and saved in that encoding, and numbers with an inline `;` comment are read.
+- Setups are listed from the per-track folders (`setups/<car>/<track>/`) and imported into a track folder (default `generic`).
+- CSP settings, FFB tweaks, gamepad assist and `weather_fx.ini` are written to the user's CSP config in `Documents/Assetto Corsa/cfg/extension` (which overrides the patch defaults) and shown with those overrides applied.
+- Configuration snapshots include `Documents/Assetto Corsa/cfg`.
+- Shared memory static page: `trackConfiguration` is 33 characters wide, so the car skin and pit window fields are read from the right offsets.
+- The dedicated server starts without a console window. Steam is found through the registry, and the first start searches every Steam library for the game.
+- Package installer: folder names are matched ignoring case, and loose files at the archive root (readme, licence) are skipped instead of refusing the archive.
+- RTX Remix card notes that Remix only hooks Direct3D 9, while the game uses Direct3D 11.
+- `race.ini` follows the format Content Manager writes (`CAR_0 MODEL=-`, `[RACE] SKIN`, `[WIND]`, `[GROOVE]`, `[GHOST_CAR]`, Optimum `[DYNAMIC_TRACK]` preset, inactive `[REPLAY]`/`[RESTART]`/`[BENCHMARK]`).
+- Update check supports `https://` feeds with certificate checks (Windows TLS stack on Windows, rustls elsewhere); plain `http://` still works but is flagged as unprotected. Redirects that leave HTTPS are refused.
+- Gamepad tab: Advanced Gamepad Assist keeps its tuning in CSP's script storage and ignores `gamepad_fx.ini`, so the tab no longer writes those keys. It now selects AGA as CSP's gamepad script (user `gamepad_fx.ini`) and edits the controller values in `controls.ini [X360]` (gamma, deadzone, rumble, gamepad input method).
+
 ## 0.3.0
 
 - Install car and track zips from the Install Packages page, with a game-running guard.

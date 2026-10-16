@@ -325,10 +325,16 @@ fn safe_dir_name(name: &str) -> Option<String> {
 pub fn default_steam_roots() -> Vec<PathBuf> {
     #[cfg(windows)]
     {
-        vec![
-            PathBuf::from(r"C:\Program Files (x86)\Steam"),
-            PathBuf::from(r"C:\Program Files\Steam"),
-        ]
+        // Steam records where it is installed in the registry; that covers installs
+        // outside Program Files. The usual folders follow as a fallback.
+        let mut roots: Vec<PathBuf> = registry_steam_path().into_iter().collect();
+        for fallback in [r"C:\Program Files (x86)\Steam", r"C:\Program Files\Steam"] {
+            let path = PathBuf::from(fallback);
+            if !roots.contains(&path) {
+                roots.push(path);
+            }
+        }
+        roots
     }
     #[cfg(not(windows))]
     {
@@ -336,8 +342,40 @@ pub fn default_steam_roots() -> Vec<PathBuf> {
     }
 }
 
+/// `SteamPath` from `HKCU\Software\Valve\Steam`, read with `reg query` so no
+/// registry bindings are needed. `None` when Steam is not registered.
+#[cfg(windows)]
+fn registry_steam_path() -> Option<PathBuf> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let output = std::process::Command::new("reg")
+        .args(["query", r"HKCU\Software\Valve\Steam", "/v", "SteamPath"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    parse_reg_value(&String::from_utf8_lossy(&output.stdout), "SteamPath").map(PathBuf::from)
+}
+
+/// The data of `name` in `reg query` output (`    SteamPath    REG_SZ    c:/program files (x86)/steam`).
+/// Steam writes forward slashes; they are turned into backslashes.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn parse_reg_value(output: &str, name: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let rest = line.trim_start().strip_prefix(name)?;
+        let rest = rest.trim_start().strip_prefix("REG_SZ")?.trim();
+        (!rest.is_empty()).then(|| rest.replace('/', "\\"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reads_steam_path_from_reg_output() {
+        let out = "\r\nHKEY_CURRENT_USER\\Software\\Valve\\Steam\r\n    SteamPath    REG_SZ    d:/games/steam\r\n\r\n";
+        assert_eq!(super::parse_reg_value(out, "SteamPath").as_deref(), Some("d:\\games\\steam"));
+        assert_eq!(super::parse_reg_value("nothing here", "SteamPath"), None);
+    }
+
     use super::*;
 
     /// A realistic `libraryfolders.vdf` in the current Steam layout.

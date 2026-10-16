@@ -55,6 +55,9 @@ pub trait Tool {
     fn group(&self) -> &'static str;
     /// Draw the page. Push status messages into `notices`.
     fn ui(&mut self, ui: &mut egui::Ui, ctx: &ToolContext, notices: &mut Vec<Notice>);
+    /// Called every frame for every tool, also while another page is shown, so
+    /// background work (live telemetry, the web dashboard) keeps flowing.
+    fn tick(&mut self) {}
 }
 
 /// Every tool page, in display order.

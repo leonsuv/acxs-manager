@@ -16,7 +16,6 @@
 //!
 //! Surfaces are matched by name, ignoring ASCII case, as `track_surfaces::find_surface` does.
 
-use std::fs;
 use std::io;
 use std::path::Path;
 
@@ -143,32 +142,12 @@ fn load_track(track_dir: &Path) -> io::Result<(TrackEntry, Vec<Surface>)> {
         country: trimmed(meta.country).unwrap_or_default(),
         length_m: meta.length_m,
         pitboxes: meta.pitboxes,
-        layouts: layout_names(track_dir),
+        layouts: crate::content::track_layouts(track_dir),
         id,
         path: track_dir.to_path_buf(),
     };
     let surfaces = read_surfaces(&track_dir.join("data"))?;
     Ok((entry, surfaces))
-}
-
-/// Sub-folders with a `ui` folder, sorted by name. Hidden folders are skipped.
-fn layout_names(track_dir: &Path) -> Vec<String> {
-    let Ok(read) = fs::read_dir(track_dir) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = read
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.is_dir()
-                && p.join("ui").is_dir()
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| !n.starts_with('.'))
-        })
-        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .collect();
-    names.sort();
-    names
 }
 
 /// Names of surfaces in `from` that have no match in `other` (by name, ignoring ASCII case).
@@ -204,6 +183,7 @@ fn fmt_friction(value: Option<f64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::PathBuf;
 
     /// Temp directory that is removed on drop, even when an assertion fails.

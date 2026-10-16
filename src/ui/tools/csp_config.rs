@@ -12,7 +12,7 @@ use crate::ui::Notice;
 use acxs_manager::car_classes::{self, CarClass, CarYear};
 use acxs_manager::csp_config::{self, ConfigFile, Setting};
 use acxs_manager::ffb::{self, FfbTweaks};
-use acxs_manager::gamepad::{self, GamepadSettings, GraphMode, KeyboardMode, ShiftingMode};
+use acxs_manager::gamepad::{self, PadSetup};
 use acxs_manager::weather::{self, WeatherPreset};
 use eframe::egui::{self, RichText};
 use std::collections::{HashMap, HashSet};
@@ -69,7 +69,7 @@ enum Msg {
         preset: String,
         result: Result<Vec<(String, String, String)>, String>,
     },
-    Gamepad { root: PathBuf, result: Result<GamepadSettings, String> },
+    Gamepad { root: PathBuf, result: Result<PadSetup, String> },
     Classes { root: PathBuf, result: Result<(Vec<CarClass>, Vec<CarYear>), String> },
     Diff { root: PathBuf, tab: Tab, lines: Vec<String> },
 }
@@ -117,8 +117,8 @@ struct Data {
     ffb_disk: Option<FfbTweaks>,
 
     gamepad_requested: bool,
-    gamepad: Option<GamepadSettings>,
-    gamepad_disk: Option<GamepadSettings>,
+    gamepad: Option<PadSetup>,
+    gamepad_disk: Option<PadSetup>,
 
     weather_requested: bool,
     presets: Vec<WeatherPreset>,
@@ -340,7 +340,8 @@ impl CspConfig {
                     self.data.settings = None;
                     let root_buf = root.to_path_buf();
                     self.spawn(egui_ctx, move |tx| {
-                        let result = csp_config::read_settings(&path).map_err(|e| e.to_string());
+                        let user = csp_config::user_config_path(&path);
+                        let result = csp_config::read_effective_settings(&path, user.as_deref()).map_err(|e| e.to_string());
                         let _ = tx.send(Msg::Settings { root: root_buf, path, result });
                     });
                 }
@@ -351,7 +352,8 @@ impl CspConfig {
                     let root_buf = root.to_path_buf();
                     let ac = root_buf.clone();
                     self.spawn(egui_ctx, move |tx| {
-                        let result = ffb::read(&ac).map_err(|e| e.to_string());
+                        let user = csp_config::user_config_path(&ffb::config_path(&ac));
+                        let result = ffb::read_with_user(&ac, user.as_deref()).map_err(|e| e.to_string());
                         let _ = tx.send(Msg::Ffb { root: root_buf, result });
                     });
                 }
@@ -382,7 +384,10 @@ impl CspConfig {
                     let root_buf = root.to_path_buf();
                     let path = gamepad::config_path(root);
                     self.spawn(egui_ctx, move |tx| {
-                        let result = gamepad::read_settings(&path).map_err(|e| e.to_string());
+                        let user = csp_config::user_config_path(&path);
+                        let controls = gamepad::controls_path();
+                        let result = gamepad::read_setup(&path, user.as_deref(), controls.as_deref())
+                            .map_err(|e| e.to_string());
                         let _ = tx.send(Msg::Gamepad { root: root_buf, result });
                     });
                 }
@@ -440,23 +445,34 @@ impl CspConfig {
         let allow_new = self.allow_new_key;
         let root_buf = root.to_path_buf();
         self.spawn(egui_ctx, move |tx| {
+            let user = csp_config::user_config_path(&path);
             let total = changes.len();
             let mut failures = Vec::new();
             for (i, (section, key, value)) in changes.iter().enumerate() {
                 if i > 0 {
                     thread::sleep(WRITE_GAP);
                 }
-                if let Err(e) = csp_config::write_setting(&path, section, key, value, allow_new) {
+                // CSP reads the user's values from Documents/Assetto Corsa/cfg/extension,
+                // which override the defaults in the install; write there when it is known.
+                let written = match &user {
+                    Some(user) => csp_config::write_user_setting(&path, user, section, key, value, allow_new),
+                    None => csp_config::write_setting(&path, section, key, value, allow_new),
+                };
+                if let Err(e) = written {
                     failures.push(format!("[{section}] {key}: {e}"));
                 }
             }
-            let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let file = user
+                .as_deref()
+                .unwrap_or(&path)
+                .display()
+                .to_string();
             if failures.is_empty() {
                 note(tx, format!("Saved {total} setting(s) to {file}."), true);
             } else {
                 note(tx, format!("Not all settings were saved: {}", failures.join("; ")), false);
             }
-            let result = csp_config::read_settings(&path).map_err(|e| e.to_string());
+            let result = csp_config::read_effective_settings(&path, user.as_deref()).map_err(|e| e.to_string());
             let _ = tx.send(Msg::Settings { root: root_buf, path, result });
         });
     }
@@ -464,26 +480,35 @@ impl CspConfig {
     fn save_ffb(&mut self, egui_ctx: &egui::Context, root: &Path, tweaks: FfbTweaks) {
         let root_buf = root.to_path_buf();
         let ac = root_buf.clone();
-        self.spawn(egui_ctx, move |tx| match ffb::write(&ac, &tweaks) {
+        let user = csp_config::user_config_path(&ffb::config_path(&ac));
+        self.spawn(egui_ctx, move |tx| match ffb::write_with_user(&ac, user.as_deref(), &tweaks) {
             Ok(()) => {
                 note(tx, "FFB tweaks saved.", true);
-                let result = ffb::read(&ac).map_err(|e| e.to_string());
+                let result = ffb::read_with_user(&ac, user.as_deref()).map_err(|e| e.to_string());
                 let _ = tx.send(Msg::Ffb { root: root_buf, result });
             }
             Err(e) => note(tx, format!("FFB tweaks not saved: {e}"), false),
         });
     }
 
-    fn save_gamepad(&mut self, egui_ctx: &egui::Context, root: &Path, settings: GamepadSettings) {
+    fn save_gamepad(&mut self, egui_ctx: &egui::Context, root: &Path, settings: PadSetup) {
         let root_buf = root.to_path_buf();
         let path = gamepad::config_path(root);
-        self.spawn(egui_ctx, move |tx| match gamepad::write_settings(&path, &settings) {
-            Ok(()) => {
-                note(tx, "Gamepad settings saved.", true);
-                let result = gamepad::read_settings(&path).map_err(|e| e.to_string());
-                let _ = tx.send(Msg::Gamepad { root: root_buf, result });
+        let user = csp_config::user_config_path(&path);
+        let controls = gamepad::controls_path();
+        self.spawn(egui_ctx, move |tx| {
+            let (Some(user), Some(controls)) = (user, controls) else {
+                note(tx, "Gamepad settings not saved: the Documents folder was not found.", false);
+                return;
+            };
+            match gamepad::write_setup(&user, &controls, &settings) {
+                Ok(()) => {
+                    note(tx, format!("Gamepad settings saved to {} and {}.", user.display(), controls.display()), true);
+                    let result = gamepad::read_setup(&path, Some(&user), Some(&controls)).map_err(|e| e.to_string());
+                    let _ = tx.send(Msg::Gamepad { root: root_buf, result });
+                }
+                Err(e) => note(tx, format!("Gamepad settings not saved: {e}"), false),
             }
-            Err(e) => note(tx, format!("Gamepad settings not saved: {e}"), false),
         });
     }
 
@@ -492,7 +517,14 @@ impl CspConfig {
         let root_buf = root.to_path_buf();
         let allow_new = self.allow_new_key;
         self.spawn(egui_ctx, move |tx| {
-            match weather::set_weather_value(&root_buf, &section, &key, &value, allow_new) {
+            match weather::set_weather_value_user(
+                &root_buf,
+                csp_config::user_config_path(&weather::weather_fx_path(&root_buf)).as_deref(),
+                &section,
+                &key,
+                &value,
+                allow_new,
+            ) {
                 Ok(()) => note(tx, format!("Saved [{section}] {key}."), true),
                 Err(e) => note(tx, format!("Not saved: [{section}] {key}: {e}"), false),
             }
@@ -1016,11 +1048,25 @@ impl CspConfig {
                 ui.label(RichText::new("Unsaved changes").color(WARN));
             }
         });
-        widgets::key_value(ui, "File", &gamepad::config_path(root).display().to_string());
+        let user_fx = csp_config::user_config_path(&gamepad::config_path(root));
+        widgets::key_value(
+            ui,
+            "Script selection",
+            &user_fx.map(|p| p.display().to_string()).unwrap_or_else(|| "Documents folder not found".into()),
+        );
+        widgets::key_value(
+            ui,
+            "Controller",
+            &gamepad::controls_path().map(|p| p.display().to_string()).unwrap_or_else(|| "Documents folder not found".into()),
+        );
         ui.label(
-            RichText::new("This file location has not been checked against a real install yet.")
-                .small()
-                .color(WARN),
+            RichText::new(
+                "Advanced Gamepad Assist stores its own tuning (steering rate, slip, self-steer, \
+                 shifting) in CSP's script storage. Change those in its in-game app \
+                 \"Advanced Gamepad Assist Config\".",
+            )
+            .small()
+            .color(MUTED),
         );
         show_error(ui, &self.data, Tab::Gamepad);
         for problem in &problems {
@@ -1346,7 +1392,8 @@ fn config_dir(root: &Path) -> PathBuf {
 fn weather_msg(root: PathBuf) -> Msg {
     let presets = weather::list_presets(&root);
     let controllers = weather::list_controllers(&root);
-    let fx = weather::read_weather_fx(&root).map_err(|e| e.to_string());
+    let user = csp_config::user_config_path(&weather::weather_fx_path(&root));
+    let fx = weather::read_weather_fx_effective(&root, user.as_deref()).map_err(|e| e.to_string());
     Msg::Weather { root, presets, controllers, fx }
 }
 
@@ -1446,29 +1493,6 @@ fn slider_row(
     ui.end_row();
 }
 
-/// One dropdown row for an enum stored as a code.
-fn combo<T: Copy + PartialEq>(
-    ui: &mut egui::Ui,
-    label: &str,
-    key: &str,
-    id: &str,
-    value: &mut T,
-    options: &[(T, &str)],
-) {
-    ui.label(label).on_hover_text(key);
-    let current = options
-        .iter()
-        .find(|(v, _)| *v == *value)
-        .map(|(_, text)| *text)
-        .unwrap_or("?");
-    egui::ComboBox::from_id_salt(id).selected_text(current).show_ui(ui, |ui| {
-        for (option, text) in options {
-            ui.selectable_value(value, *option, *text);
-        }
-    });
-    ui.end_row();
-}
-
 fn ffb_form(ui: &mut egui::Ui, t: &mut FfbTweaks) {
     section(ui, "Basic", |ui| {
         grid(ui, "ffb_basic", |ui| {
@@ -1526,72 +1550,33 @@ fn ffb_form(ui: &mut egui::Ui, t: &mut FfbTweaks) {
     });
 }
 
-fn gamepad_form(ui: &mut egui::Ui, s: &mut GamepadSettings) {
-    section(ui, "General", |ui| {
-        grid(ui, "gp_general", |ui| {
-            flag(ui, "Gamepad assist enabled", "assistEnabled", &mut s.assist_enabled);
-            flag(ui, "Simplified settings", "useFilter", &mut s.simplified);
-            slider_row(ui, "Steering assistance", "filterSetting", &mut s.simplified_strength, 0.0..=1.0, false);
+fn gamepad_form(ui: &mut egui::Ui, s: &mut PadSetup) {
+    section(ui, "Gamepad script (CSP)", |ui| {
+        let status = if s.aga_active() {
+            "Advanced Gamepad Assist is active.".to_string()
+        } else if s.script_enabled && !s.implementation.is_empty() {
+            format!("Active script: {}", s.implementation)
+        } else {
+            "No gamepad script is active.".to_string()
+        };
+        ui.label(RichText::new(status).color(if s.aga_active() { OK } else { MUTED }));
+        ui.horizontal(|ui| {
+            if ui.add_enabled(!s.aga_active(), egui::Button::new("Use Advanced Gamepad Assist")).clicked() {
+                s.select_aga();
+            }
+            if ui.add_enabled(s.script_enabled, egui::Button::new("Turn the script off")).clicked() {
+                s.script_enabled = false;
+            }
+        });
+        grid(ui, "gp_input", |ui| {
+            flag(ui, "Gamepad input method (X360)", "INPUT_METHOD", &mut s.gamepad_input);
         });
     });
-    section(ui, "Steering input", |ui| {
-        grid(ui, "gp_steer", |ui| {
-            slider_row(ui, "Steering rate", "steeringRate", &mut s.steering_rate, 0.0..=1.0, false);
-            slider_row(ui, "Steering rate at speed", "rateIncreaseWithSpeed", &mut s.rate_increase_with_speed, -0.5..=0.5, false);
-            slider_row(ui, "Target slip angle", "targetSlip", &mut s.target_slip, 0.9..=1.2, false);
-            slider_row(ui, "Countersteer response", "countersteerResponse", &mut s.countersteer_response, 0.0..=1.0, false);
-            slider_row(ui, "Dynamic steering limit", "maxDynamicLimitReduction", &mut s.dynamic_limit_reduction, 0.0..=10.0, false);
-        });
-    });
-    section(ui, "Self-steer force", |ui| {
-        grid(ui, "gp_selfsteer", |ui| {
-            slider_row(ui, "Response", "selfSteerResponse", &mut s.self_steer_response, 0.0..=1.0, false);
-            slider_row(ui, "Max angle (degrees)", "maxSelfSteerAngle", &mut s.max_self_steer_angle, 0.0..=90.0, false);
-            slider_row(ui, "Damping", "dampingStrength", &mut s.damping, 0.0..=1.0, false);
-        });
-    });
-    section(ui, "Extra", |ui| {
-        grid(ui, "gp_extra", |ui| {
-            combo(
-                ui,
-                "Graphs",
-                "graphSelection",
-                "gp_graphs",
-                &mut s.graphs,
-                &[(GraphMode::None, "None"), (GraphMode::Static, "Static"), (GraphMode::Live, "Live")],
-            );
-            combo(
-                ui,
-                "Keyboard",
-                "keyboardMode",
-                "gp_keyboard",
-                &mut s.keyboard,
-                &[
-                    (KeyboardMode::Off, "Off"),
-                    (KeyboardMode::On, "On"),
-                    (KeyboardMode::BrakeHelp, "Brake help"),
-                    (KeyboardMode::GasAndBrakeHelp, "Gas and brake help"),
-                ],
-            );
-            flag(ui, "Photo mode", "photoMode", &mut s.photo_mode);
-            flag(ui, "Automatic clutch", "autoClutch", &mut s.auto_clutch);
-            combo(
-                ui,
-                "Shifting mode",
-                "autoShiftingMode",
-                "gp_shifting",
-                &mut s.shifting_mode,
-                &[
-                    (ShiftingMode::Default, "Default"),
-                    (ShiftingMode::Manual, "Manual"),
-                    (ShiftingMode::Automatic, "Automatic"),
-                ],
-            );
-            flag(ui, "Auto-switch into cruise mode", "autoShiftingCruise", &mut s.auto_shifting_cruise);
-            slider_row(ui, "Downshift bias", "autoShiftingDownBias", &mut s.downshift_bias, 0.1..=0.9, false);
-            slider_row(ui, "Left trigger feedback", "triggerFeedbackL", &mut s.trigger_feedback_left, 0.0..=1.0, false);
-            slider_row(ui, "Right trigger feedback", "triggerFeedbackR", &mut s.trigger_feedback_right, 0.0..=1.0, false);
-            flag(ui, "Trigger feedback with ABS/TCS", "triggerFeedbackAlwaysOn", &mut s.trigger_feedback_with_abs_tcs);
+    section(ui, "Controller (controls.ini [X360])", |ui| {
+        grid(ui, "gp_x360", |ui| {
+            slider_row(ui, "Steering gamma", "STEER_GAMMA", &mut s.steer_gamma, gamepad::GAMMA_RANGE, false);
+            slider_row(ui, "Steering deadzone", "STEER_DEADZONE", &mut s.steer_deadzone, gamepad::DEADZONE_RANGE, false);
+            slider_row(ui, "Rumble", "RUMBLE_INTENSITY", &mut s.rumble, gamepad::RUMBLE_RANGE, false);
         });
     });
 }

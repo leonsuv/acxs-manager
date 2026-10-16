@@ -373,7 +373,9 @@ fn update_card(app: &mut App, ui: &mut egui::Ui) {
         }
     }
 
-    let feed_ok = state.feed.trim().starts_with("http://");
+    let feed = state.feed.trim().to_ascii_lowercase();
+    let feed_ok = feed.starts_with("https://") || feed.starts_with("http://");
+    let plain_http = feed.starts_with("http://");
     let checking = state.pending.is_some();
     let can_check = state.opt_in && feed_ok && !checking;
 
@@ -386,23 +388,30 @@ fn update_card(app: &mut App, ui: &mut egui::Ui) {
                 .color(MUTED),
         );
         ui.add_space(8.0);
-        ui.label(RichText::new("Feed URL (http:// only)").color(MUTED));
+        ui.label(RichText::new("Feed URL (https:// recommended)").color(MUTED));
         ui.add_enabled(
             state.opt_in,
             egui::TextEdit::singleline(&mut state.feed)
                 .desired_width(f32::INFINITY)
-                .hint_text("http://updates.example.com/latest.json"),
+                .hint_text("https://updates.example.com/latest.json"),
         );
         if !state.feed.trim().is_empty() && !feed_ok {
-            ui.label(RichText::new("The feed URL must start with http://. https:// is not supported.").color(DANGER));
+            ui.label(RichText::new("The feed URL must start with https:// or http://.").color(DANGER));
+        }
+        if plain_http {
+            ui.label(
+                RichText::new(
+                    "Plain http:// travels unencrypted, so the reply (and the download link in it) \
+                     could be changed on the way. Use https:// when the server offers it.",
+                )
+                .small()
+                .color(WARN),
+            );
         }
         ui.label(
-            RichText::new(
-                "HTTPS is not supported, so the request and the reply travel unencrypted. The feed \
-                 must return JSON with version, url and notes fields.",
-            )
-            .small()
-            .color(WARN),
+            RichText::new("The feed must return JSON with version, url and notes fields.")
+                .small()
+                .color(MUTED),
         );
         ui.add_space(8.0);
         ui.horizontal(|ui| {

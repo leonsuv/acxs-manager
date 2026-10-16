@@ -26,6 +26,8 @@ use std::time::{Duration, Instant};
 
 /// How long one receive waits before the thread checks the stop flag again.
 const POLL_TIMEOUT: Duration = Duration::from_millis(250);
+/// How often the handshake is repeated until the game answers.
+const HANDSHAKE_RETRY: Duration = Duration::from_secs(1);
 
 /// Gap between shared memory reads while the live data card is enabled (10 Hz).
 const SHM_INTERVAL: Duration = Duration::from_millis(100);
@@ -202,6 +204,11 @@ impl Tool for LiveTelemetry {
 
     fn group(&self) -> &'static str {
         "Telemetry"
+    }
+
+    fn tick(&mut self) {
+        self.poll_session();
+        self.poll_shm();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _ctx: &ToolContext, notices: &mut Vec<Notice>) {
@@ -604,11 +611,10 @@ impl LiveTelemetry {
         if self.shm_stop.is_none() {
             return;
         }
-        if let Ok(mut slot) = self.shm_slot.lock() {
-            if let Some(reading) = slot.take() {
+        if let Ok(mut slot) = self.shm_slot.lock()
+            && let Some(reading) = slot.take() {
                 self.shm_last = Some(reading);
             }
-        }
     }
 
     fn shm_card(&mut self, ui: &mut egui::Ui) {
@@ -910,16 +916,39 @@ fn run_session(addr: SocketAddr, stop: Arc<AtomicBool>, tx: mpsc::Sender<Msg>, c
         }
     };
 
+    // The game answers the handshake only while a session is loaded, so the
+    // handshake is repeated until a reply arrives. Car updates flow only after
+    // the subscribe request that follows the reply.
+    let mut subscribed = false;
+    let mut last_handshake = Instant::now();
     let reason = loop {
         if stop.load(Ordering::Relaxed) {
             break "Disconnected.".to_string();
         }
+        if !subscribed && last_handshake.elapsed() >= HANDSHAKE_RETRY {
+            last_handshake = Instant::now();
+            if let Err(e) = client.send_handshake()
+                && !acxs_manager::udp_client::is_unreachable(&e)
+            {
+                break format!("Telemetry socket error: {e}");
+            }
+        }
         match client.recv_packet() {
-            Ok(Packet::Handshake(h)) => send(Msg::Handshake(h)),
+            Ok(Packet::Handshake(h)) => {
+                send(Msg::Handshake(h));
+                if !subscribed {
+                    if let Err(e) = client.subscribe_updates(0) {
+                        break format!("Could not subscribe to car updates: {e}");
+                    }
+                    subscribed = true;
+                }
+            }
             Ok(Packet::CarUpdate(c)) => send(Msg::Car(c)),
             Ok(Packet::LapCompleted(lap)) => send(Msg::Lap(lap)),
             Ok(Packet::Other(_)) | Err(ClientError::Decode(_)) => send(Msg::Ignored),
             Err(ClientError::Timeout) => {}
+            // Nothing listens on the game port yet: keep retrying the handshake.
+            Err(e) if e.is_unreachable() => subscribed = false,
             Err(ClientError::Io(e)) => break format!("Telemetry socket error: {e}"),
         }
     };

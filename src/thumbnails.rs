@@ -176,7 +176,7 @@ pub fn track_thumbnail(ac_root: &Path, track_id: &str, size: u32) -> Result<Vec<
         size,
         (TRACK_VIEW_YAW_DEG, TRACK_VIEW_PITCH_DEG),
         || {
-            let layouts = layout_names(&track_dir)?;
+            let layouts = crate::content::track_layouts(&track_dir);
             find_main_model(&track_dir, &layouts)
         },
     )
@@ -240,19 +240,6 @@ fn check_size(size: u32) -> Result<(), ThumbError> {
 /// An item id is one plain folder name: no separators, no `.`/`..`, no drive colons.
 fn is_safe_id(id: &str) -> bool {
     !id.is_empty() && id != "." && id != ".." && !id.contains(['/', '\\', '\0', ':'])
-}
-
-/// Names of the layout folders under a track: subfolders that hold a `ui` folder.
-fn layout_names(track_dir: &Path) -> Result<Vec<String>, ThumbError> {
-    let mut names = Vec::new();
-    for entry in fs::read_dir(track_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() && path.join("ui").is_dir() {
-            names.push(entry.file_name().to_string_lossy().into_owned());
-        }
-    }
-    Ok(names)
 }
 
 /// Picks the main model in `dir`: a root-level `.kn5` whose stem matches the

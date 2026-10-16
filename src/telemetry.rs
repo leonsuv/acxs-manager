@@ -7,12 +7,12 @@
 //! `int`/`float`, 1-byte `char`/`bool`), and integers are little-endian.
 //!
 //! The packets carry no type tag. Packets are told apart by their exact byte length:
-//!   * 208 bytes: handshake response
+//!   * 408 bytes: handshake response
 //!   * 328 bytes: car update
-//!   * 112 bytes: lap completed
+//!   * 212 bytes: lap completed
 //!
-//! Name fields are fixed 50-byte arrays, so they are decoded as lossy UTF-8 up to
-//! the first NUL byte.
+//! Name fields are fixed `wchar_t[50]` arrays (100 bytes of UTF-16LE). The game
+//! pads them with `%` and NUL characters, so a name ends at the first `%` or NUL.
 
 use std::fmt;
 
@@ -21,14 +21,16 @@ pub const REQUEST_LEN: usize = 12;
 /// Handshake request length (same as [`REQUEST_LEN`]).
 pub const HANDSHAKE_REQUEST_LEN: usize = REQUEST_LEN;
 /// Handshake response length.
-pub const HANDSHAKE_RESPONSE_LEN: usize = 208;
+pub const HANDSHAKE_RESPONSE_LEN: usize = 408;
 /// Car update length.
 pub const CAR_UPDATE_LEN: usize = 328;
 /// Lap completed length.
-pub const LAP_LEN: usize = 112;
+pub const LAP_LEN: usize = 212;
 
+/// Number of UTF-16 code units in each fixed name field.
+const NAME_CHARS: usize = 50;
 /// Length in bytes of each fixed name field.
-const NAME_LEN: usize = 50;
+const NAME_LEN: usize = NAME_CHARS * 2;
 
 /// Minimum lap time accepted by [`summarize_laps`], in milliseconds.
 const MIN_PLAUSIBLE_LAP_MS: u32 = 10_000;
@@ -47,10 +49,11 @@ pub const OP_SUBSCRIBE_SPOT: i32 = 2;
 pub const OP_DISMISS: i32 = 3;
 
 // Handshake response offsets.
-const HS_CAR_NAME: usize = 0; // char[50]
-const HS_DRIVER_NAME: usize = 50; // char[50]
-const HS_TRACK_NAME: usize = 108; // char[50]
-const HS_TRACK_CONFIG: usize = 158; // char[50]
+const HS_CAR_NAME: usize = 0; // wchar_t[50]
+const HS_DRIVER_NAME: usize = 100; // wchar_t[50]
+// int identifier at 200, int version at 204.
+const HS_TRACK_NAME: usize = 208; // wchar_t[50]
+const HS_TRACK_CONFIG: usize = 308; // wchar_t[50]
 
 // Car update offsets (natural alignment).
 const CAR_SPEED_KMH: usize = 8; // float speed_Kmh
@@ -70,9 +73,9 @@ const CAR_STEER_ANGLE: usize = 72; // float: steering wheel angle, unit not stat
 // Lap completed offsets.
 const LAP_CAR_ID: usize = 0; // int carIdentifierNumber
 const LAP_LAP_COUNT: usize = 4; // int lap
-const LAP_DRIVER_NAME: usize = 8; // char[50]
-const LAP_CAR_NAME: usize = 58; // char[50]
-const LAP_TIME: usize = 108; // int time (milliseconds)
+const LAP_DRIVER_NAME: usize = 8; // wchar_t[50]
+const LAP_CAR_NAME: usize = 108; // wchar_t[50]
+const LAP_TIME: usize = 208; // int time (milliseconds)
 
 /// A decoded telemetry packet.
 #[derive(Debug, Clone, PartialEq)]
@@ -130,9 +133,9 @@ pub struct LapInfo {
     pub lap_time_ms: u32,
     /// `lap` (lap count), clamped to `u16`.
     pub laps: u16,
-    /// `driverName`, lossy UTF-8 up to the first NUL.
+    /// `driverName`, lossy UTF-16 up to the first `%` or NUL.
     pub driver: String,
-    /// `carName`, lossy UTF-8 up to the first NUL.
+    /// `carName`, lossy UTF-16 up to the first `%` or NUL.
     pub car: String,
 }
 
@@ -172,7 +175,7 @@ pub fn decode(bytes: &[u8]) -> Result<Packet, DecodeError> {
         LAP_LEN => decode_lap(bytes).map(Packet::LapCompleted),
         // Shorter than the largest known packet but not an exact match:
         // treat as truncated.
-        n if n < CAR_UPDATE_LEN => Err(DecodeError::Truncated),
+        n if n < HANDSHAKE_RESPONSE_LEN => Err(DecodeError::Truncated),
         _ => Err(DecodeError::UnknownType(bytes[0])),
     }
 }
@@ -243,11 +246,18 @@ fn f32_at(b: &[u8], off: usize) -> Result<f32, DecodeError> {
     Ok(f32::from_le_bytes([s[0], s[1], s[2], s[3]]))
 }
 
-/// Reads a fixed 50-byte name field as lossy UTF-8, stopping at the first NUL.
+/// Reads a fixed `wchar_t[50]` name field as lossy UTF-16LE, stopping at the
+/// first `%` or NUL, which the game uses as padding.
 fn name_at(b: &[u8], off: usize) -> Result<String, DecodeError> {
     let field = bytes_at(b, off, NAME_LEN)?;
-    let end = field.iter().position(|&c| c == 0).unwrap_or(field.len());
-    Ok(String::from_utf8_lossy(&field[..end]).into_owned())
+    let units: Vec<u16> = field
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&pair| u16::from_le_bytes(pair))
+        .take_while(|&unit| unit != 0 && unit != u16::from(b'%'))
+        .collect();
+    Ok(String::from_utf16_lossy(&units))
 }
 
 fn clamp_i32_to_u32(v: i32) -> u32 {
@@ -318,19 +328,23 @@ mod tests {
         buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
     }
 
-    fn put_name(buf: &mut [u8], off: usize, s: &[u8]) {
-        let n = s.len().min(NAME_LEN);
-        buf[off..off + n].copy_from_slice(&s[..n]);
+    /// Writes `s` as UTF-16LE padded with `%`, the way the game fills name fields.
+    fn put_name(buf: &mut [u8], off: usize, s: &str) {
+        let mut units: Vec<u16> = s.encode_utf16().take(NAME_CHARS).collect();
+        units.resize(NAME_CHARS, u16::from(b'%'));
+        for (i, unit) in units.iter().enumerate() {
+            buf[off + i * 2..off + i * 2 + 2].copy_from_slice(&unit.to_le_bytes());
+        }
     }
 
     fn handshake_bytes() -> Vec<u8> {
         let mut b = vec![0u8; HANDSHAKE_RESPONSE_LEN];
-        put_name(&mut b, HS_CAR_NAME, b"ks_ferrari_488_gt3");
-        put_name(&mut b, HS_DRIVER_NAME, b"Leon");
-        put_i32(&mut b, 100, 1); // identifier
-        put_i32(&mut b, 104, 1); // version
-        put_name(&mut b, HS_TRACK_NAME, b"monza");
-        put_name(&mut b, HS_TRACK_CONFIG, b"gp");
+        put_name(&mut b, HS_CAR_NAME, "ks_ferrari_488_gt3");
+        put_name(&mut b, HS_DRIVER_NAME, "Leon");
+        put_i32(&mut b, 200, 1); // identifier
+        put_i32(&mut b, 204, 1); // version
+        put_name(&mut b, HS_TRACK_NAME, "monza");
+        put_name(&mut b, HS_TRACK_CONFIG, "gp");
         b
     }
 
@@ -352,8 +366,8 @@ mod tests {
         let mut b = vec![0u8; LAP_LEN];
         put_i32(&mut b, LAP_CAR_ID, 3);
         put_i32(&mut b, LAP_LAP_COUNT, 5);
-        put_name(&mut b, LAP_DRIVER_NAME, b"Max");
-        put_name(&mut b, LAP_CAR_NAME, b"ks_mazda_mx5");
+        put_name(&mut b, LAP_DRIVER_NAME, "Max");
+        put_name(&mut b, LAP_CAR_NAME, "ks_mazda_mx5");
         put_i32(&mut b, LAP_TIME, 92_500);
         b
     }
@@ -504,17 +518,26 @@ mod tests {
 
     #[test]
     fn name_is_lossy_and_capped_at_field_length() {
-        // Invalid UTF-8 and no NUL: the decoder must cap at the 50-byte field.
+        // Lone surrogates and no terminator: the decoder must cap at the 50-unit field.
         let mut b = handshake_bytes();
-        for byte in b[HS_DRIVER_NAME..HS_DRIVER_NAME + NAME_LEN].iter_mut() {
-            *byte = 0xFF;
+        for pair in b[HS_DRIVER_NAME..HS_DRIVER_NAME + NAME_LEN].as_chunks_mut::<2>().0 {
+            *pair = 0xD800u16.to_le_bytes();
         }
         match decode(&b) {
             Ok(Packet::Handshake(h)) => {
-                assert!(!h.driver.is_empty());
                 assert!(h.driver.chars().all(|c| c == '\u{FFFD}'));
-                assert_eq!(h.driver.chars().count(), NAME_LEN);
+                assert_eq!(h.driver.chars().count(), NAME_CHARS);
             }
+            other => panic!("expected handshake, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn names_decode_non_ascii_utf16() {
+        let mut b = handshake_bytes();
+        put_name(&mut b, HS_DRIVER_NAME, "Jérôme Müller");
+        match decode(&b) {
+            Ok(Packet::Handshake(h)) => assert_eq!(h.driver, "Jérôme Müller"),
             other => panic!("expected handshake, got {other:?}"),
         }
     }
@@ -526,7 +549,7 @@ mod tests {
 
     #[test]
     fn unknown_length_reports_first_byte() {
-        let mut b = vec![0u8; 400];
+        let mut b = vec![0u8; HANDSHAKE_RESPONSE_LEN + 92];
         b[0] = 0x42;
         assert_eq!(decode(&b), Err(DecodeError::UnknownType(0x42)));
     }
@@ -552,7 +575,7 @@ mod tests {
 
     #[test]
     fn arbitrary_bytes_never_panic() {
-        for len in 0..=(CAR_UPDATE_LEN + 8) {
+        for len in 0..=(HANDSHAKE_RESPONSE_LEN + 8) {
             let buf = vec![0xFFu8; len];
             let _ = decode(&buf);
             let buf = vec![0x00u8; len];

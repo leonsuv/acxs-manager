@@ -11,7 +11,6 @@
 use crate::cardata;
 use crate::ini::Ini;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::io;
 use std::path::Path;
 
@@ -38,21 +37,11 @@ const UNKNOWN: &str = "-";
 /// Lower-cased file name to the file name as written on disk, for every `*.ini`
 /// directly inside `<car_dir>/data/`. A missing `data/` folder gives an empty map.
 fn ini_files(car_dir: &Path) -> io::Result<BTreeMap<String, String>> {
-    let entries = match fs::read_dir(car_dir.join("data")) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
-        Err(e) => return Err(e),
-    };
     let mut files = BTreeMap::new();
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        let is_ini = path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("ini"));
-        if !is_ini || !path.is_file() {
-            continue;
+    for name in crate::cardata::data_file_names(car_dir)? {
+        if name.to_ascii_lowercase().ends_with(".ini") {
+            files.entry(name.to_lowercase()).or_insert(name);
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        files.entry(name.to_lowercase()).or_insert(name);
     }
     Ok(files)
 }
@@ -60,7 +49,7 @@ fn ini_files(car_dir: &Path) -> io::Result<BTreeMap<String, String>> {
 /// Parse one file of a car, or an empty INI when the file is not there.
 fn load_side(car_dir: &Path, file: Option<&String>) -> io::Result<Ini> {
     match file {
-        Some(name) => Ini::load(&car_dir.join("data").join(name)),
+        Some(name) => crate::cardata::load_data_ini(car_dir, name),
         None => Ok(Ini::default()),
     }
 }
@@ -164,6 +153,7 @@ pub fn spec_diff(left_car: &Path, right_car: &Path) -> Vec<SpecDiff> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::PathBuf;
 
     /// Two car folders (`stock` and `mod`) under the temp dir, removed on drop

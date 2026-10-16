@@ -405,6 +405,15 @@ fn draw(
     ui.add_space(16.0);
     widgets::section_title(ui, "RTX Remix");
     theme::card().show(ui, |ui| {
+        ui.label(
+            RichText::new(
+                "RTX Remix hooks Direct3D 9 games only. Assetto Corsa renders with Direct3D 11, \
+                 so the Remix runtime is not loaded by the stock game.",
+            )
+            .small()
+            .color(WARN),
+        );
+        ui.add_space(6.0);
         match &status.remix {
             Some(install) => {
                 ui.horizontal(|ui| widgets::pill(ui, "installed", OK));

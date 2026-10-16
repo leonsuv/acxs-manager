@@ -129,7 +129,7 @@ pub fn scan_cars(ac_root: &Path) -> Vec<CarEntry> {
         .filter(|p| is_visible_dir(p))
         .filter_map(|folder| {
             let ui = read_ui_json(&folder.join("ui").join("ui_car.json"));
-            if ui.is_empty() && !folder.join("data").is_dir() {
+            if ui.is_empty() && !folder.join("data").is_dir() && !folder.join("data.acd").is_file() {
                 return None;
             }
             let id = folder.file_name()?.to_string_lossy().into_owned();
@@ -150,17 +150,44 @@ pub fn scan_cars(ac_root: &Path) -> Vec<CarEntry> {
     cars
 }
 
+/// Layout folder names of a track, sorted and without duplicates.
+///
+/// Assetto Corsa keeps one `ui/<layout>/ui_track.json` per layout (the layout's
+/// data sits in `<track>/<layout>/data`). A `<track>/<layout>/ui` folder is
+/// accepted too, for hand-made tracks that use that shape.
+pub fn track_layouts(track_dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = sorted_children(&track_dir.join("ui"))
+        .into_iter()
+        .filter(|sub| is_visible_dir(sub) && sub.join("ui_track.json").is_file())
+        .chain(
+            sorted_children(track_dir)
+                .into_iter()
+                .filter(|sub| is_visible_dir(sub) && sub.join("ui").is_dir()),
+        )
+        .filter_map(|sub| sub.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .filter(|name| !name.eq_ignore_ascii_case("ui"))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 pub fn scan_tracks(ac_root: &Path) -> Vec<TrackEntry> {
     let mut tracks: Vec<TrackEntry> = sorted_children(&ac_root.join("content").join("tracks"))
         .into_iter()
         .filter(|p| is_visible_dir(p))
         .filter_map(|folder| {
-            let ui = read_ui_json(&folder.join("ui").join("ui_track.json"));
-            let layouts: Vec<String> = sorted_children(&folder)
-                .into_iter()
-                .filter(|sub| is_visible_dir(sub) && sub.join("ui").is_dir())
-                .filter_map(|sub| sub.file_name().map(|n| n.to_string_lossy().into_owned()))
-                .collect();
+            let layouts = track_layouts(&folder);
+            let mut ui = read_ui_json(&folder.join("ui").join("ui_track.json"));
+            // Tracks with layouts usually have no top-level ui_track.json: the
+            // name, country and length then come from the first layout.
+            if ui.is_empty() {
+                ui = layouts
+                    .iter()
+                    .map(|layout| read_ui_json(&folder.join("ui").join(layout).join("ui_track.json")))
+                    .find(|map| !map.is_empty())
+                    .unwrap_or_default();
+            }
             if ui.is_empty() && !folder.join("data").is_dir() && layouts.is_empty() {
                 return None;
             }
@@ -241,6 +268,27 @@ mod tests {
         assert_eq!(cars[0].name, "Ferrari 488 GT3");
         assert_eq!(cars[1].name, "unnamed");
         assert_eq!(filter_cars(&cars, "ferrari gt3").len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scans_kunos_style_layouts_from_ui_folder() {
+        let root = fixture("kunos_layouts");
+        write(
+            &root.join("content/tracks/ks_vallelunga/ui/club_circuit/ui_track.json"),
+            r#"{"name":"Vallelunga Club","country":"Italy","length":"1750"}"#,
+        );
+        write(
+            &root.join("content/tracks/ks_vallelunga/ui/extended_circuit/ui_track.json"),
+            r#"{"name":"Vallelunga Extended","country":"Italy"}"#,
+        );
+        fs::create_dir_all(root.join("content/tracks/ks_vallelunga/club_circuit/data")).unwrap();
+        let tracks = scan_tracks(&root);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].layouts, vec!["club_circuit".to_string(), "extended_circuit".to_string()]);
+        assert_eq!(tracks[0].name, "Vallelunga Club");
+        assert_eq!(tracks[0].country, "Italy");
+        assert_eq!(tracks[0].length_m, Some(1750.0));
         fs::remove_dir_all(root).unwrap();
     }
 

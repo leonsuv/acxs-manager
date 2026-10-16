@@ -226,7 +226,7 @@ impl SkinsPage {
         let tx = self.tx.clone();
         let ctx = egui_ctx.clone();
         thread::spawn(move || {
-            let notice = match skin_import::import_skin(&root, &car_id, &source, game_running) {
+            let notice = match skin_import::import_skin(&root, &car_id, &source, game_running || acxs_manager::game::is_game_running()) {
                 Ok(target) => {
                     let folder = target
                         .file_name()

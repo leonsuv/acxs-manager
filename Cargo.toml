@@ -11,7 +11,15 @@ rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
+ureq = { version = "2.12.1", default-features = false }
 zip = { version = "9.0.3", default-features = false, features = ["deflate"] }
 
+[target."cfg(not(windows))".dependencies]
+# rustls for HTTPS update checks on the test hosts.
+ureq = { version = "2.12.1", default-features = false, features = ["tls"] }
+
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_System_Memory", "Win32_Foundation"] }
+# Windows TLS (SChannel) for HTTPS update checks: no C toolchain needed, system certificates.
+native-tls = "0.2.14"
+ureq = { version = "2.12.1", default-features = false, features = ["native-tls"] }
+windows-sys = { version = "0.61.2", features = ["Win32_System_Memory", "Win32_Foundation", "Win32_UI_Shell", "Win32_System_Com"] }

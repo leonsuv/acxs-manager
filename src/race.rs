@@ -7,8 +7,11 @@
 //! The generated file mirrors the layout of the race.ini files Assetto Corsa
 //! writes for quick races, reduced to what a single-player race with AI
 //! opponents needs. Field meanings are documented on [`QuickRace::to_race_ini`].
-//! None of this has been verified against the game; treat the format as a
-//! best reading of the known layout until it has been tried in-game.
+//! Sections, keys and value formats follow what Content Manager (AcTools,
+//! `Game.cs` / `Game.Properties.cs`) writes for a quick race: the player's car in
+//! `[RACE] MODEL` with `CAR_0 MODEL=-`, `SUN_ANGLE` from the time of day, and the
+//! `[GROOVE]`, `[GHOST_CAR]`, `[WIND]` and inactive `[REPLAY]`/`[RESTART]`/`[BENCHMARK]`
+//! sections.
 
 use std::fs;
 use std::io::{self, Write};
@@ -174,9 +177,16 @@ impl QuickRace {
     /// - `[SESSION_0]`: one race session. `TYPE=3` is a race, `LAPS` the lap count.
     ///   No practice or qualifying session is written, so the game should go
     ///   straight to the race.
-    /// - `[WEATHER_0]`: `NAME` is the weather type id.
-    /// - `[LIGHTING]`: `TIME_OF_DAY_HOUR` is the hour, `TIME_MULT=1` keeps time
-    ///   at normal speed. The real game may instead use a sun-angle key here.
+    ///   `STARTING_POSITION` is the player's 1-based grid slot.
+    /// - `[WEATHER]`: `NAME` is the weather type id (the game reads `[WEATHER]`,
+    ///   not a numbered section).
+    /// - `[LIGHTING]`: `SUN_ANGLE` is what the game reads; it is derived from the
+    ///   hour (13:00 is 0 degrees, 16 degrees per hour, clamped to the game's
+    ///   -80..80 range, i.e. 08:00 to 18:00). `TIME_OF_DAY_HOUR` is kept for
+    ///   reference, `TIME_MULT=1` keeps time at normal speed.
+    /// - `[HEADER] VERSION=2`, `[TEMPERATURE]`, `[WIND]`, `[DYNAMIC_TRACK]` (the
+    ///   "Optimum" preset), `[GROOVE]`, `[GHOST_CAR]`, `[LAP_INVALIDATOR]` and
+    ///   `[OPTIONS]` use the values Content Manager writes by default.
     pub fn to_race_ini(&self) -> String {
         let mut out = String::new();
 
@@ -192,6 +202,11 @@ impl QuickRace {
             "CARS",
             &self.ai_count.saturating_add(1).to_string(),
         );
+        kv(&mut out, "MODEL", &self.car);
+        kv(&mut out, "MODEL_CONFIG", "");
+        kv(&mut out, "SKIN", &self.skin);
+        kv(&mut out, "DRIFT_MODE", "0");
+        kv(&mut out, "RACE_LAPS", &self.laps.to_string());
         kv(&mut out, "AI_LEVEL", &self.ai_level.to_string());
         kv(&mut out, "FIXED_SETUP", "0");
         kv(&mut out, "PENALTIES", "1");
@@ -200,17 +215,27 @@ impl QuickRace {
         section(&mut out, "REMOTE");
         kv(&mut out, "ACTIVE", "0");
 
+        // The player's car is named in [RACE] MODEL; CAR_0 MODEL is "-", as the
+        // game's own launcher writes it.
         section(&mut out, "CAR_0");
-        kv(&mut out, "MODEL", &self.car);
-        kv(&mut out, "SKIN", &self.skin);
-        kv(&mut out, "DRIVER_NAME", &self.player_name);
         kv(&mut out, "SETUP", "");
+        kv(&mut out, "SKIN", &self.skin);
+        kv(&mut out, "MODEL", "-");
+        kv(&mut out, "MODEL_CONFIG", "");
+        kv(&mut out, "BALLAST", "0");
+        kv(&mut out, "RESTRICTOR", "0");
+        kv(&mut out, "DRIVER_NAME", &self.player_name);
         kv(&mut out, "GRID_POSITION", &self.grid_position.to_string());
 
         for index in 1..=self.ai_count {
             section(&mut out, &format!("CAR_{index}"));
             kv(&mut out, "MODEL", &self.car);
             kv(&mut out, "SKIN", "");
+            kv(&mut out, "SETUP", "");
+            kv(&mut out, "MODEL_CONFIG", "");
+            kv(&mut out, "DRIVER_NAME", &format!("AI {index}"));
+            kv(&mut out, "BALLAST", "0");
+            kv(&mut out, "RESTRICTOR", "0");
             kv(&mut out, "AI_LEVEL", &self.ai_level.to_string());
             if let Some(aggression) = self.ai_aggression {
                 kv(&mut out, "AI_AGGRESSION", &aggression.to_string());
@@ -218,23 +243,77 @@ impl QuickRace {
         }
 
         section(&mut out, "SESSION_0");
-        kv(&mut out, "NAME", "Race");
+        kv(&mut out, "NAME", "Quick Race");
         kv(&mut out, "TYPE", &SESSION_TYPE_RACE.to_string());
         kv(&mut out, "LAPS", &self.laps.to_string());
+        kv(&mut out, "DURATION_MINUTES", "0");
+        kv(&mut out, "SPAWN_SET", "START");
+        kv(&mut out, "STARTING_POSITION", &self.grid_position.saturating_add(1).to_string());
 
-        section(&mut out, "WEATHER_0");
+        section(&mut out, "WEATHER");
         kv(&mut out, "NAME", &self.weather);
 
         section(&mut out, "LIGHTING");
+        kv(&mut out, "SUN_ANGLE", &format!("{:.2}", f64::from(sun_angle(self.time_of_day_hour))));
         kv(
             &mut out,
             "TIME_OF_DAY_HOUR",
             &self.time_of_day_hour.to_string(),
         );
-        kv(&mut out, "TIME_MULT", "1");
+        kv(&mut out, "TIME_MULT", "1.0");
+        kv(&mut out, "CLOUD_SPEED", "0.200");
+
+        section(&mut out, "TEMPERATURE");
+        kv(&mut out, "AMBIENT", "26");
+        kv(&mut out, "ROAD", "32");
+
+        section(&mut out, "WIND");
+        kv(&mut out, "SPEED_KMH_MIN", "0");
+        kv(&mut out, "SPEED_KMH_MAX", "0");
+        kv(&mut out, "DIRECTION_DEG", "0");
+
+        // The "Optimum" grip preset of the game's launcher.
+        section(&mut out, "DYNAMIC_TRACK");
+        kv(&mut out, "PRESET", "5");
+        kv(&mut out, "SESSION_START", "100");
+        kv(&mut out, "RANDOMNESS", "0");
+        kv(&mut out, "LAP_GAIN", "1");
+        kv(&mut out, "SESSION_TRANSFER", "100");
+
+        section(&mut out, "GROOVE");
+        kv(&mut out, "VIRTUAL_LAPS", "10");
+        kv(&mut out, "MAX_LAPS", "30");
+        kv(&mut out, "STARTING_LAPS", "0");
+
+        section(&mut out, "GHOST_CAR");
+        kv(&mut out, "RECORDING", "0");
+        kv(&mut out, "PLAYING", "0");
+        kv(&mut out, "LOAD", "0");
+        kv(&mut out, "FILE", "");
+        kv(&mut out, "ENABLED", "0");
+
+        section(&mut out, "LAP_INVALIDATOR");
+        kv(&mut out, "ALLOWED_TYRES_OUT", "-1");
+
+        section(&mut out, "OPTIONS");
+        kv(&mut out, "USE_MPH", "0");
+
+        for inactive in ["REPLAY", "RESTART", "BENCHMARK"] {
+            section(&mut out, inactive);
+            kv(&mut out, "ACTIVE", "0");
+        }
+
+        section(&mut out, "HEADER");
+        kv(&mut out, "VERSION", "2");
 
         out
     }
+}
+
+/// Sun angle the game uses for `hour`: 0 at 13:00, 16 degrees per hour,
+/// clamped to -80..=80 (08:00 to 18:00, the range the game accepts).
+pub fn sun_angle(hour: u8) -> i32 {
+    ((i32::from(hour) - 13) * 16).clamp(-80, 80)
 }
 
 /// Starts a section header, with a blank line before it unless it is the first.
@@ -255,14 +334,18 @@ fn kv(out: &mut String, key: &str, value: &str) {
     out.push_str("\r\n");
 }
 
-/// Writes `race` to `ac_root/cfg/race.ini` and returns the path written.
+/// Writes `race` to `cfg_dir/race.ini` and returns the path written.
+///
+/// The game reads `race.ini` from the user config folder,
+/// `<Documents>/Assetto Corsa/cfg` (see [`crate::settings::ac_user_cfg_dir`]),
+/// not from the install folder.
 ///
 /// Fails with `InvalidInput` (message: the joined validation problems) if the
 /// race is not valid; nothing is touched in that case. Creates `cfg/` if
 /// missing. An existing `race.ini` is renamed, not deleted, to
 /// `race.ini.acxs-backup-YYYYMMDD-HHMMSS` (with a `-2`, `-3`, ... suffix if
 /// that name is taken) before the new file is created.
-pub fn write_race_ini(ac_root: &Path, race: &QuickRace) -> io::Result<PathBuf> {
+pub fn write_race_ini(cfg_dir: &Path, race: &QuickRace) -> io::Result<PathBuf> {
     if let Err(problems) = race.validate() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -270,7 +353,7 @@ pub fn write_race_ini(ac_root: &Path, race: &QuickRace) -> io::Result<PathBuf> {
         ));
     }
 
-    let cfg_dir = ac_root.join("cfg");
+    let cfg_dir = cfg_dir.to_path_buf();
     fs::create_dir_all(&cfg_dir)?;
 
     let target = cfg_dir.join("race.ini");
@@ -421,9 +504,12 @@ mod tests {
         let ini = race.to_race_ini();
         assert!(ini.contains("TRACK=monza\r\n"));
         assert!(ini.contains("CONFIG_TRACK=gp\r\n"));
-        assert!(ini.contains("[SESSION_0]\r\nNAME=Race\r\nTYPE=3\r\nLAPS=12\r\n"));
-        assert!(ini.contains("[WEATHER_0]\r\nNAME=4_mid_clear\r\n"));
-        assert!(ini.contains("TIME_OF_DAY_HOUR=17\r\nTIME_MULT=1\r\n"));
+        assert!(ini.contains("[SESSION_0]\r\nNAME=Quick Race\r\nTYPE=3\r\nLAPS=12\r\n"));
+        assert!(ini.contains("[CAR_0]\r\nSETUP=\r\nSKIN=\r\nMODEL=-\r\n"));
+        assert!(ini.contains("STARTING_POSITION=1\r\n"));
+        assert!(ini.contains("[WEATHER]\r\nNAME=4_mid_clear\r\n"));
+        assert!(ini.contains("SUN_ANGLE=64.00\r\nTIME_OF_DAY_HOUR=17\r\nTIME_MULT=1.0\r\n"));
+        assert!(ini.contains("RACE_LAPS=12\r\n"));
         assert!(ini.contains("DRIVER_NAME=Driver\r\n"));
         // AI aggression goes on AI cars only, never on the player.
         let player = ini.split("[CAR_1]").next().expect("player section");
@@ -443,7 +529,7 @@ mod tests {
         let cfg_dir = root.join("cfg");
 
         let first = QuickRace::default();
-        let path = write_race_ini(&root, &first).expect("first write");
+        let path = write_race_ini(&root.join("cfg"), &first).expect("first write");
         assert_eq!(path, cfg_dir.join("race.ini"));
         let first_text = fs::read_to_string(&path).expect("read first");
         assert_eq!(first_text, first.to_race_ini());
@@ -453,7 +539,7 @@ mod tests {
             laps: 7,
             ..QuickRace::default()
         };
-        write_race_ini(&root, &second).expect("second write");
+        write_race_ini(&root.join("cfg"), &second).expect("second write");
         let backups = backups_in(&cfg_dir);
         assert_eq!(backups.len(), 1, "backups: {backups:?}");
         assert_eq!(
@@ -475,7 +561,7 @@ mod tests {
             track: String::new(),
             ..QuickRace::default()
         };
-        let err = write_race_ini(&root, &race).expect_err("invalid race must fail");
+        let err = write_race_ini(&root.join("cfg"), &race).expect_err("invalid race must fail");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("Track"));
         assert!(!root.join("cfg").exists());

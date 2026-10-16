@@ -39,6 +39,75 @@ pub struct CarSpecs {
     pub tyres_rear: Option<String>,
 }
 
+/// File name of a car's packed data archive.
+pub const PACKED_DATA: &str = "data.acd";
+
+/// True when the car ships its data packed as `data.acd`. The game reads the
+/// archive in that case and ignores a `data/` folder next to it.
+pub fn uses_packed_data(car_dir: &Path) -> bool {
+    car_dir.join(PACKED_DATA).is_file()
+}
+
+/// Text of one data file of a car, from `data.acd` when the car has one (as the
+/// game does), otherwise from `data/<name>`. Matching of `name` ignores case in
+/// the archive. Bytes that are not UTF-8 are read as Windows ANSI (Latin-1).
+pub fn read_data_text(car_dir: &Path, name: &str) -> io::Result<String> {
+    let bytes = if uses_packed_data(car_dir) {
+        let archive = fs::read(car_dir.join(PACKED_DATA))?;
+        let folder = car_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        crate::acd::read_entry_in_folder(&archive, &folder, name).map_err(|e| match e {
+            crate::acd::AcdError::Io(e) => e,
+            crate::acd::AcdError::NotFound(n) => io::Error::new(io::ErrorKind::NotFound, format!("{n} is not in {PACKED_DATA}")),
+            other => io::Error::new(io::ErrorKind::InvalidData, other.to_string()),
+        })?
+    } else {
+        fs::read(car_dir.join("data").join(name))?
+    };
+    Ok(match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(err) => err.into_bytes().iter().map(|&b| char::from(b)).collect(),
+    })
+}
+
+/// Names of the files in a car's data, from `data.acd` or the `data/` folder.
+/// A car with neither gives an empty list.
+pub fn data_file_names(car_dir: &Path) -> io::Result<Vec<String>> {
+    if uses_packed_data(car_dir) {
+        let archive = fs::read(car_dir.join(PACKED_DATA))?;
+        let entries = crate::acd::list_entries(&archive)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        return Ok(entries.into_iter().map(|e| e.name).collect());
+    }
+    match fs::read_dir(car_dir.join("data")) {
+        Ok(read) => Ok(read
+            .flatten()
+            .filter(|e| e.path().is_file())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e),
+    }
+}
+
+/// One data file of a car parsed as INI; see [`read_data_text`].
+pub fn load_data_ini(car_dir: &Path, name: &str) -> io::Result<Ini> {
+    Ok(Ini::parse(&read_data_text(car_dir, name)?))
+}
+
+/// The error for edits to a car whose data is packed: the game would ignore them.
+pub fn packed_data_error(car_dir: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "{} uses a packed {PACKED_DATA}; the game reads that archive and ignores data/, so edits there would have no effect",
+            car_dir.display()
+        ),
+    )
+}
+
 /// `torque[Nm] * rpm / 9.5488` gives watts (see module docs).
 const RPM_NM_TO_WATTS_DIVISOR: f64 = 9.5488;
 
@@ -65,8 +134,8 @@ fn count(ini: &Ini, section: &str, key: &str) -> Option<u32> {
 }
 
 /// Parse a `rpm|torque` curve file. Comment and malformed lines are skipped.
-fn read_curve(path: &Path) -> Option<Vec<(f64, f64)>> {
-    let text = fs::read_to_string(path).ok()?;
+fn read_curve(car_dir: &Path, name: &str) -> Option<Vec<(f64, f64)>> {
+    let text = read_data_text(car_dir, name).ok()?;
     let points: Vec<(f64, f64)> = text
         .trim_start_matches('\u{feff}')
         .lines()
@@ -97,9 +166,8 @@ fn curve_maxima(points: &[(f64, f64)]) -> Option<(f64, f64)> {
     Some((max_power, max_torque))
 }
 
-/// Read a car's specs from `<car_dir>/data/`. Missing files or keys give `None`.
+/// Read a car's specs from `data.acd` or `<car_dir>/data/`. Missing files or keys give `None`.
 pub fn read_specs(car_dir: &Path) -> CarSpecs {
-    let data = car_dir.join("data");
     let mut specs = CarSpecs {
         car_id: car_dir
             .file_name()
@@ -108,31 +176,31 @@ pub fn read_specs(car_dir: &Path) -> CarSpecs {
         ..CarSpecs::default()
     };
 
-    if let Ok(car) = Ini::load(&data.join("car.ini")) {
+    if let Ok(car) = load_data_ini(car_dir, "car.ini") {
         specs.mass_kg = number(&car, "BASIC", "TOTALMASS");
         specs.fuel_tank_l = number(&car, "FUEL", "MAX_FUEL");
     }
 
-    if let Ok(engine) = Ini::load(&data.join("engine.ini")) {
+    if let Ok(engine) = load_data_ini(car_dir, "engine.ini") {
         specs.max_rpm = number(&engine, "ENGINE_DATA", "LIMITER");
         let curve_name = text(&engine, "HEADER", "POWER_CURVE").unwrap_or_else(|| "power.lut".to_string());
-        if let Some((power, torque)) = read_curve(&data.join(curve_name)).as_deref().and_then(curve_maxima) {
+        if let Some((power, torque)) = read_curve(car_dir, &curve_name).as_deref().and_then(curve_maxima) {
             specs.max_power_w = Some(power);
             specs.max_torque_nm = Some(torque);
         }
     }
 
-    if let Ok(drivetrain) = Ini::load(&data.join("drivetrain.ini")) {
+    if let Ok(drivetrain) = load_data_ini(car_dir, "drivetrain.ini") {
         specs.drive_type = text(&drivetrain, "TRACTION", "TYPE");
         specs.gear_count = count(&drivetrain, "GEARS", "COUNT");
     }
 
-    if let Ok(suspensions) = Ini::load(&data.join("suspensions.ini")) {
+    if let Ok(suspensions) = load_data_ini(car_dir, "suspensions.ini") {
         specs.front_weight_distribution = number(&suspensions, "BASIC", "CG_LOCATION")
             .filter(|share| (0.0..=1.0).contains(share));
     }
 
-    if let Ok(tyres) = Ini::load(&data.join("tyres.ini")) {
+    if let Ok(tyres) = load_data_ini(car_dir, "tyres.ini") {
         specs.tyres_front = text(&tyres, "FRONT", "NAME");
         specs.tyres_rear = text(&tyres, "REAR", "NAME");
     }
@@ -170,6 +238,9 @@ pub fn summary_lines(specs: &CarSpecs) -> Vec<(String, String)> {
 pub fn set_mass(car_dir: &Path, kg: f64) -> io::Result<()> {
     if !kg.is_finite() || kg <= 0.0 {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "mass must be a positive number"));
+    }
+    if uses_packed_data(car_dir) {
+        return Err(packed_data_error(car_dir));
     }
     let path = car_dir.join("data").join("car.ini");
     let mut car = Ini::load(&path)?;

@@ -171,8 +171,9 @@ fn build_bundle(
 fn locate_ac_log() -> Option<PathBuf> {
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
     let home = PathBuf::from(home);
-    [home.join("Documents"), home.join("OneDrive").join("Documents")]
+    settings::documents_dir()
         .into_iter()
+        .chain([home.join("Documents"), home.join("OneDrive").join("Documents")])
         .map(|docs| docs.join("Assetto Corsa").join("logs").join("log.txt"))
         .find(|path| path.is_file())
 }

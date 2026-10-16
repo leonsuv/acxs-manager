@@ -27,6 +27,7 @@ pub fn tool() -> Box<dyn Tool> {
     let (tx, rx) = mpsc::channel();
     Box::new(SetupsPage {
         root_input: default_root(),
+        import_track: "generic".to_string(),
         started: false,
         error: None,
         cars: Vec::new(),
@@ -53,6 +54,9 @@ pub fn tool() -> Box<dyn Tool> {
 struct SetupsPage {
     /// Setups root, edited as text or picked with Browse.
     root_input: String,
+    /// Track folder (inside the car folder) that imports go into. The game lists
+    /// setups per track; `generic` is offered on every track.
+    import_track: String,
     /// The first scan happens on the first frame the page is drawn.
     started: bool,
     /// Why the setups root could not be read, shown in the page.
@@ -375,13 +379,17 @@ impl SetupsPage {
     fn import(&mut self, ctx: &egui::Context, source: PathBuf) {
         let Some(car) = self.car.clone() else { return };
         let root = self.root();
+        let track = match self.import_track.trim() {
+            "" => "generic".to_string(),
+            other => other.to_string(),
+        };
         self.spawn(ctx, move || {
             let name = source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let clash = root.join(&car).join(&name).is_file();
-            let notice = match setups::import_setup(&root, &car, &source) {
+            let clash = root.join(&car).join(&track).join(&name).is_file();
+            let notice = match setups::import_setup_for_track(&root, &car, Some(&track), &source) {
                 Ok(_) => Notice {
                     text: format!(
-                        "Imported {name} into {car}.{}",
+                        "Imported {name} into {car}/{track}.{}",
                         if clash { " The old file with that name was kept as a backup." } else { "" }
                     ),
                     ok: true,
@@ -396,8 +404,9 @@ impl SetupsPage {
         let (Some(car), Some(selected)) = (self.car.clone(), self.selected.clone()) else { return };
         let root = self.root();
         let name = stem(&selected);
+        let track = self.setups.iter().find(|s| s.path == selected).and_then(|s| s.track.clone());
         self.spawn(ctx, move || {
-            let notice = match setups::archive_setup(&root, &car, &name) {
+            let notice = match setups::archive_setup_in(&root, &car, track.as_deref(), &name) {
                 Ok(dest) => Notice {
                     text: format!("Archived {name}.ini to {}. Nothing was deleted.", dest.display()),
                     ok: true,
@@ -496,6 +505,12 @@ impl SetupsPage {
                                 ui.selectable_value(&mut self.car, Some(car.clone()), car.as_str());
                             }
                         });
+                    ui.label(RichText::new("Track folder").color(MUTED));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.import_track)
+                            .desired_width(110.0)
+                            .hint_text("generic"),
+                    );
                     if ui.add_enabled(!busy && self.car.is_some(), egui::Button::new("Import .ini...")).clicked() {
                         *intent = Some(Intent::Import);
                     }
@@ -703,7 +718,11 @@ fn draw_value_groups(ui: &mut egui::Ui, rows: &mut [ValueRow]) {
 
 fn setup_row(ui: &mut egui::Ui, setup: &SetupFile) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(format!("{}.ini", setup.name)).strong().color(TEXT));
+        let label = match &setup.track {
+            Some(track) => format!("{track} / {}.ini", setup.name),
+            None => format!("{}.ini", setup.name),
+        };
+        ui.label(RichText::new(label).strong().color(TEXT));
         ui.label(RichText::new(modified_text(setup.modified)).small().color(MUTED));
     });
 }
@@ -777,15 +796,9 @@ fn modified_text(modified: Option<SystemTime>) -> String {
 
 /// `<Documents>/Assetto Corsa/setups`, from USERPROFILE or HOME. Empty when neither is set.
 fn default_root() -> String {
-    match std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
-        Some(home) => PathBuf::from(home)
-            .join("Documents")
-            .join("Assetto Corsa")
-            .join("setups")
-            .display()
-            .to_string(),
-        None => String::new(),
-    }
+    acxs_manager::settings::ac_documents_dir()
+        .map(|dir| dir.join("setups").display().to_string())
+        .unwrap_or_default()
 }
 
 /// Car folders under the setups root, sorted by name. Hidden folders and the archive are skipped.

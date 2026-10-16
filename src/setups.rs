@@ -1,6 +1,8 @@
 //! Car setup file manager.
 //!
-//! Assetto Corsa keeps setups in `<Documents>/Assetto Corsa/setups/<car_id>/<name>.ini`.
+//! Assetto Corsa keeps setups per track in
+//! `<Documents>/Assetto Corsa/setups/<car_id>/<track_id>/<name>.ini` (a `generic`
+//! folder holds setups for every track). Files directly in `<car_id>/` are listed too.
 //! The setups root is always passed in by the caller. Nothing here deletes a file:
 //! anything that would be overwritten or removed is renamed aside instead.
 
@@ -20,6 +22,8 @@ const BACKUP_MARKER: &str = ".acxs-backup-";
 #[derive(Debug, Clone)]
 pub struct SetupFile {
     pub car_id: String,
+    /// Track folder the setup sits in, or `None` for a file directly in the car folder.
+    pub track: Option<String>,
     /// File name without the `.ini` extension.
     pub name: String,
     pub path: PathBuf,
@@ -59,19 +63,17 @@ pub fn list_setups(setups_root: &Path, car_id: Option<&str>) -> Vec<SetupFile> {
 
     let mut out = Vec::new();
     for car in car_ids {
-        let Ok(entries) = fs::read_dir(setups_root.join(&car)) else {
+        let car_dir = setups_root.join(&car);
+        collect_setups(&car_dir, &car, None, &mut out);
+        let Ok(entries) = fs::read_dir(&car_dir) else {
             continue;
         };
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
-            if !path.is_file() || !has_ini_extension(&path) {
-                continue;
+            let track = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() && !track.starts_with('.') && track != ARCHIVE_DIR {
+                collect_setups(&path, &car, Some(track), &mut out);
             }
-            let Some(name) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else {
-                continue;
-            };
-            let modified = entry.metadata().and_then(|m| m.modified()).ok();
-            out.push(SetupFile { car_id: car.clone(), name, path, modified });
         }
     }
 
@@ -79,16 +81,53 @@ pub fn list_setups(setups_root: &Path, car_id: Option<&str>) -> Vec<SetupFile> {
         a.car_id
             .to_lowercase()
             .cmp(&b.car_id.to_lowercase())
+            .then_with(|| a.track.cmp(&b.track))
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
             .then_with(|| a.name.cmp(&b.name))
     });
     out
 }
 
+/// The `.ini` setups directly in `dir`, added to `out`.
+fn collect_setups(dir: &Path, car: &str, track: Option<String>, out: &mut Vec<SetupFile>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() || !has_ini_extension(&path) {
+            continue;
+        }
+        let Some(name) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        let modified = entry.metadata().and_then(|m| m.modified()).ok();
+        out.push(SetupFile { car_id: car.to_string(), track: track.clone(), name, path, modified });
+    }
+}
+
 /// Copy a `.ini` file into `<setups_root>/<car_id>/`. If a file with the same name already
 /// exists, it is first renamed to `<name>.ini.acxs-backup-<stamp>`. Returns the new path.
+///
+/// The game only offers setups from a track folder; use [`import_setup_for_track`].
 pub fn import_setup(setups_root: &Path, car_id: &str, source: &Path) -> io::Result<PathBuf> {
+    import_setup_for_track(setups_root, car_id, None, source)
+}
+
+/// Like [`import_setup`], into `<setups_root>/<car_id>/<track>/` when `track` is given.
+pub fn import_setup_for_track(
+    setups_root: &Path,
+    car_id: &str,
+    track: Option<&str>,
+    source: &Path,
+) -> io::Result<PathBuf> {
     validate_component(car_id)?;
+    if let Some(track) = track {
+        validate_component(track)?;
+        if track == ARCHIVE_DIR {
+            return Err(invalid("the archive folder cannot hold live setups"));
+        }
+    }
     if !has_ini_extension(source) {
         return Err(invalid("setup files must have a .ini extension"));
     }
@@ -97,7 +136,10 @@ pub fn import_setup(setups_root: &Path, car_id: &str, source: &Path) -> io::Resu
     }
     let file_name = source.file_name().ok_or_else(|| invalid("source has no file name"))?;
 
-    let car_dir = setups_root.join(car_id);
+    let car_dir = match track {
+        Some(track) => setups_root.join(car_id).join(track),
+        None => setups_root.join(car_id),
+    };
     fs::create_dir_all(&car_dir)?;
     let dest = car_dir.join(file_name);
 
@@ -164,15 +206,30 @@ pub fn diff(left: &Ini, right: &Ini) -> Vec<SetupDiff> {
 /// Move a setup into `<setups_root>/_archive/<car_id>/` with a timestamp in its name.
 /// `name` may be given with or without the `.ini` extension. Returns the archived path.
 pub fn archive_setup(setups_root: &Path, car_id: &str, name: &str) -> io::Result<PathBuf> {
+    archive_setup_in(setups_root, car_id, None, name)
+}
+
+/// Like [`archive_setup`] for a setup in `<car_id>/<track>/`, archived to
+/// `_archive/<car_id>/<track>/`.
+pub fn archive_setup_in(setups_root: &Path, car_id: &str, track: Option<&str>, name: &str) -> io::Result<PathBuf> {
     validate_component(car_id)?;
     validate_component(name)?;
+    if let Some(track) = track {
+        validate_component(track)?;
+    }
     let file_name = if has_ini_extension(Path::new(name)) {
         name.to_string()
     } else {
         format!("{name}.ini")
     };
 
-    let source = setups_root.join(car_id).join(&file_name);
+    let mut source_dir = setups_root.join(car_id);
+    let mut archive_dir = setups_root.join(ARCHIVE_DIR).join(car_id);
+    if let Some(track) = track {
+        source_dir.push(track);
+        archive_dir.push(track);
+    }
+    let source = source_dir.join(&file_name);
     if !source.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -180,7 +237,6 @@ pub fn archive_setup(setups_root: &Path, car_id: &str, name: &str) -> io::Result
         ));
     }
 
-    let archive_dir = setups_root.join(ARCHIVE_DIR).join(car_id);
     fs::create_dir_all(&archive_dir)?;
     let stem = Path::new(&file_name)
         .file_stem()
@@ -312,6 +368,28 @@ fn same_file(a: &Path, b: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn per_track_setups_are_listed_imported_and_archived() {
+        let root = std::env::temp_dir().join(format!("acxs-setups-track-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("ks_bmw").join("monza")).unwrap();
+        fs::write(root.join("ks_bmw").join("monza").join("quali.ini"), "[FUEL]\nVALUE=10\n").unwrap();
+        let src = root.join("race.ini");
+        fs::write(&src, "[FUEL]\nVALUE=60\n").unwrap();
+
+        let dest = import_setup_for_track(&root, "ks_bmw", Some("monza"), &src).unwrap();
+        assert_eq!(dest, root.join("ks_bmw").join("monza").join("race.ini"));
+        let list = list_setups(&root, Some("ks_bmw"));
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().all(|s| s.track.as_deref() == Some("monza")));
+
+        let archived = archive_setup_in(&root, "ks_bmw", Some("monza"), "quali").unwrap();
+        assert!(archived.starts_with(root.join(ARCHIVE_DIR).join("ks_bmw").join("monza")));
+        assert_eq!(list_setups(&root, Some("ks_bmw")).len(), 1);
+        assert!(import_setup_for_track(&root, "ks_bmw", Some(".."), &src).is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     /// A unique scratch folder that is removed on drop, even if the test panics.
     struct TempDir(PathBuf);

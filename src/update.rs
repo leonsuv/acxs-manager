@@ -3,13 +3,14 @@
 //! Nothing in this module runs on its own. The caller decides when to ask for
 //! a check, and `check` then makes one `GET` request to the feed URL it was given.
 //!
-//! The client is written against `std::net` only, so there is no TLS: feed
-//! URLs must start with `http://` and `https://` is rejected. Serving the feed
-//! over HTTPS would need a TLS dependency, which is out of scope here.
+//! `https://` feeds go through `ureq` with certificate checks (the Windows TLS
+//! stack and certificate store on Windows, rustls elsewhere), so the feed cannot
+//! be altered on the way. Redirects are followed
+//! only while they stay on HTTPS. `http://` feeds use a small `std::net` client;
+//! their reply is not protected, so the UI recommends HTTPS.
 //!
-//! Limits of the std-only client: redirects are not followed, compressed
-//! responses are refused, DNS lookup is not covered by the timeout, and the
-//! feed and its notes are capped in size.
+//! Limits: compressed responses are refused, DNS lookup is not covered by the
+//! timeout of the plain-HTTP client, and the feed and its notes are capped in size.
 //!
 //! Feed format:
 //!
@@ -311,13 +312,71 @@ pub fn check(
     timeout: Duration,
     current: &Version,
 ) -> Result<Option<Release>, UpdateError> {
-    let endpoint = parse_http_url(feed_url)?;
-    let deadline = Instant::now().checked_add(timeout).ok_or(UpdateError::Timeout)?;
-    let body = fetch(&endpoint, deadline)?;
+    let body = if has_scheme(feed_url, "https://") {
+        fetch_https(feed_url, timeout)?
+    } else {
+        let endpoint = parse_http_url(feed_url)?;
+        let deadline = Instant::now().checked_add(timeout).ok_or(UpdateError::Timeout)?;
+        fetch(&endpoint, deadline)?
+    };
     let text = String::from_utf8(body)
         .map_err(|_| UpdateError::InvalidFeed("feed is not valid UTF-8".to_string()))?;
     let release = parse_feed(&text)?;
     Ok(if release.version > *current { Some(release) } else { None })
+}
+
+/// One `GET` over HTTPS with certificate checks. Returns the body of a 200 reply.
+fn fetch_https(url: &str, timeout: Duration) -> Result<Vec<u8>, UpdateError> {
+    if url.len() > MAX_URL_LEN || !is_printable_ascii(url) {
+        return Err(UpdateError::InvalidUrl("too long, or contains spaces or non-ASCII characters".into()));
+    }
+    let rest = &url["https://".len()..];
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.is_empty() || authority.contains('@') {
+        return Err(UpdateError::InvalidUrl("feed URL needs a host and no user information".into()));
+    }
+    let builder = ureq::AgentBuilder::new();
+    // Windows builds use the system TLS stack (SChannel) and its certificate store.
+    #[cfg(windows)]
+    let builder = builder.tls_connector(std::sync::Arc::new(
+        native_tls::TlsConnector::new().map_err(|e| UpdateError::Network(io::Error::other(e.to_string())))?,
+    ));
+    let agent = builder
+        .timeout(timeout)
+        .redirects(5)
+        .user_agent(concat!("acxs-manager/", env!("CARGO_PKG_VERSION")))
+        .build();
+    let response = match agent.get(url).set("Accept", "application/json").set("Accept-Encoding", "identity").call() {
+        Ok(response) => response,
+        Err(ureq::Error::Status(code, _)) => return Err(UpdateError::HttpStatus(code)),
+        Err(ureq::Error::Transport(err)) => {
+            let text = err.to_string();
+            return Err(if text.to_ascii_lowercase().contains("timed out") {
+                UpdateError::Timeout
+            } else {
+                UpdateError::Network(io::Error::other(text))
+            });
+        }
+    };
+    // A redirect must not leave HTTPS, or the protection would be lost.
+    if !has_scheme(response.get_url(), "https://") {
+        return Err(UpdateError::BadResponse("the feed redirected away from https".into()));
+    }
+    if response.status() != 200 {
+        return Err(UpdateError::HttpStatus(response.status()));
+    }
+    if response.header("content-encoding").is_some_and(|v| !v.eq_ignore_ascii_case("identity")) {
+        return Err(UpdateError::BadResponse("compressed responses are not supported".into()));
+    }
+    let mut body = Vec::new();
+    response
+        .into_reader()
+        .take(MAX_FEED_BYTES as u64 + 1)
+        .read_to_end(&mut body)?;
+    if body.len() > MAX_FEED_BYTES {
+        return Err(UpdateError::BadResponse("feed is larger than the limit".into()));
+    }
+    Ok(body)
 }
 
 /// Time left before `deadline`, or `Timeout` once it has passed.
@@ -653,7 +712,8 @@ mod tests {
     fn non_http_feed_urls_are_rejected_without_connecting() {
         let current = v("1.0.0");
         for url in [
-            "https://example.com/feed.json",
+            "https://user@example.com/feed.json",
+            "https://",
             "ftp://example.com/feed.json",
             "example.com/feed.json",
             "http://",

@@ -277,8 +277,7 @@ fn open_folder(path: &Path) -> std::io::Result<()> {
     #[cfg(not(any(windows, target_os = "macos")))]
     let child: std::io::Result<std::process::Child> = {
         let _ = path;
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        Err(std::io::Error::other(
             "opening folders is supported on Windows and macOS only",
         ))
     };

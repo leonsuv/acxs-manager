@@ -6,8 +6,8 @@
 //! - `data_car_years.ini`, section `[YEARS]`: one `car_id=year` per line.
 //!
 //! The readers never write. A missing file is not an error: they return an empty
-//! `Vec`. Other I/O errors, and files that are not valid UTF-8, are returned as
-//! `Err` (for `version_diff`, they are reported as lines in its output).
+//! `Vec`. Other I/O errors are returned as `Err` (files that are not UTF-8 are read as
+//! Windows ANSI; for `version_diff`, errors are reported as lines in its output).
 //! Car ids are matched case-insensitively, the same way the INI reader matches keys.
 //!
 //! The writers ([`write_classes`], [`write_years`], [`add_car_to_class`],
@@ -541,7 +541,8 @@ mod tests {
     fn version_diff_reports_unreadable_file_instead_of_failing() {
         let old = TempDir::new("bad_old");
         let new = TempDir::new("bad_new");
-        fs::write(old.path().join(CLASSES_FILE), [0xff_u8, 0xfe, 0x00]).unwrap();
+        // A folder where the file should be cannot be read as a file.
+        fs::create_dir(old.path().join(CLASSES_FILE)).unwrap();
         new.write(CLASSES_FILE, "[CLASSES]\r\nalpha=race\r\n");
 
         let diff = version_diff(old.path(), new.path());

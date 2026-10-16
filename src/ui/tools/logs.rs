@@ -313,17 +313,10 @@ impl LogsTool {
 /// Asks for the folder to save the bundle in. Starts in the Documents folder when it exists.
 fn pick_bundle_dir() -> Option<PathBuf> {
     let mut dialog = rfd::FileDialog::new().set_title("Choose a folder for the diagnostics bundle");
-    if let Some(documents) = home_dir().map(|home| home.join("Documents")).filter(|dir| dir.is_dir()) {
+    if let Some(documents) = acxs_manager::settings::documents_dir().filter(|dir| dir.is_dir()) {
         dialog = dialog.set_directory(documents);
     }
     dialog.pick_folder()
-}
-
-/// The user's home folder: USERPROFILE on Windows, HOME elsewhere.
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
 }
 
 /// Notice text for a finished bundle: where it was written, then each file inside it.
@@ -352,17 +345,8 @@ fn default_log_path(ac_root: Option<&Path>) -> String {
     if let Some(path) = ac_root.and_then(|root| ac_log::known_log_paths(root).into_iter().next()) {
         return path.display().to_string();
     }
-    std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(|home| {
-            PathBuf::from(home)
-                .join("Documents")
-                .join("Assetto Corsa")
-                .join("logs")
-                .join("log.txt")
-                .display()
-                .to_string()
-        })
+    acxs_manager::settings::ac_documents_dir()
+        .map(|dir| dir.join("logs").join("log.txt").display().to_string())
         .unwrap_or_default()
 }
 

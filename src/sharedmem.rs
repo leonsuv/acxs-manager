@@ -24,7 +24,7 @@ pub const PHYSICS_PAGE_LEN: usize = 580;
 /// Byte length of a graphics page.
 pub const GRAPHICS_PAGE_LEN: usize = 288;
 /// Byte length of a static page.
-pub const STATIC_PAGE_LEN: usize = 648;
+pub const STATIC_PAGE_LEN: usize = 684;
 
 /// Errors from the page parsers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -468,7 +468,7 @@ pub fn parse_static(bytes: &[u8]) -> Result<StaticPage, SharedMemError> {
         engine_brake_settings_count: r.read_i32()?,
         ers_power_controller_count: r.read_i32()?,
         track_spline_length: r.read_f32()?,
-        track_configuration: r.read_wstr::<15>()?,
+        track_configuration: r.read_wstr::<33>()?,
         ers_max_j: r.read_f32()?,
         is_timed_race: r.read_i32()?,
         has_extra_lap: r.read_i32()?,
@@ -886,12 +886,12 @@ mod tests {
             .i32(412, 8500) // max_rpm
             .f32(416, 100.0) // fuel_max
             .f32(436, 0.33) // tyre_radius[0]
-            .wstr(524, "gp", 15)
-            .f32(556, 4.5) // ers_max_j, after 2 bytes of padding
-            .wstr(568, "red_fox", 33)
-            .i32(636, 1) // reversed_grid_positions, after 2 bytes of padding
-            .i32(640, 5)
-            .i32(644, 15);
+            .wstr(524, "gp", 33)
+            .f32(592, 4.5) // ers_max_j, after 2 bytes of padding
+            .wstr(604, "red_fox", 33)
+            .i32(672, 1) // reversed_grid_positions, after 2 bytes of padding
+            .i32(676, 5)
+            .i32(680, 15);
         let s = parse_static(&b.0).unwrap();
         assert_eq!(s.sm_version, "1.7");
         assert_eq!(s.ac_version, "1.16.3");

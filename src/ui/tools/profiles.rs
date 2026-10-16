@@ -121,7 +121,7 @@ impl ProfilesPage {
         self.outcome = None;
         let target = profile.label();
         spawn_job(egui_ctx, &self.tx, move || {
-            let result = graphics_profiles::switch(&root, &profile, game_running).map_err(|e| e.to_string());
+            let result = graphics_profiles::switch(&root, &profile, game_running || acxs_manager::game::is_game_running()).map_err(|e| e.to_string());
             let status = graphics_profiles::active(&root).map_err(|e| e.to_string());
             Msg::Switched {
                 root,

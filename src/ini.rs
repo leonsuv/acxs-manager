@@ -27,6 +27,9 @@ pub struct Ini {
     /// Lines before the first section header.
     preamble: Vec<Line>,
     sections: Vec<Section>,
+    /// The file was not valid UTF-8 and was read as Windows ANSI (Latin-1), so it is
+    /// written back the same way and its bytes survive a load and save.
+    latin1: bool,
 }
 
 impl Ini {
@@ -63,8 +66,26 @@ impl Ini {
         ini
     }
 
+    /// Reads `path`. Files that are not valid UTF-8 (many mod files are saved as
+    /// Windows ANSI) are read byte for byte as Latin-1 instead of failing, and are
+    /// saved in that encoding again.
     pub fn load(path: &Path) -> io::Result<Ini> {
-        Ok(Ini::parse(&fs::read_to_string(path)?))
+        let bytes = fs::read(path)?;
+        match String::from_utf8(bytes) {
+            Ok(text) => Ok(Ini::parse(&text)),
+            Err(err) => {
+                let text: String = err.into_bytes().iter().map(|&b| char::from(b)).collect();
+                let mut ini = Ini::parse(&text);
+                ini.latin1 = true;
+                Ok(ini)
+            }
+        }
+    }
+
+    /// Save in Windows ANSI (Latin-1) instead of UTF-8, as [`Ini::load`] does for
+    /// files that were not UTF-8. Characters above U+00FF still force UTF-8.
+    pub fn set_latin1(&mut self, latin1: bool) {
+        self.latin1 = latin1;
     }
 
     fn find_section(&self, name: &str) -> Option<&Section> {
@@ -82,12 +103,15 @@ impl Ini {
         })
     }
 
+    /// The value as a number. A trailing `;` or `//` comment, which the game's
+    /// own files use on most lines (`TOTALMASS=1240 ; kg`), is ignored.
     pub fn get_f64(&self, section: &str, key: &str) -> Option<f64> {
-        self.get(section, key)?.parse().ok()
+        value_without_comment(self.get(section, key)?).parse().ok()
     }
 
+    /// Like [`Ini::get_f64`], for integers.
     pub fn get_i64(&self, section: &str, key: &str) -> Option<i64> {
-        self.get(section, key)?.parse().ok()
+        value_without_comment(self.get(section, key)?).parse().ok()
     }
 
     /// All `key=value` pairs of a section, in file order.
@@ -170,13 +194,48 @@ impl Ini {
             };
             fs::rename(path, backup)?;
         }
-        fs::write(path, self.to_string_crlf())
+        fs::write(path, self.encoded())
     }
+
+    /// The CRLF text in the file's own encoding: Latin-1 when it was read that way
+    /// and every character still fits, UTF-8 otherwise.
+    fn encoded(&self) -> Vec<u8> {
+        let text = self.to_string_crlf();
+        if self.latin1 && text.chars().all(|c| u32::from(c) <= 0xFF) {
+            text.chars().map(|c| u32::from(c) as u8).collect()
+        } else {
+            text.into_bytes()
+        }
+    }
+}
+
+/// `value` up to its first `;` or `//` comment, trimmed.
+fn value_without_comment(value: &str) -> &str {
+    let cut = [value.find(';'), value.find("//")].into_iter().flatten().min().unwrap_or(value.len());
+    value[..cut].trim()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ansi_file_loads_and_saves_byte_for_byte() {
+        let dir = std::env::temp_dir().join(format!("acxs-ini-ansi-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("car.ini");
+        // A comment with "Größe" written in Windows-1252.
+        let bytes = b"[BASIC]\r\nTOTALMASS=1240 ; Gr\xf6\xdfe\r\n".to_vec();
+        fs::write(&path, &bytes).unwrap();
+        let mut ini = Ini::load(&path).unwrap();
+        assert_eq!(ini.get_f64("BASIC", "TOTALMASS"), Some(1240.0));
+        ini.set("BASIC", "NEW", 1);
+        ini.save_with_backup(&path).unwrap();
+        let saved = fs::read(&path).unwrap();
+        assert!(saved.starts_with(b"[BASIC]\r\nTOTALMASS=1240 ; Gr\xf6\xdfe\r\nNEW=1\r\n"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     const SAMPLE: &str = "; header comment\r\n[BASIC]\r\nNAME=Ferrari\r\n\r\n[ENGINE]\r\nMASS=1200 ; inline kept as value\r\n";
 
@@ -184,7 +243,9 @@ mod tests {
     fn reads_values_case_insensitively() {
         let ini = Ini::parse(SAMPLE);
         assert_eq!(ini.get("basic", "name"), Some("Ferrari"));
-        assert_eq!(ini.get_f64("ENGINE", "mass"), None); // inline comment is part of the value
+        // The inline comment stays part of the raw value, but numbers ignore it.
+        assert!(ini.get("ENGINE", "mass").is_some_and(|v| v.contains(';')));
+        assert!(ini.get_f64("ENGINE", "mass").is_some());
         assert_eq!(ini.get("ENGINE", "MASS"), Some("1200 ; inline kept as value"));
     }
 
