@@ -687,7 +687,11 @@ All commands ran in the scratch directory. `<copy A>` and `<copy B>` are the scr
 
 ## 11. Ghidra loader analysis
 
-Method: Ghidra 12.1.4 headless (run under JDK 21) on scratch copies of both DLLs, with a small script that decompiles the function containing a given address and up to eight of its callers. The lights patch folders were only read. Each run took roughly 50 minutes of auto-analysis plus decompilation. Both runs exited normally.
+Method: Ghidra 12.1.4 headless (run under JDK 21) on scratch copies of both DLLs, with a small script that decompiles the function containing a given address and up to eight of its callers. The lights patch folders were only read.
+
+Timing: the one-time import with auto-analysis took about 19 minutes for the 0.2.11 copy (00:14 to 00:33) and about 13 minutes for the 0.3.0 copy (00:15 to 00:27). Once a project exists, a single-address decompile against it takes about 4 seconds (checked with `-process ... -noanalysis`). The earlier run also decompiled up to eight callers per address, which is what made those runs long.
+
+REA: the Ghidra provider becomes available once GHIDRA_INSTALL_DIR and JDK 21 are set. Its first `analyze` call timed out after 330 seconds (`provider_timeout`), because the Ghidra session serves queries only after auto-analysis completes. REA was not used for the final results.
 
 Results, 0.2.11 (`a.txt`, target 180c8f8b0 and 180f65730):
 - The loader function at 180c8f8b0 takes a module path from its caller. It checks an integrity value on that path string, then calls `LoadLibraryW` on it.
