@@ -7,7 +7,8 @@ use super::{Tool, ToolContext};
 use crate::ui::theme::{self, MUTED, WARN};
 use crate::ui::{widgets, Notice};
 use acxs_manager::car_tuning::{
-    self, Change, Tuning, MAX_FACTOR, MAX_FUEL_L, MAX_MASS_KG, MIN_FACTOR, MIN_FUEL_L, MIN_MASS_KG,
+    self, Axle, Change, Tuning, MAX_BASE_HEIGHT_M, MAX_CAMBER_DEG, MAX_FACTOR, MAX_FUEL_L, MAX_MASS_KG,
+    MAX_PRESSURE_PSI, MIN_BASE_HEIGHT_M, MIN_CAMBER_DEG, MIN_FACTOR, MIN_FUEL_L, MIN_MASS_KG, MIN_PRESSURE_PSI,
 };
 use acxs_manager::content::{self, CarEntry};
 use eframe::egui::{self, RichText};
@@ -29,9 +30,13 @@ pub fn tool() -> Box<dyn Tool> {
         query: String::new(),
         selected: None,
         kind: Kind::default(),
+        axle: Axle::Front,
         factor: 1.0,
         mass_kg: 1200.0,
         fuel_l: 60.0,
+        pressure_psi: 30.0,
+        camber_deg: -2.5,
+        base_height_m: 0.25,
         busy: false,
         tx,
         rx,
@@ -53,10 +58,24 @@ enum Kind {
     FuelTank,
     GearRatios,
     FinalDrive,
+    IdealPressure,
+    StaticPressure,
+    Camber,
+    BaseHeight,
 }
 
 impl Kind {
-    const ALL: [Kind; 5] = [Kind::TorqueCurve, Kind::TotalMass, Kind::FuelTank, Kind::GearRatios, Kind::FinalDrive];
+    const ALL: [Kind; 9] = [
+        Kind::TorqueCurve,
+        Kind::TotalMass,
+        Kind::FuelTank,
+        Kind::GearRatios,
+        Kind::FinalDrive,
+        Kind::IdealPressure,
+        Kind::StaticPressure,
+        Kind::Camber,
+        Kind::BaseHeight,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -65,12 +84,31 @@ impl Kind {
             Kind::FuelTank => "Fuel tank",
             Kind::GearRatios => "Gear ratios",
             Kind::FinalDrive => "Final drive",
+            Kind::IdealPressure => "Ideal pressure",
+            Kind::StaticPressure => "Static pressure",
+            Kind::Camber => "Camber",
+            Kind::BaseHeight => "Base height",
         }
     }
 
-    /// Factors multiply the current value. Mass and tank size are set to a new value.
+    /// Factors multiply the current value. Everything else is set to a new value.
     fn is_factor(self) -> bool {
-        !matches!(self, Kind::TotalMass | Kind::FuelTank)
+        matches!(self, Kind::TorqueCurve | Kind::GearRatios | Kind::FinalDrive)
+    }
+
+    /// Per-axle kinds need the front or rear axle picked.
+    fn has_axle(self) -> bool {
+        matches!(
+            self,
+            Kind::IdealPressure | Kind::StaticPressure | Kind::Camber | Kind::BaseHeight
+        )
+    }
+}
+
+fn axle_label(axle: Axle) -> &'static str {
+    match axle {
+        Axle::Front => "Front axle",
+        Axle::Rear => "Rear axle",
     }
 }
 
@@ -83,12 +121,20 @@ struct CarTuningPage {
     /// Car id (folder name) of the car to tune.
     selected: Option<String>,
     kind: Kind,
+    /// Axle used by the per-axle kinds.
+    axle: Axle,
     /// Multiplier used by the factor kinds.
     factor: f64,
     /// Value used by the total mass kind, in kg.
     mass_kg: f64,
     /// Value used by the fuel tank kind, in litres.
     fuel_l: f64,
+    /// Value used by the tyre pressure kinds, in psi.
+    pressure_psi: f64,
+    /// Value used by the camber kind, in degrees.
+    camber_deg: f64,
+    /// Value used by the base height kind, in metres.
+    base_height_m: f64,
     /// Set while a change runs on a background thread.
     busy: bool,
     tx: Sender<Msg>,
@@ -108,7 +154,7 @@ impl Tool for CarTuningPage {
         widgets::heading(
             ui,
             "Car Tuning",
-            "Scale or set the torque, mass, fuel tank, gears or final drive of an installed car.",
+            "Scale or set the torque, mass, fuel tank, gears, final drive, tyre pressures, camber or base height of an installed car.",
         );
         self.poll(notices);
 
@@ -178,6 +224,14 @@ impl Tool for CarTuningPage {
                     ui.selectable_value(&mut self.kind, kind, kind.label());
                 }
             });
+            if self.kind.has_axle() {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    for axle in [Axle::Front, Axle::Rear] {
+                        ui.selectable_value(&mut self.axle, axle, axle_label(axle));
+                    }
+                });
+            }
             ui.add_space(8.0);
             self.value_slider(ui);
             ui.add_space(4.0);
@@ -236,6 +290,30 @@ impl CarTuningPage {
                         .step_by(0.5),
                 );
             }
+            Kind::IdealPressure | Kind::StaticPressure => {
+                ui.add(
+                    egui::Slider::new(&mut self.pressure_psi, MIN_PRESSURE_PSI..=MAX_PRESSURE_PSI)
+                        .fixed_decimals(1)
+                        .suffix(" psi")
+                        .step_by(0.1),
+                );
+            }
+            Kind::Camber => {
+                ui.add(
+                    egui::Slider::new(&mut self.camber_deg, MIN_CAMBER_DEG..=MAX_CAMBER_DEG)
+                        .fixed_decimals(2)
+                        .suffix(" deg")
+                        .step_by(0.05),
+                );
+            }
+            Kind::BaseHeight => {
+                ui.add(
+                    egui::Slider::new(&mut self.base_height_m, MIN_BASE_HEIGHT_M..=MAX_BASE_HEIGHT_M)
+                        .fixed_decimals(3)
+                        .suffix(" m")
+                        .step_by(0.001),
+                );
+            }
         }
     }
 
@@ -247,6 +325,22 @@ impl CarTuningPage {
             Kind::FuelTank => Tuning::FuelTank(self.fuel_l),
             Kind::GearRatios => Tuning::GearRatios(self.factor),
             Kind::FinalDrive => Tuning::FinalDrive(self.factor),
+            Kind::IdealPressure => Tuning::IdealPressure {
+                axle: self.axle,
+                psi: self.pressure_psi,
+            },
+            Kind::StaticPressure => Tuning::StaticPressure {
+                axle: self.axle,
+                psi: self.pressure_psi,
+            },
+            Kind::Camber => Tuning::Camber {
+                axle: self.axle,
+                degrees: self.camber_deg,
+            },
+            Kind::BaseHeight => Tuning::BaseHeight {
+                axle: self.axle,
+                metres: self.base_height_m,
+            },
         }
     }
 

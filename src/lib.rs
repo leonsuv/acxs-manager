@@ -7,6 +7,7 @@ pub mod ac_log;
 pub mod acd;
 pub mod ao_bake;
 pub mod backup;
+pub mod badges;
 pub mod car_classes;
 pub mod car_compare;
 pub mod car_tuning;

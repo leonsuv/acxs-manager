@@ -1,5 +1,6 @@
 //! Tuning edits to a car folder's `data/` files: engine power and torque,
-//! total mass, fuel tank size, forward gear ratios and final drive.
+//! total mass, fuel tank size, forward gear ratios and final drive, plus per-axle
+//! tyre pressures (`tyres.ini`) and per-axle camber and base height (`suspensions.ini`).
 //!
 //! Each change is a pure function from file text to new file text, plus a list
 //! of [`Change`]s for the keys whose value actually changed. [`apply`] runs one
@@ -8,8 +9,8 @@
 //! `data/car.ini` is refused before any file is read for writing.
 //!
 //! Factors multiply the current value and must lie within [`MIN_FACTOR`] and
-//! [`MAX_FACTOR`]. Values such as masses and tank sizes must lie within their
-//! `MIN_*` / `MAX_*` bounds. Out-of-range input is an error, not a clamp.
+//! [`MAX_FACTOR`]. Values such as masses, tank sizes, pressures and angles must lie
+//! within their `MIN_*` / `MAX_*` bounds. Out-of-range input is an error, not a clamp.
 
 use std::fmt;
 use std::fs;
@@ -21,6 +22,8 @@ use crate::ini::Ini;
 const CAR_FILE: &str = "car.ini";
 const ENGINE_FILE: &str = "engine.ini";
 const DRIVETRAIN_FILE: &str = "drivetrain.ini";
+const TYRES_FILE: &str = "tyres.ini";
+const SUSPENSIONS_FILE: &str = "suspensions.ini";
 /// Curve file name used when `engine.ini` does not name one.
 const DEFAULT_POWER_CURVE: &str = "power.lut";
 /// Watts = torque (Nm) * rpm / this divisor. The value is close to 30 / pi.
@@ -38,6 +41,18 @@ pub const MAX_MASS_KG: f64 = 5000.0;
 pub const MIN_FUEL_L: f64 = 1.0;
 /// Largest allowed `MAX_FUEL`, litres.
 pub const MAX_FUEL_L: f64 = 500.0;
+/// Smallest allowed tyre pressure, psi.
+pub const MIN_PRESSURE_PSI: f64 = 10.0;
+/// Largest allowed tyre pressure, psi.
+pub const MAX_PRESSURE_PSI: f64 = 50.0;
+/// Smallest allowed `STATIC_CAMBER`, degrees. Negative camber leans the top of the wheel inward.
+pub const MIN_CAMBER_DEG: f64 = -10.0;
+/// Largest allowed `STATIC_CAMBER`, degrees.
+pub const MAX_CAMBER_DEG: f64 = 10.0;
+/// Smallest allowed `BASEY`, metres.
+pub const MIN_BASE_HEIGHT_M: f64 = 0.05;
+/// Largest allowed `BASEY`, metres.
+pub const MAX_BASE_HEIGHT_M: f64 = 1.0;
 
 /// One key whose value changed. Curve files have no sections, so `section` is empty for them.
 #[derive(Debug, Clone, PartialEq)]
@@ -59,6 +74,23 @@ pub struct TunedFile {
     pub changes: Vec<Change>,
 }
 
+/// One axle of the car. Its values live in the `[FRONT]` or `[REAR]` section of a data file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Axle {
+    Front,
+    Rear,
+}
+
+impl Axle {
+    /// Section name in `tyres.ini` and `suspensions.ini`.
+    pub fn section(self) -> &'static str {
+        match self {
+            Axle::Front => "FRONT",
+            Axle::Rear => "REAR",
+        }
+    }
+}
+
 /// One tuning operation to apply to a car folder.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Tuning {
@@ -72,6 +104,14 @@ pub enum Tuning {
     GearRatios(f64),
     /// Multiply `[GEARS] FINAL` in `drivetrain.ini`.
     FinalDrive(f64),
+    /// Set `PRESSURE_IDEAL` for one axle in `tyres.ini`, in psi. The pressure the tyre works at hot.
+    IdealPressure { axle: Axle, psi: f64 },
+    /// Set `PRESSURE_STATIC` for one axle in `tyres.ini`, in psi. The cold pressure.
+    StaticPressure { axle: Axle, psi: f64 },
+    /// Set `STATIC_CAMBER` for one axle in `suspensions.ini`, in degrees.
+    Camber { axle: Axle, degrees: f64 },
+    /// Set `BASEY` for one axle in `suspensions.ini`, in metres. It is the height of the suspension base point.
+    BaseHeight { axle: Axle, metres: f64 },
 }
 
 #[derive(Debug)]
@@ -217,11 +257,51 @@ pub fn scale_final_drive(drivetrain_ini: &str, factor: f64) -> Result<TunedFile,
     Ok(finish(&ini, changes))
 }
 
+/// Sets `PRESSURE_IDEAL` in the `axle` section of `tyres_ini` to `psi`.
+pub fn set_ideal_pressure(tyres_ini: &str, axle: Axle, psi: f64) -> Result<TunedFile, TuneError> {
+    set_tyre_pressure(tyres_ini, axle, "PRESSURE_IDEAL", psi)
+}
+
+/// Sets `PRESSURE_STATIC` (cold pressure) in the `axle` section of `tyres_ini` to `psi`.
+pub fn set_static_pressure(tyres_ini: &str, axle: Axle, psi: f64) -> Result<TunedFile, TuneError> {
+    set_tyre_pressure(tyres_ini, axle, "PRESSURE_STATIC", psi)
+}
+
+fn set_tyre_pressure(tyres_ini: &str, axle: Axle, key: &str, psi: f64) -> Result<TunedFile, TuneError> {
+    check_range("tyre pressure", psi, MIN_PRESSURE_PSI, MAX_PRESSURE_PSI)?;
+    let mut ini = Ini::parse(tyres_ini);
+    let changes = update_number(&mut ini, TYRES_FILE, axle.section(), key, |_| psi)?
+        .into_iter()
+        .collect();
+    Ok(finish(&ini, changes))
+}
+
+/// Sets `STATIC_CAMBER` in the `axle` section of `suspensions_ini` to `degrees`.
+pub fn set_camber(suspensions_ini: &str, axle: Axle, degrees: f64) -> Result<TunedFile, TuneError> {
+    check_range("camber", degrees, MIN_CAMBER_DEG, MAX_CAMBER_DEG)?;
+    let mut ini = Ini::parse(suspensions_ini);
+    let changes = update_number(&mut ini, SUSPENSIONS_FILE, axle.section(), "STATIC_CAMBER", |_| degrees)?
+        .into_iter()
+        .collect();
+    Ok(finish(&ini, changes))
+}
+
+/// Sets `BASEY` in the `axle` section of `suspensions_ini` to `metres`.
+pub fn set_base_height(suspensions_ini: &str, axle: Axle, metres: f64) -> Result<TunedFile, TuneError> {
+    check_range("base height", metres, MIN_BASE_HEIGHT_M, MAX_BASE_HEIGHT_M)?;
+    let mut ini = Ini::parse(suspensions_ini);
+    let changes = update_number(&mut ini, SUSPENSIONS_FILE, axle.section(), "BASEY", |_| metres)?
+        .into_iter()
+        .collect();
+    Ok(finish(&ini, changes))
+}
+
 /// Applies one tuning operation to the car in `car_dir` and saves the edited file.
 ///
 /// The previous file is kept as `<name>.acxs-backup-<stamp>` next to it. Returns
 /// the keys that changed. When none changed, nothing is written and the list is empty.
-/// A car folder without `data/car.ini` is refused, with nothing written.
+/// A car folder without `data/car.ini` is refused, with nothing written. So is one
+/// whose operation needs a data file that is missing (`tyres.ini` or `suspensions.ini`).
 pub fn apply(car_dir: &Path, tuning: Tuning) -> Result<Vec<Change>, TuneError> {
     let data = car_dir.join("data");
     if !data.join(CAR_FILE).is_file() {
@@ -249,6 +329,22 @@ pub fn apply(car_dir: &Path, tuning: Tuning) -> Result<Vec<Change>, TuneError> {
         Tuning::FinalDrive(factor) => {
             let drivetrain = read_data_file(&data, DRIVETRAIN_FILE)?;
             (DRIVETRAIN_FILE.to_string(), scale_final_drive(&drivetrain, factor)?)
+        }
+        Tuning::IdealPressure { axle, psi } => {
+            let tyres = read_data_file(&data, TYRES_FILE)?;
+            (TYRES_FILE.to_string(), set_ideal_pressure(&tyres, axle, psi)?)
+        }
+        Tuning::StaticPressure { axle, psi } => {
+            let tyres = read_data_file(&data, TYRES_FILE)?;
+            (TYRES_FILE.to_string(), set_static_pressure(&tyres, axle, psi)?)
+        }
+        Tuning::Camber { axle, degrees } => {
+            let suspensions = read_data_file(&data, SUSPENSIONS_FILE)?;
+            (SUSPENSIONS_FILE.to_string(), set_camber(&suspensions, axle, degrees)?)
+        }
+        Tuning::BaseHeight { axle, metres } => {
+            let suspensions = read_data_file(&data, SUSPENSIONS_FILE)?;
+            (SUSPENSIONS_FILE.to_string(), set_base_height(&suspensions, axle, metres)?)
         }
     };
     if tuned.changes.is_empty() {
@@ -706,5 +802,217 @@ mod tests {
         let text = car.read("drivetrain.ini");
         assert!(text.contains("FINAL=1.9\r\n"));
         assert!(text.contains("GEAR_1=3.2\r\n"));
+    }
+
+    const TYRES_INI: &str = "[FRONT]\r\nSHORT_NAME=F\r\nPRESSURE_STATIC=26 ; cold\r\nPRESSURE_IDEAL=28\r\n\r\n[REAR]\r\nSHORT_NAME=R\r\nPRESSURE_STATIC=25\r\nPRESSURE_IDEAL=27.5\r\n";
+    const SUSPENSIONS_INI: &str = "[BASIC]\r\nCG_LOCATION=0.55\r\n\r\n[FRONT]\r\nSTATIC_CAMBER=-2.5 ; deg\r\nBASEY=0.25\r\n\r\n[REAR]\r\nSTATIC_CAMBER=-1\r\nBASEY=0.3\r\n";
+
+    #[test]
+    fn ideal_pressure_changes_only_its_axle() {
+        let out = set_ideal_pressure(TYRES_INI, Axle::Front, 30.0).unwrap();
+        assert!(out.text.contains("PRESSURE_IDEAL=30\r\n"));
+        assert!(out.text.contains("PRESSURE_IDEAL=27.5\r\n"));
+        assert!(out.text.contains("PRESSURE_STATIC=26 ; cold\r\n"));
+        assert_eq!(pairs(&out.changes), vec![("PRESSURE_IDEAL", "28", "30")]);
+        assert_eq!(out.changes[0].file, "tyres.ini");
+        assert_eq!(out.changes[0].section, "FRONT");
+    }
+
+    #[test]
+    fn static_pressure_keeps_the_ideal_value() {
+        let out = set_static_pressure(TYRES_INI, Axle::Rear, 24.0).unwrap();
+        assert!(out.text.contains("PRESSURE_STATIC=24\r\n"));
+        assert!(out.text.contains("PRESSURE_IDEAL=27.5\r\n"));
+        assert!(out.text.contains("PRESSURE_STATIC=26 ; cold\r\n"));
+        assert_eq!(pairs(&out.changes), vec![("PRESSURE_STATIC", "25", "24")]);
+        assert_eq!(out.changes[0].section, "REAR");
+    }
+
+    #[test]
+    fn pressure_out_of_range_is_refused() {
+        for psi in [5.0, 60.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                set_ideal_pressure(TYRES_INI, Axle::Front, psi),
+                Err(TuneError::OutOfRange { .. })
+            ));
+            assert!(matches!(
+                set_static_pressure(TYRES_INI, Axle::Rear, psi),
+                Err(TuneError::OutOfRange { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn same_pressure_gives_no_changes() {
+        assert!(set_ideal_pressure(TYRES_INI, Axle::Front, 28.0).unwrap().changes.is_empty());
+    }
+
+    #[test]
+    fn missing_pressure_key_or_section_is_an_error() {
+        assert!(matches!(
+            set_ideal_pressure("[FRONT]\r\nPRESSURE_STATIC=26\r\n", Axle::Front, 28.0),
+            Err(TuneError::MissingKey { .. })
+        ));
+        assert!(matches!(
+            set_ideal_pressure("[REAR]\r\nPRESSURE_IDEAL=27\r\n", Axle::Front, 28.0),
+            Err(TuneError::MissingKey { .. })
+        ));
+    }
+
+    #[test]
+    fn unusable_pressure_value_is_an_error() {
+        assert!(matches!(
+            set_ideal_pressure("[FRONT]\r\nPRESSURE_IDEAL=high\r\n", Axle::Front, 28.0),
+            Err(TuneError::BadValue { .. })
+        ));
+    }
+
+    #[test]
+    fn camber_changes_only_its_axle_and_keeps_the_comment() {
+        let out = set_camber(SUSPENSIONS_INI, Axle::Front, -3.2).unwrap();
+        assert!(out.text.contains("STATIC_CAMBER=-3.2 ; deg\r\n"));
+        assert!(out.text.contains("STATIC_CAMBER=-1\r\n"));
+        assert!(out.text.contains("CG_LOCATION=0.55\r\n"));
+        assert_eq!(pairs(&out.changes), vec![("STATIC_CAMBER", "-2.5", "-3.2")]);
+        assert_eq!(out.changes[0].file, "suspensions.ini");
+        assert_eq!(out.changes[0].section, "FRONT");
+    }
+
+    #[test]
+    fn camber_out_of_range_is_refused() {
+        for degrees in [-10.5, 11.0, f64::NAN] {
+            assert!(matches!(
+                set_camber(SUSPENSIONS_INI, Axle::Rear, degrees),
+                Err(TuneError::OutOfRange { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn camber_without_the_key_is_an_error() {
+        assert!(matches!(
+            set_camber("[FRONT]\r\nBASEY=0.25\r\n", Axle::Front, -2.0),
+            Err(TuneError::MissingKey { .. })
+        ));
+    }
+
+    #[test]
+    fn base_height_changes_only_its_axle() {
+        let out = set_base_height(SUSPENSIONS_INI, Axle::Rear, 0.32).unwrap();
+        assert!(out.text.contains("BASEY=0.32\r\n"));
+        assert!(out.text.contains("BASEY=0.25\r\n"));
+        assert_eq!(pairs(&out.changes), vec![("BASEY", "0.3", "0.32")]);
+        assert_eq!(out.changes[0].file, "suspensions.ini");
+    }
+
+    #[test]
+    fn base_height_out_of_range_is_refused() {
+        for metres in [0.01, 1.5, f64::NAN] {
+            assert!(matches!(
+                set_base_height(SUSPENSIONS_INI, Axle::Front, metres),
+                Err(TuneError::OutOfRange { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn apply_ideal_pressure_writes_tyres_ini_and_keeps_a_backup() {
+        let car = TempCar::new("tyre-ideal");
+        car.write("car.ini", CAR_INI);
+        car.write("tyres.ini", TYRES_INI);
+
+        let changes = apply(&car.0, Tuning::IdealPressure { axle: Axle::Rear, psi: 29.0 }).unwrap();
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].file, "tyres.ini");
+        assert!(car.read("tyres.ini").contains("PRESSURE_IDEAL=29\r\n"));
+        let backups = car.backups("tyres.ini");
+        assert_eq!(backups.len(), 1);
+        assert!(backups[0].contains("PRESSURE_IDEAL=27.5"));
+        assert!(car.backups("car.ini").is_empty());
+    }
+
+    #[test]
+    fn apply_static_pressure_writes_tyres_ini() {
+        let car = TempCar::new("tyre-static");
+        car.write("car.ini", CAR_INI);
+        car.write("tyres.ini", TYRES_INI);
+
+        let changes = apply(&car.0, Tuning::StaticPressure { axle: Axle::Front, psi: 24.5 }).unwrap();
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].key, "PRESSURE_STATIC");
+        assert!(car.read("tyres.ini").contains("PRESSURE_STATIC=24.5 ; cold\r\n"));
+        assert_eq!(car.backups("tyres.ini").len(), 1);
+    }
+
+    #[test]
+    fn apply_camber_writes_suspensions_ini_and_keeps_a_backup() {
+        let car = TempCar::new("camber");
+        car.write("car.ini", CAR_INI);
+        car.write("suspensions.ini", SUSPENSIONS_INI);
+
+        let changes = apply(&car.0, Tuning::Camber { axle: Axle::Front, degrees: -3.0 }).unwrap();
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].file, "suspensions.ini");
+        assert!(car.read("suspensions.ini").contains("STATIC_CAMBER=-3 ; deg\r\n"));
+        let backups = car.backups("suspensions.ini");
+        assert_eq!(backups.len(), 1);
+        assert!(backups[0].contains("STATIC_CAMBER=-2.5"));
+    }
+
+    #[test]
+    fn apply_base_height_writes_suspensions_ini() {
+        let car = TempCar::new("base-height");
+        car.write("car.ini", CAR_INI);
+        car.write("suspensions.ini", SUSPENSIONS_INI);
+
+        let changes = apply(&car.0, Tuning::BaseHeight { axle: Axle::Front, metres: 0.2 }).unwrap();
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].key, "BASEY");
+        assert!(car.read("suspensions.ini").contains("BASEY=0.2\r\n"));
+        assert_eq!(car.backups("suspensions.ini").len(), 1);
+    }
+
+    #[test]
+    fn apply_tyre_tuning_refuses_a_car_without_car_ini() {
+        let car = TempCar::new("tyre-nocar");
+        car.write("tyres.ini", TYRES_INI);
+
+        let result = apply(&car.0, Tuning::IdealPressure { axle: Axle::Front, psi: 30.0 });
+
+        assert!(matches!(result, Err(TuneError::MissingFile(ref name)) if name == "car.ini"));
+        assert_eq!(car.read("tyres.ini"), TYRES_INI);
+        assert!(car.backups("tyres.ini").is_empty());
+    }
+
+    #[test]
+    fn apply_refuses_when_the_data_file_it_edits_is_missing() {
+        let car = TempCar::new("no-tyres");
+        car.write("car.ini", CAR_INI);
+        car.write("suspensions.ini", SUSPENSIONS_INI);
+
+        let result = apply(&car.0, Tuning::StaticPressure { axle: Axle::Front, psi: 30.0 });
+        assert!(matches!(result, Err(TuneError::MissingFile(ref name)) if name == "tyres.ini"));
+        assert!(car.backups("suspensions.ini").is_empty());
+        assert_eq!(car.read("suspensions.ini"), SUSPENSIONS_INI);
+
+        let result = apply(&car.0, Tuning::IdealPressure { axle: Axle::Rear, psi: 30.0 });
+        assert!(matches!(result, Err(TuneError::MissingFile(ref name)) if name == "tyres.ini"));
+    }
+
+    #[test]
+    fn apply_camber_refuses_when_suspensions_ini_is_missing() {
+        let car = TempCar::new("no-suspensions");
+        car.write("car.ini", CAR_INI);
+        car.write("tyres.ini", TYRES_INI);
+
+        let result = apply(&car.0, Tuning::Camber { axle: Axle::Rear, degrees: -1.0 });
+
+        assert!(matches!(result, Err(TuneError::MissingFile(ref name)) if name == "suspensions.ini"));
+        assert!(car.backups("tyres.ini").is_empty());
+        assert!(!car.0.join("data").join("suspensions.ini").exists());
     }
 }

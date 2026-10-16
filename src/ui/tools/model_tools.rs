@@ -68,9 +68,10 @@ enum Msg {
         kn5: PathBuf,
         result: Result<usize, String>,
     },
-    /// AO was baked in memory; the result is the value count and the average.
+    /// AO was baked and written to `path`; the result is the value count and the average.
     AoBaked {
         kn5: PathBuf,
+        path: PathBuf,
         result: Result<(usize, f64), String>,
     },
 }
@@ -223,13 +224,14 @@ impl ModelTools {
                         Err(e) => notices.push(notice(format!("OBJ import failed: {e}"), false)),
                     }
                 }
-                Msg::AoBaked { kn5, result } => {
+                Msg::AoBaked { kn5, path, result } => {
                     self.ao_busy = false;
                     match result {
                         Ok((values, average)) => notices.push(notice(
                             format!(
-                                "Baked AO for {}: {values} values, average {average:.3} (not written to disk)",
-                                file_name(&kn5)
+                                "Baked AO for {}: {values} values, average {average:.3}, written to {}",
+                                file_name(&kn5),
+                                path.display()
                             ),
                             true,
                         )),
@@ -297,12 +299,17 @@ impl ModelTools {
                 let ao = ui.add_enabled(has_file && !self.ao_busy, egui::Button::new("Bake AO"));
                 if ao.clicked()
                     && let Some(kn5_file) = self.kn5_path.clone()
+                    && let Some(csv_file) = rfd::FileDialog::new()
+                        .add_filter("csv", &["csv"])
+                        .set_file_name(format!("{}_ao.csv", default_stem(&kn5_file)))
+                        .save_file()
                 {
                     self.ao_busy = true;
                     self.spawn(ui.ctx(), move || {
-                        let result = bake_ao(&kn5_file);
+                        let result = bake_ao(&kn5_file, &csv_file);
                         Msg::AoBaked {
                             kn5: kn5_file,
+                            path: csv_file,
                             result,
                         }
                     });
@@ -317,8 +324,8 @@ impl ModelTools {
             ui.label(
                 RichText::new(
                     "Export FBX and Bake AO use the KN5 file chosen above. Export FBX writes one \
-                     mesh with no normals. Bake AO only reports the values; they are not written \
-                     to disk.",
+                     mesh with no normals. Bake AO asks for a .csv file and writes one row per \
+                     triangle corner with its AO value.",
                 )
                 .small()
                 .color(theme::MUTED),
@@ -672,9 +679,13 @@ fn import_obj(obj_file: &Path, kn5_file: &Path) -> Result<usize, String> {
     Ok(count)
 }
 
-/// Loads the KN5 model and bakes one AO value per triangle corner. The values are
-/// not stored. Returns the value count and their average.
-fn bake_ao(kn5_file: &Path) -> Result<(usize, f64), String> {
+/// Loads the KN5 model, bakes one AO value per triangle corner and writes them to
+/// a new CSV file. Returns the value count and their average.
+fn bake_ao(kn5_file: &Path, csv_file: &Path) -> Result<(usize, f64), String> {
+    // Refuse up front so a long bake is not wasted on a name that is already taken.
+    if csv_file.exists() {
+        return Err(format!("{} already exists, choose another name", file_name(csv_file)));
+    }
     let triangles = kn5_export::load_triangles(kn5_file).map_err(|e| e.to_string())?;
     if triangles.is_empty() {
         return Err(format!("{} has no triangles", file_name(kn5_file)));
@@ -685,6 +696,7 @@ fn bake_ao(kn5_file: &Path) -> Result<(usize, f64), String> {
         bias: AO_BIAS,
     };
     let values = ao_bake::bake_vertex_ao(&triangles, &settings).map_err(|e| e.to_string())?;
+    ao_bake::write_ao_csv(csv_file, triangles.len(), &values).map_err(|e| e.to_string())?;
     let count = values.len();
     let average = values.iter().map(|&v| f64::from(v)).sum::<f64>() / count as f64;
     Ok((count, average))

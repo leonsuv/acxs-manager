@@ -18,6 +18,9 @@
 use crate::ortho::Triangle;
 use std::error::Error;
 use std::fmt;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 /// Largest accepted number of rays per corner.
 pub const MAX_RAYS: u32 = 512;
@@ -76,6 +79,12 @@ pub enum AoError {
     TooManyTriangles { count: usize, max: usize },
     /// A vertex coordinate was NaN or infinite.
     NonFiniteVertex { index: usize },
+    /// The number of values is not three per triangle.
+    ValueCount { expected: usize, actual: usize },
+    /// The output file already exists and was left untouched.
+    FileExists(PathBuf),
+    /// Creating the parent folder, creating the file or writing it failed.
+    Io(String),
 }
 
 impl fmt::Display for AoError {
@@ -96,6 +105,13 @@ impl fmt::Display for AoError {
             AoError::NonFiniteVertex { index } => {
                 write!(f, "triangle {index} has a NaN or infinite vertex")
             }
+            AoError::ValueCount { expected, actual } => {
+                write!(f, "expected {expected} AO values, got {actual}")
+            }
+            AoError::FileExists(path) => {
+                write!(f, "{} already exists, choose another name", path.display())
+            }
+            AoError::Io(message) => write!(f, "{message}"),
         }
     }
 }
@@ -155,6 +171,48 @@ pub fn bake_vertex_ao(
     }
 
     Ok(out)
+}
+
+/// Writes baked values to a new CSV file at `path`, one row per triangle corner.
+///
+/// The file starts with a `triangle,corner,ao` header. Each following row holds
+/// the triangle index, the corner (0, 1 or 2) and the value with four decimals.
+/// `values` must hold three entries per triangle, in the order returned by
+/// [`bake_vertex_ao`]. Parent folders are created only when they are missing.
+/// An existing file is never overwritten: the call fails with
+/// [`AoError::FileExists`] and leaves it untouched.
+pub fn write_ao_csv(path: &Path, triangles_count: usize, values: &[f32]) -> Result<(), AoError> {
+    let expected = triangles_count.saturating_mul(3);
+    if values.len() != expected {
+        return Err(AoError::ValueCount {
+            expected,
+            actual: values.len(),
+        });
+    }
+
+    let mut csv = String::from("triangle,corner,ao\r\n");
+    for (i, value) in values.iter().enumerate() {
+        csv.push_str(&format!("{},{},{:.4}\r\n", i / 3, i % 3, value));
+    }
+
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)
+            .map_err(|e| AoError::Io(format!("could not create {}: {e}", parent.display())))?;
+    }
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(AoError::FileExists(path.to_path_buf()));
+        }
+        Err(e) => {
+            return Err(AoError::Io(format!("could not create {}: {e}", path.display())));
+        }
+    };
+    if let Err(e) = file.write_all(csv.as_bytes()) {
+        let _ = fs::remove_file(path);
+        return Err(AoError::Io(format!("could not write {}: {e}", path.display())));
+    }
+    Ok(())
 }
 
 /// Returns true if any triangle other than `skip` is hit by the ray within `max_t`.
@@ -382,6 +440,44 @@ mod tests {
                 max: MAX_TRIANGLES,
             })
         );
+    }
+
+    #[test]
+    fn write_ao_csv_writes_corner_rows_and_refuses_overwrite() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "ao_csv_test_{}_{nanos}",
+            std::process::id()
+        ));
+        let path = dir.join("nested").join("ao.csv");
+
+        write_ao_csv(&path, 2, &[1.0, 0.5, 0.25, 0.0, 0.123_456, 0.9999]).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "triangle,corner,ao\r\n\
+             0,0,1.0000\r\n\
+             0,1,0.5000\r\n\
+             0,2,0.2500\r\n\
+             1,0,0.0000\r\n\
+             1,1,0.1235\r\n\
+             1,2,0.9999\r\n"
+        );
+
+        let err = write_ao_csv(&path, 2, &[0.0; 6]).unwrap_err();
+        assert_eq!(err, AoError::FileExists(path.clone()));
+        assert!(fs::read_to_string(&path).unwrap().starts_with("triangle,corner,ao\r\n0,0,1.0000"));
+
+        let short = dir.join("short.csv");
+        assert_eq!(
+            write_ao_csv(&short, 2, &[0.0; 5]),
+            Err(AoError::ValueCount { expected: 6, actual: 5 })
+        );
+        assert!(!short.exists());
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

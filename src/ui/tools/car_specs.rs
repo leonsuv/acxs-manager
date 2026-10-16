@@ -8,6 +8,7 @@
 use super::{Tool, ToolContext};
 use crate::ui::{theme, widgets, Notice};
 use acxs_manager::car_compare::{self, IniChange, SpecDiff};
+use acxs_manager::badges;
 use acxs_manager::cardata::{self, CarSpecs};
 use acxs_manager::content::{self, CarEntry};
 use acxs_manager::shift_lights::{self, ShiftProfile};
@@ -19,6 +20,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 const ROW_HEIGHT: f32 = 56.0;
 /// Edge length in pixels of the square thumbnail made by the "Make thumbnail" button.
 const THUMB_SIZE: u32 = 512;
+/// Edge length in pixels of the square badge made by the "Make badge" button.
+const BADGE_SIZE: u32 = 256;
 const COMPARE_ROW_HEIGHT: f32 = 44.0;
 const COMPARE_LIST_HEIGHT: f32 = 220.0;
 /// Most data-file changes drawn at once. The rest are counted, not drawn.
@@ -43,6 +46,7 @@ pub fn tool() -> Box<dyn Tool> {
         compare: None,
         pending_compare: None,
         thumb_busy: false,
+        badge_busy: false,
         tx,
         rx,
     })
@@ -55,6 +59,8 @@ enum Msg {
     Compare { left: String, right: String, diffs: Vec<SpecDiff>, changes: Result<Vec<IniChange>, String> },
     /// A thumbnail was made or found in the cache: its file path and size in bytes.
     Thumbnail { result: Result<(PathBuf, usize), String> },
+    /// A make badge was written: its file path.
+    Badge { result: Result<PathBuf, String> },
 }
 
 /// Specs of the selected car, once read.
@@ -90,6 +96,8 @@ struct CarSpecsPage {
     pending_compare: Option<(String, String)>,
     /// A thumbnail is being made for the selected car.
     thumb_busy: bool,
+    /// A make badge is being written for the selected car.
+    badge_busy: bool,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
 }
@@ -162,6 +170,19 @@ impl CarSpecsPage {
                         }),
                     }
                 }
+                Msg::Badge { result } => {
+                    self.badge_busy = false;
+                    match result {
+                        Ok(path) => notices.push(Notice {
+                            text: format!("Badge saved to {}", path.display()),
+                            ok: true,
+                        }),
+                        Err(e) => notices.push(Notice {
+                            text: format!("Badge failed: {e}"),
+                            ok: false,
+                        }),
+                    }
+                }
                 Msg::Cars { root, cars } => {
                     if self.root.as_deref() == Some(root.as_path()) {
                         self.cars = cars;
@@ -222,6 +243,7 @@ impl CarSpecsPage {
     /// Thumbnail button, the cached thumbnail path and a button to open its folder.
     fn thumbnail_section(&mut self, ui: &mut egui::Ui, id: &str, notices: &mut Vec<Notice>) {
         let Some(root) = self.root.clone() else { return };
+        let badge_root = root.clone();
         let cache = thumbnails::cache_path(&root, id);
         let thumb_file = cache.join(format!("{THUMB_SIZE}.png"));
         let shown = if thumb_file.is_file() {
@@ -247,6 +269,29 @@ impl CarSpecsPage {
                     });
                 }
                 if self.thumb_busy {
+                    ui.add(egui::Spinner::new());
+                    ui.label(RichText::new("Working...").color(theme::MUTED));
+                }
+            });
+            ui.horizontal(|ui| {
+                let badge = ui.add_enabled(!self.badge_busy, egui::Button::new("Make badge"));
+                if badge.clicked() {
+                    self.badge_busy = true;
+                    let id = id.to_string();
+                    let brand = self
+                        .cars
+                        .iter()
+                        .find(|c| c.id == id)
+                        .map(|c| if c.brand.trim().is_empty() { c.name.clone() } else { c.brand.clone() })
+                        .unwrap_or_else(|| id.clone());
+                    let root = badge_root.clone();
+                    spawn_job(ui.ctx(), &self.tx, move || {
+                        let result = badges::write_badge(&root, &id, &brand, BADGE_SIZE)
+                            .map_err(|e| e.to_string());
+                        Msg::Badge { result }
+                    });
+                }
+                if self.badge_busy {
                     ui.add(egui::Spinner::new());
                     ui.label(RichText::new("Working...").color(theme::MUTED));
                 }
