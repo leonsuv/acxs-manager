@@ -340,13 +340,22 @@ pub fn patches(app: &mut App, ui: &mut egui::Ui) {
 type UpdateOutcome = Result<Option<Release>, String>;
 
 /// Update check state kept in egui memory between frames.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct UpdateCheck {
     /// Nothing is requested until this is ticked.
     opt_in: bool,
     feed: String,
     /// Filled by the worker thread while a check runs.
     pending: Option<Arc<Mutex<Option<UpdateOutcome>>>>,
+}
+
+/// The project's own update feed, served over HTTPS.
+const DEFAULT_FEED: &str = "https://test2.azendix.de/acxs/latest.json";
+
+impl Default for UpdateCheck {
+    fn default() -> Self {
+        UpdateCheck { opt_in: false, feed: DEFAULT_FEED.to_string(), pending: None }
+    }
 }
 
 /// Opt-in update check. The request runs on a worker thread and its result is
