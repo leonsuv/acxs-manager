@@ -729,3 +729,88 @@ Result for the 0.3.0 build:
 What this means for an alternative: the rendering-side hook is a separate plugin module that the DLL loads by path after a checksum check. Replacing that module means writing a new plugin DLL. Reproducing the `csp_` function behaviour is still open, because the implementations live in the module.
 
 Not determined: the value format of `CHECKSUM` (the helper that compares it was not decoded), and what the plugin module does internally.
+
+## 13. CHECKSUM comparison (decoded, 0.3.0)
+
+This resolves the open item in section 12 about the `CHECKSUM` format. The comparison is in the loader itself (1815c4bd0). Its caller (18093e090) resolves the module path and passes the configured `CHECKSUM` string as the second argument. Only the 0.3.0 project (lightsB) was used for this section.
+
+Commands (saved project, no re-analysis; the Ghidra workspace is `/private/tmp/acxs-ghidra-lights`, outputs go to `out/`):
+
+```
+export JAVA_HOME=/opt/homebrew/Cellar/openjdk@21/21.0.12.1/libexec/openjdk.jdk/Contents/Home GHIDRA_HEADLESS_MAXMEM=4G
+G=/opt/homebrew/Cellar/ghidra/12.1.4/libexec/support/analyzeHeadless
+cd /private/tmp/acxs-ghidra-lights
+$G proj lightsB -process dwrite.dll -noanalysis -scriptPath scripts -postScript DumpLoader.java out/s13-loader.txt 2 1815c4bd0
+$G proj lightsB -process dwrite.dll -noanalysis -scriptPath scripts -postScript DumpLoader.java out/s13-checksum-helpers.txt 0 181427300 18056af00 1802cb0e0 180564470 1802ea5e0 1814fd540 18093fce0
+$G proj lightsB -process dwrite.dll -noanalysis -scriptPath scripts -postScript DumpLoader.java out/s13-hash-internals.txt 0 181426770 18056e6d0
+$G proj lightsB -process dwrite.dll -noanalysis -scriptPath scripts -postScript DumpLoader.java out/s13-file-and-update.txt 0 181426b40 18056f9f0 180554600 180563600
+```
+
+The SHA-256 constants were read from the 0.3.0 DLL bytes with a short read-only script. The script used the section table to map the RVA 0x21ec3a8 to a file offset.
+
+Algorithm, as the decompile shows it:
+
+1. The caller 18093e090 resolves the module path with 18093fce0. That function joins a base directory (from 1814fbc10 on the config object at +0x28) with the `MODULE` value. If the joined path exists (1814fd540), it is used. Otherwise a fallback (1814fd150) is used. The result is the loader's first argument.
+2. Gate: the loader runs the check only when the `CHECKSUM` string is non-empty (its size field at +0x10 is not zero). An empty value skips the check silently and the module still loads. In the `CUSTOM_RAYCASTER` branch the caller reads `CHECKSUM` with 1802ea5e0 and does not test the return value. The decompile shows that 1802ea5e0 returns before it writes its output on a missing key, so a missing `CHECKSUM` leaves the string empty and the check is skipped.
+3. Read: 181427300 returns an empty range for an empty path. Otherwise 181426770 copies the path, and 181426b40 calls CreateFileW (read), GetFileSize, CreateFileMappingW and MapViewOfFile over the whole file. The range is [view, view + file size). A zero-byte file gives an empty range, and the loader throws "Failed to calculate checksum".
+4. Hash: 18056af00 hashes the range with 18056e6d0 and writes the result as hex. 18056e6d0 is SHA-256: 64-byte blocks (18056ecc0 per block), an update function (18056f9f0), a finalize function (180554600), eight 32-bit state words and big-endian output. The initial state at RVA 0x21ec3a8 in the 0.3.0 DLL is 6a09e667 bb67ae85 3c6ef372 a54ff53a 510e527f 9b05688c 1f83d9ab 5be0cd19, which is the SHA-256 IV. The first two round constants (428a2f98, 71374491) also occur in the file.
+5. Encoding: each of the 32 digest bytes is written to a stream with the hex flag, width 2 and fill '0'. The result is 64 lowercase hex characters, because the uppercase flag is never set.
+6. Compare: 1802cb0e0(CHECKSUM, digest_hex) returns false if the lengths differ, and otherwise returns the result of memcmp. The comparison is case-sensitive and exact. No trimming happens in this function.
+7. On mismatch the loader throws "Integrity check failed". The mapping is released afterwards (1814271b0).
+
+The caller's per-entry loop (the `_VERIFY_INTEGRITY` branch in 18093e090) uses the same pattern: 181427300 on the file, 180564470 (a wrapper that passes the range to 18056af00), then 1802cb0e0 against the entry's `CHECKSUM`. On mismatch it throws "modified or damaged".
+
+Summary: the expected value is the lowercase hex SHA-256 of the whole module file at the resolved path, and the comparison is an exact string match. Any byte change to the DLL, including a rebuild, changes the digest.
+
+Times: the run that produced `s13-loader.txt` took about 6 s (21:34:34 to 21:34:40). The helper run took about 5 s, the hash-internals run about 4 s, and the file/update run about 3 s.
+
+Not determined:
+- The loader's call to 18056af00 shows only the output pointer in the decompile. The range arguments are assumed to be the (begin, end) pair from the file mapping, as in the caller's wrapper 180564470. The loader's call site was not checked directly.
+- The stream insertion overload. The decompile types the byte as `char`. The two-digit format relies on the width and fill settings, not on the overload.
+- The base directory returned by 1814fbc10 and the fallback 1814fd150, which were not decoded.
+- Whether the configuration reader trims or normalises the `CHECKSUM` value. 1802ea5e0 was only traced to its return.
+- The argument passed to the existence check 1814fd540 in the loader, which the decompile does not show.
+- The expected `CHECKSUM` values for either build. They were not looked up, and the 0.2.11 loader was not compared in this section.
+
+## 14. csp_Raycast_v1: stored pointer, call site, arguments and result
+
+Commands:
+
+```
+$G proj lightsB -process dwrite.dll -noanalysis -scriptPath scripts -postScript DumpLoader.java out/s14-callbacks.txt 0 1815c5330 1815c5170
+grep -n 'DAT_1827b5648' out/s13-loader.txt out/caller-b.txt
+```
+
+Search: the global `DAT_1827b5648` receives `csp_Raycast_v1` in the loader (1815c4bd0, GetProcAddress at line 124) and is tested for non-null at line 128. The grep over the loader and its caller (18093e090) and that caller's caller (181120a40, in `out/caller-b.txt`) finds no other reference. The only use found is in 1815c5330. That function has no direct callers (count 0), so it is reached only through a function pointer.
+
+Installation: the loader sets `DAT_18274a998 = FUN_1815c5330` (line 167), and only does so when `csp_Initialize_v1` returned a value of 0 or more (stored in `DAT_1827b5650`).
+
+Call site in 1815c5330 (0.3.0):
+
+```
+local_58..local_4c = 0                       /* 16-byte out buffer */
+local_48[0] = -1                             /* hit index, -1 = no hit */
+(*DAT_1827b5648)(0, in_RDX, &local_58);
+```
+
+Arguments the lights patch passes:
+
+- Argument 1: constant 0.
+- Argument 2: RDX, passed through unchanged. The function does not set it, so the value comes from the caller of 1815c5330, which is not known.
+- Argument 3: pointer to a zeroed 16-byte buffer. The call writes it, and the function reads it back after the call.
+- The hit index `local_48[0]` is read after the call, but no argument in the decompile carries its address. It is probably passed in a register the decompile does not show. Not determined.
+
+Result use:
+
+- Index below 0 (no hit): if bit 0 of `DAT_1827b5650` is clear, the output is zeroed and its valid byte (+8) is set to 0. If bit 0 is set, the engine's own ray query (18092c240) is called with the direction (0, -1.0, 0).
+- Index 0 or more (hit): 180515dd0 looks up a surface record in the container from the loader (`DAT_1827b5640`). Eight bytes from the record at +8 are copied to the output at +6, and the valid byte is set to 1. Output words 0 and 2 are copied from the input struct (param_1). Output word 1 comes from the buffer's first word. Output words 3 to 5 come from buffer words 1 to 3 when `DAT_1827b5650 & 6` is zero. Otherwise the engine's ray query is called a second time with a constant (`DAT_1822d3204`). Bit value 2 selects output words 3 to 5 from that second result, and bit value 4 selects word 6.
+
+Times: the run that produced `s14-callbacks.txt` took about 3 s (21:36:51 to 21:36:54). The grep was not timed.
+
+Not determined:
+- The signature of `csp_Raycast_v1`. Only the three visible arguments are known, and the index register is not.
+- The caller of 1815c5330. It is reached through `DAT_18274a998`, and no reference to that global was found in the saved outputs. A whole-program data-reference search would be needed, and the DumpLoader script does not do it.
+- The meaning of the 16-byte buffer (the decompile does not say whether it holds a hit position, normal or distance) and of the surface index.
+- The layout of the input struct (param_1) and what the engine does with the output.
+- The module callback. The loader passes 1815c5170 to `csp_Initialize_v1`. It was only partly read (a name lookup and an object allocation) and was not traced further.
+- The 0.2.11 build, which was not compared in this section.

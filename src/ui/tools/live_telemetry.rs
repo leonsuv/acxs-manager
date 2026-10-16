@@ -6,10 +6,11 @@
 //! the channel, so it never waits on the network or on the save dialog.
 
 use super::{Tool, ToolContext};
-use crate::ui::theme::{self, ACCENT, BG, BORDER, INFO, MUTED, OK, TEXT, WARN};
+use crate::ui::theme::{self, ACCENT, BG, BORDER, DANGER, INFO, MUTED, OK, TEXT, WARN};
 use crate::ui::widgets;
 use crate::ui::Notice;
 use acxs_manager::charts::{Channel, ChannelBuffers, Ring, Sample};
+use acxs_manager::laptimes::LapStore;
 use acxs_manager::sharedmem::{self, AcStatus, SharedMemError, Snapshot};
 use acxs_manager::telemetry::{CarUpdate, HandshakeInfo, LapInfo, Packet, summarize_laps};
 use acxs_manager::telemetry_csv;
@@ -19,6 +20,7 @@ use acxs_manager::web_dashboard::{self, Dashboard};
 use eframe::egui::{self, RichText};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -57,6 +59,12 @@ const WEB_DEFAULT_PORT: &str = "8080";
 
 /// Bind address that makes the web dashboard reachable from other devices.
 const WEB_LAN_BIND: &str = "0.0.0.0";
+
+/// Lap store file name inside the Assetto Corsa folder.
+const LAP_STORE_FILE: &str = "acxs-laptimes.json";
+
+/// Shown in place of the fuel estimate, which needs a fuel value in the car update.
+const NO_FUEL_TEXT: &str = "Fuel is not in the telemetry packet, so no fuel estimate is shown.";
 
 pub fn tool() -> Box<dyn Tool> {
     Box::new(LiveTelemetry::default())
@@ -112,6 +120,13 @@ struct LiveTelemetry {
     shm_slot: Arc<Mutex<Option<ShmReading>>>,
     /// Last reading the UI took, kept between frames for display.
     shm_last: Option<ShmReading>,
+    /// Set by each handshake so the lap store is read again for the new session.
+    lap_store_wanted: bool,
+    /// Lap store read from the Assetto Corsa folder, used for the best lap delta.
+    lap_store: Option<LapStore>,
+    lap_store_error: Option<String>,
+    /// Pending lap store read, present while its thread runs.
+    lap_store_rx: Option<mpsc::Receiver<Result<LapStore, String>>>,
 }
 
 /// Chart and map state built from the car updates of one connection.
@@ -186,6 +201,10 @@ impl Default for LiveTelemetry {
             shm_stop: None,
             shm_slot: Arc::new(Mutex::new(None)),
             shm_last: None,
+            lap_store_wanted: false,
+            lap_store: None,
+            lap_store_error: None,
+            lap_store_rx: None,
         }
     }
 }
@@ -211,11 +230,13 @@ impl Tool for LiveTelemetry {
         self.poll_shm();
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _ctx: &ToolContext, notices: &mut Vec<Notice>) {
+    fn ui(&mut self, ui: &mut egui::Ui, tool_ctx: &ToolContext, notices: &mut Vec<Notice>) {
         self.poll_session();
         self.poll_export(notices);
         self.poll_shm();
+        self.poll_lap_store();
         let ctx = ui.ctx().clone();
+        self.ensure_lap_store(&ctx, tool_ctx.ac_root.as_deref());
 
         widgets::heading(
             ui,
@@ -230,6 +251,8 @@ impl Tool for LiveTelemetry {
             self.session_card(ui);
             ui.add_space(16.0);
             self.live_card(ui);
+            ui.add_space(16.0);
+            self.delta_card(ui);
             ui.add_space(16.0);
             self.shm_card(ui);
             ui.add_space(16.0);
@@ -259,7 +282,10 @@ impl LiveTelemetry {
         let mut ended: Option<String> = None;
         loop {
             match rx.try_recv() {
-                Ok(Msg::Handshake(h)) => self.handshake = Some(h),
+                Ok(Msg::Handshake(h)) => {
+                    self.handshake = Some(h);
+                    self.lap_store_wanted = true;
+                }
                 Ok(Msg::Car(c)) => {
                     self.charts.record(&c);
                     if let Some(dash) = &self.web {
@@ -301,6 +327,53 @@ impl LiveTelemetry {
             Err(mpsc::TryRecvError::Empty) => {}
             // The thread ends without a message when the dialog is cancelled.
             Err(mpsc::TryRecvError::Disconnected) => self.export_rx = None,
+        }
+    }
+
+    /// Starts a background read of the lap store once a handshake has arrived.
+    /// The read needs the Assetto Corsa folder; without it the card says so.
+    fn ensure_lap_store(&mut self, ctx: &egui::Context, ac_root: Option<&Path>) {
+        if !self.lap_store_wanted || self.lap_store_rx.is_some() {
+            return;
+        }
+        let Some(root) = ac_root else {
+            self.lap_store_error =
+                Some("The Assetto Corsa folder is not set, so the lap store cannot be read.".to_string());
+            return;
+        };
+        let path = root.join(LAP_STORE_FILE);
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            let result = LapStore::load(&path).map_err(|e| e.to_string());
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+        self.lap_store_wanted = false;
+        self.lap_store_error = None;
+        self.lap_store_rx = Some(rx);
+    }
+
+    /// Takes the finished lap store read, if any. Never waits.
+    fn poll_lap_store(&mut self) {
+        let Some(rx) = self.lap_store_rx.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(store)) => {
+                self.lap_store = Some(store);
+                self.lap_store_error = None;
+                self.lap_store_rx = None;
+            }
+            Ok(Err(e)) => {
+                self.lap_store_error = Some(e);
+                self.lap_store_rx = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.lap_store_error = Some("Could not read the lap store.".to_string());
+                self.lap_store_rx = None;
+            }
         }
     }
 
@@ -671,6 +744,69 @@ impl LiveTelemetry {
                 ui.label(RichText::new("No car updates yet.").color(MUTED));
             }
         });
+    }
+
+    /// Current lap time against the best recorded lap for this car, track and
+    /// layout, with the fuel estimate line below it.
+    fn delta_card(&self, ui: &mut egui::Ui) {
+        theme::card().show(ui, |ui| {
+            widgets::section_title(ui, "Best lap and fuel");
+            self.best_lap_readout(ui);
+            ui.add_space(10.0);
+            ui.label(RichText::new("Fuel estimate").small().color(MUTED));
+            ui.label(RichText::new(NO_FUEL_TEXT).color(MUTED));
+        });
+    }
+
+    fn best_lap_readout(&self, ui: &mut egui::Ui) {
+        let Some(h) = &self.handshake else {
+            ui.label(RichText::new("Waiting for the game to answer the handshake.").color(MUTED));
+            return;
+        };
+        if let Some(err) = &self.lap_store_error {
+            ui.label(RichText::new(err).color(WARN));
+            return;
+        }
+        let Some(store) = &self.lap_store else {
+            ui.label(RichText::new("Reading the lap store.").color(MUTED));
+            return;
+        };
+        let layout = (!h.track_config.is_empty()).then_some(h.track_config.as_str());
+        let Some(best) = store.best_for(&h.track, layout, &h.car) else {
+            ui.label(
+                RichText::new("No recorded lap for this car on this track and layout.").color(MUTED),
+            );
+            return;
+        };
+
+        ui.horizontal_wrapped(|ui| {
+            widgets::stat(ui, "Best lap", &format_lap(best.lap_time_ms), TEXT);
+            match self.car.as_ref().filter(|car| car.lap_time_ms > 0) {
+                Some(car) => {
+                    let diff = i64::from(car.lap_time_ms) - i64::from(best.lap_time_ms);
+                    let color = match diff.cmp(&0) {
+                        std::cmp::Ordering::Less => OK,
+                        std::cmp::Ordering::Greater => DANGER,
+                        std::cmp::Ordering::Equal => TEXT,
+                    };
+                    widgets::stat(ui, "Delta", &format_delta(diff), color);
+                    widgets::stat(ui, "Current lap", &format_lap(car.lap_time_ms), TEXT);
+                }
+                None => {
+                    widgets::stat(ui, "Delta", "-", MUTED);
+                    widgets::stat(ui, "Current lap", "-", MUTED);
+                }
+            }
+        });
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new(
+                "Delta compares the lap time in the car update with your best recorded lap. \
+                 Negative means faster.",
+            )
+            .small()
+            .color(MUTED),
+        );
     }
 
     fn charts_card(&self, ui: &mut egui::Ui) {
@@ -1055,6 +1191,13 @@ fn ac_status_label(status: AcStatus) -> String {
 /// Formats milliseconds as `m:ss.mmm`.
 fn format_lap(ms: u32) -> String {
     format!("{}:{:02}.{:03}", ms / 60_000, (ms % 60_000) / 1_000, ms % 1_000)
+}
+
+/// Signed lap difference in seconds, for example `+0.512 s` or `-0.084 s`.
+fn format_delta(diff_ms: i64) -> String {
+    let sign = if diff_ms < 0 { '-' } else { '+' };
+    let abs = diff_ms.unsigned_abs();
+    format!("{sign}{}.{:03} s", abs / 1_000, abs % 1_000)
 }
 
 /// Gear as shown on the dash. Shared-memory gear values use

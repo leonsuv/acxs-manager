@@ -140,6 +140,23 @@ fn check_results(results: &[RaceResult]) -> Result<(), String> {
     Ok(())
 }
 
+/// Named scoring tables for `points_preset`, listed from the first position down.
+const PRESETS: &[(&str, &[u32])] = &[
+    ("10-6-4-3-2-1", &[10, 6, 4, 3, 2, 1]),
+    ("25-18-15-12-10-8-6-4-2-1", &[25, 18, 15, 12, 10, 8, 6, 4, 2, 1]),
+    ("15-12-10-8-6-4-2-1", &[15, 12, 10, 8, 6, 4, 2, 1]),
+];
+
+/// The points table for a named preset, such as `"10-6-4-3-2-1"`. `None` if the name is unknown.
+pub fn points_preset(name: &str) -> Option<Vec<u32>> {
+    PRESETS.iter().find(|(preset, _)| *preset == name).map(|(_, table)| table.to_vec())
+}
+
+/// The names accepted by `points_preset`, in display order.
+pub fn preset_names() -> Vec<&'static str> {
+    PRESETS.iter().map(|(name, _)| *name).collect()
+}
+
 impl Championship {
     pub fn new(name: impl Into<String>, points_table: Vec<u32>) -> Self {
         Self { name: name.into(), points_table, rounds: Vec::new() }
@@ -418,6 +435,25 @@ mod tests {
 
     fn table() -> Vec<u32> {
         vec![10, 6, 4, 2]
+    }
+
+    #[test]
+    fn presets_resolve_by_name_and_unknown_names_do_not() {
+        let names = preset_names();
+        assert_eq!(names, ["10-6-4-3-2-1", "25-18-15-12-10-8-6-4-2-1", "15-12-10-8-6-4-2-1"]);
+        assert_eq!(points_preset("10-6-4-3-2-1"), Some(vec![10, 6, 4, 3, 2, 1]));
+        assert_eq!(points_preset("25-18-15-12-10-8-6-4-2-1"), Some(vec![25, 18, 15, 12, 10, 8, 6, 4, 2, 1]));
+        assert_eq!(points_preset("15-12-10-8-6-4-2-1"), Some(vec![15, 12, 10, 8, 6, 4, 2, 1]));
+        assert_eq!(points_preset("no such preset"), None);
+    }
+
+    #[test]
+    fn preset_tables_are_non_empty_and_descending() {
+        for name in preset_names() {
+            let table = points_preset(name).expect("every listed preset resolves");
+            assert!(!table.is_empty(), "{name} has no points");
+            assert!(table.windows(2).all(|w| w[0] > w[1]), "{name} is not descending: {table:?}");
+        }
     }
 
     fn standing<'a>(rows: &'a [Standing], driver: &str) -> &'a Standing {

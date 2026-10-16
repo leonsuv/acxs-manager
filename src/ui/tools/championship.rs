@@ -20,7 +20,7 @@ pub fn tool() -> Box<dyn Tool> {
         rx,
         championships: Vec::new(),
         selected: None,
-        create: CreateForm { name: String::new(), points: DEFAULT_POINTS.to_string() },
+        create: CreateForm { points: DEFAULT_POINTS.to_string(), ..CreateForm::default() },
         round: RoundForm::default(),
         dialog_open: false,
     })
@@ -39,6 +39,7 @@ enum Action {
     Select(usize),
     Create,
     AddRound,
+    SetCustomPoints,
     OpenFile,
     SaveSelected,
 }
@@ -46,7 +47,10 @@ enum Action {
 #[derive(Default)]
 struct CreateForm {
     name: String,
+    /// The points table the new championship will use, as typed or filled from a preset.
     points: String,
+    /// Staging text for a custom points table, applied by the "Use custom table" button.
+    custom: String,
 }
 
 #[derive(Default)]
@@ -118,6 +122,34 @@ impl ChampionshipsPage {
                     actions.push(Action::Create);
                 }
             });
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Preset").color(MUTED));
+                let current = parse_points(&self.create.points).ok();
+                let label = championship::preset_names()
+                    .into_iter()
+                    .find(|name| championship::points_preset(name) == current)
+                    .unwrap_or("Custom");
+                egui::ComboBox::from_id_salt("championship_points_preset")
+                    .width(220.0)
+                    .selected_text(label)
+                    .show_ui(ui, |ui| {
+                        for name in championship::preset_names() {
+                            if ui.selectable_label(label == name, name).clicked() {
+                                if let Some(table) = championship::points_preset(name) {
+                                    self.create.points = join_points(&table);
+                                }
+                            }
+                        }
+                    });
+                ui.add(
+                    TextEdit::singleline(&mut self.create.custom)
+                        .hint_text("Custom, e.g. 12, 9, 7, 5")
+                        .desired_width(220.0),
+                );
+                if ui.button("Use custom table").clicked() {
+                    actions.push(Action::SetCustomPoints);
+                }
+            });
             ui.horizontal(|ui| {
                 if ui.add_enabled(!busy, egui::Button::new("Open file...")).clicked() {
                     actions.push(Action::OpenFile);
@@ -162,6 +194,7 @@ impl ChampionshipsPage {
             Action::Select(i) => self.selected = Some(i),
             Action::Create => report(notices, self.create_championship()),
             Action::AddRound => report(notices, self.add_round()),
+            Action::SetCustomPoints => report(notices, self.set_custom_points()),
             Action::OpenFile => self.spawn_open(ctx),
             Action::SaveSelected => {
                 if let Some(champ) = self.selected.and_then(|i| self.championships.get(i)).cloned() {
@@ -169,6 +202,12 @@ impl ChampionshipsPage {
                 }
             }
         }
+    }
+
+    fn set_custom_points(&mut self) -> Result<String, String> {
+        let table = parse_points(&self.create.custom)?;
+        self.create.points = join_points(&table);
+        Ok(format!("Points set to {}.", self.create.points))
     }
 
     fn create_championship(&mut self) -> Result<String, String> {
@@ -284,6 +323,11 @@ fn parse_points(text: &str) -> Result<Vec<u32>, String> {
     Ok(points)
 }
 
+/// Formats a points table as "25, 18, 15", the form `parse_points` reads back.
+fn join_points(table: &[u32]) -> String {
+    table.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
+}
+
 /// A file name derived from the championship name, with characters that are awkward in paths replaced.
 fn file_stem(name: &str) -> String {
     let stem: String = name
@@ -300,7 +344,7 @@ fn detail(ui: &mut egui::Ui, champ: &Championship, form: &mut RoundForm, actions
     let table = if champ.points_table.is_empty() {
         "none".to_string()
     } else {
-        champ.points_table.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
+        join_points(&champ.points_table)
     };
     ui.label(RichText::new(format!("Points: {table}  ·  {} rounds", champ.rounds.len())).color(MUTED));
 

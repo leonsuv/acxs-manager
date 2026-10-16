@@ -8,7 +8,8 @@ use crate::ui::theme::{self, DANGER, INFO, MUTED, OK, WARN};
 use crate::ui::{widgets, Notice};
 use acxs_manager::ini::Ini;
 use acxs_manager::server::{
-    read_server_config, validate, write_entry_list, write_server_config, Entry, ServerConfig,
+    preset, preset_names, read_server_config, validate, write_entry_list, write_server_config, Entry,
+    ServerConfig,
 };
 use acxs_manager::server_process::{
     find_server_executable, parse_log_line, LaunchArgs, LogKind, ServerProcess, Status,
@@ -124,6 +125,8 @@ enum Action {
     Validate,
     Save,
     SaveEntries,
+    /// Fills the server form from a preset. Nothing is written until Save.
+    Preset(&'static str),
 }
 
 impl Tool for ServerPage {
@@ -156,7 +159,7 @@ impl Tool for ServerPage {
             self.folder_card(ui);
             self.process_card(ui, &mut action);
             self.live_card(ui, &egui_ctx);
-            self.server_card(ui);
+            self.server_card(ui, &mut action);
             self.problem_list(ui);
             ui.add_space(8.0);
             self.action_bar(ui, &mut action);
@@ -188,6 +191,7 @@ impl Tool for ServerPage {
                 None => notices.push(fail("Set the server folder first.")),
                 Some(dir) => self.spawn(&egui_ctx, move || Done::Loaded(load(&dir))),
             },
+            Action::Preset(name) => self.apply_preset(name, notices),
             Action::Validate => {
                 self.problems = validate(&self.current_config());
                 if self.problems.is_empty() {
@@ -258,6 +262,20 @@ impl ServerPage {
         cfg.config_track = cfg.config_track.trim().to_string();
         cfg.cars = parse_cars(&self.cars_text);
         cfg
+    }
+
+    /// Copies a preset into the form. The typed passwords are kept, and nothing is saved.
+    fn apply_preset(&mut self, name: &str, notices: &mut Vec<Notice>) {
+        let Some(mut cfg) = preset(name) else {
+            notices.push(fail(format!("Unknown preset {name}.")));
+            return;
+        };
+        cfg.password = self.cfg.password.clone();
+        cfg.admin_password = self.cfg.admin_password.clone();
+        self.cars_text = join_cars(&cfg.cars);
+        self.cfg = cfg;
+        self.problems.clear();
+        notices.push(ok(format!("Filled in the {name} preset. Save server config to write it.")));
     }
 
     /// Applies finished background jobs. Each one clears the busy flag and reports a notice.
@@ -498,7 +516,7 @@ impl ServerPage {
         });
     }
 
-    fn server_card(&mut self, ui: &mut egui::Ui) {
+    fn server_card(&mut self, ui: &mut egui::Ui, action: &mut Action) {
         widgets::section_title(ui, "Server settings");
         theme::card().show(ui, |ui| {
             let cfg = &mut self.cfg;
@@ -507,6 +525,17 @@ impl ServerPage {
                 .num_columns(2)
                 .spacing([14.0, 8.0])
                 .show(ui, |ui| {
+                    row(ui, "Preset", |ui| {
+                        egui::ComboBox::from_id_salt("server_preset")
+                            .selected_text("Choose a starting point")
+                            .show_ui(ui, |ui| {
+                                for name in preset_names() {
+                                    if ui.selectable_label(false, *name).clicked() {
+                                        *action = Action::Preset(name);
+                                    }
+                                }
+                            });
+                    });
                     row(ui, "Server name", |ui| {
                         ui.add(egui::TextEdit::singleline(&mut cfg.name).desired_width(FIELD_WIDTH));
                     });

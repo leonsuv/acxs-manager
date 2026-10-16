@@ -5,9 +5,10 @@ use super::{Tool, ToolContext};
 use crate::ui::theme::{self, DANGER, MUTED, OK, WARN};
 use crate::ui::widgets;
 use crate::ui::Notice;
+use acxs_manager::content;
 use acxs_manager::game;
 use acxs_manager::installer::{self, ArchiveInfo, ContentKind, InstallReport};
-use acxs_manager::util::human_size;
+use acxs_manager::util::{self, human_size};
 use eframe::egui::{self, RichText};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -27,6 +28,13 @@ struct Picked {
     info: Result<ArchiveInfo, String>,
 }
 
+/// One car or track folder found in the Assetto Corsa root.
+struct InstalledRow {
+    name: String,
+    id: String,
+    kind: ContentKind,
+}
+
 #[derive(Default)]
 struct PackagesPage {
     picked: Option<Picked>,
@@ -39,6 +47,13 @@ struct PackagesPage {
 
     installing: bool,
     install_rx: Option<Receiver<Result<InstallReport, String>>>,
+
+    installed: Vec<InstalledRow>,
+    installed_filter: String,
+    scanned_root: Option<PathBuf>,
+    scanning: bool,
+    scan_rx: Option<Receiver<Vec<InstalledRow>>>,
+    needs_scan: bool,
 }
 
 impl Tool for PackagesPage {
@@ -64,6 +79,11 @@ impl Tool for PackagesPage {
             widgets::empty_state(ui, "Set your Assetto Corsa folder on the Home page to install packages.");
             return;
         };
+
+        let root_changed = self.scanned_root.as_deref() != Some(root);
+        if (self.needs_scan || root_changed) && !self.scanning {
+            self.start_scan(&egui_ctx, root.to_path_buf());
+        }
 
         let busy = self.inspecting || self.installing;
         let game_running = self.game_running;
@@ -157,6 +177,54 @@ impl Tool for PackagesPage {
                     }
                 });
             });
+
+            ui.add_space(16.0);
+            widgets::section_title(ui, "Installed");
+            theme::card().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Filter").color(MUTED));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.installed_filter)
+                            .hint_text("Name, id or kind")
+                            .desired_width(260.0),
+                    );
+                    if self.scanning {
+                        ui.label(RichText::new("Reading folders...").color(MUTED));
+                    }
+                });
+                ui.add_space(8.0);
+
+                let filter = self.installed_filter.trim().to_string();
+                let shown: Vec<&InstalledRow> = self
+                    .installed
+                    .iter()
+                    .filter(|row| {
+                        util::matches(&filter, &[row.name.as_str(), row.id.as_str(), kind_name(row.kind)])
+                    })
+                    .collect();
+
+                if self.installed.is_empty() {
+                    let text = if self.scanning {
+                        "Reading the content folder..."
+                    } else {
+                        "No cars or tracks found in the content folder."
+                    };
+                    ui.label(RichText::new(text).color(MUTED));
+                } else {
+                    ui.label(
+                        RichText::new(format!("{} of {} shown", shown.len(), self.installed.len()))
+                            .color(MUTED),
+                    );
+                    ui.add_space(4.0);
+                    for row in shown {
+                        ui.horizontal(|ui| {
+                            widgets::pill(ui, kind_name(row.kind), MUTED);
+                            ui.label(RichText::new(&row.name).strong());
+                            ui.label(RichText::new(&row.id).color(MUTED));
+                        });
+                    }
+                }
+            });
         });
     }
 }
@@ -187,6 +255,7 @@ impl PackagesPage {
             Some(Ok(Ok(report))) => {
                 self.installing = false;
                 self.install_rx = None;
+                self.needs_scan = true;
                 notices.push(Notice {
                     text: install_notice(&report),
                     ok: true,
@@ -207,6 +276,20 @@ impl PackagesPage {
                     text: "The install stopped unexpectedly.".into(),
                     ok: false,
                 });
+            }
+            _ => {}
+        }
+
+        let outcome = self.scan_rx.as_ref().map(Receiver::try_recv);
+        match outcome {
+            Some(Ok(rows)) => {
+                self.installed = rows;
+                self.scanning = false;
+                self.scan_rx = None;
+            }
+            Some(Err(TryRecvError::Disconnected)) => {
+                self.scanning = false;
+                self.scan_rx = None;
             }
             _ => {}
         }
@@ -253,6 +336,35 @@ impl PackagesPage {
         });
         self.install_rx = Some(rx);
         self.installing = true;
+    }
+
+    /// Read the car and track folders under `root` on a thread.
+    fn start_scan(&mut self, ctx: &egui::Context, root: PathBuf) {
+        let (tx, rx) = mpsc::channel();
+        let repaint = ctx.clone();
+        self.scanned_root = Some(root.clone());
+        thread::spawn(move || {
+            let cars = content::scan_cars(&root)
+                .into_iter()
+                .map(|car| InstalledRow {
+                    name: car.name,
+                    id: car.id,
+                    kind: ContentKind::Car,
+                });
+            let tracks = content::scan_tracks(&root)
+                .into_iter()
+                .map(|track| InstalledRow {
+                    name: track.name,
+                    id: track.id,
+                    kind: ContentKind::Track,
+                });
+            let rows: Vec<InstalledRow> = cars.chain(tracks).collect();
+            let _ = tx.send(rows);
+            repaint.request_repaint();
+        });
+        self.scan_rx = Some(rx);
+        self.scanning = true;
+        self.needs_scan = false;
     }
 
     fn start_game_check(&mut self, ctx: &egui::Context) {

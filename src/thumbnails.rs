@@ -182,6 +182,47 @@ pub fn track_thumbnail(ac_root: &Path, track_id: &str, size: u32) -> Result<Vec<
     )
 }
 
+/// Makes a top-down thumbnail of `size` by `size` pixels for every track under
+/// `<ac_root>/content/tracks` that has a model, in track id order.
+///
+/// Tracks without a root-level model are left out of the result. Every other track
+/// gets one entry: the path of its `<size>.png` on success, or the error for that
+/// track. A failure on one track does not stop the others. A missing tracks folder
+/// gives an empty list.
+pub fn batch_track_thumbnails(
+    ac_root: &Path,
+    size: u32,
+) -> Vec<(String, Result<PathBuf, ThumbError>)> {
+    let tracks_dir = ac_root.join("content").join("tracks");
+    let Ok(entries) = fs::read_dir(&tracks_dir) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    ids.sort();
+
+    let mut results = Vec::new();
+    for id in ids {
+        let track_dir = tracks_dir.join(&id);
+        let layouts = crate::content::track_layouts(&track_dir);
+        match find_main_model(&track_dir, &layouts) {
+            Err(ThumbError::NoModel(_)) => continue,
+            Err(e) => {
+                results.push((id, Err(e)));
+                continue;
+            }
+            Ok(_) => {}
+        }
+        let result = track_thumbnail(ac_root, &id, size)
+            .map(|_| track_cache_path(ac_root, &id).join(format!("{size}.png")));
+        results.push((id, result));
+    }
+    results
+}
+
 /// Returns the cached `<size>.png` in `cache_dir` when it exists. Otherwise
 /// finds the model, renders it at the given yaw and pitch, and creates the file.
 fn cached_or_render(
@@ -506,6 +547,42 @@ mod tests {
                 "id {id:?} accepted"
             );
         }
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn batch_skips_tracks_without_a_model_and_keeps_going_after_errors() {
+        let root = scratch_root("batch");
+        let good = make_track(&root, "good");
+        fs::write(good.join("good.kn5"), triangle_kn5()).expect("write model");
+        let bad = make_track(&root, "bad");
+        fs::write(bad.join("bad.kn5"), b"junk, not a kn5").expect("write bad model");
+        make_track(&root, "empty");
+        fs::write(root.join("content").join("tracks").join("empty").join("readme.txt"), b"x")
+            .expect("write file");
+        // A plain file in the tracks folder is not a track.
+        fs::write(root.join("content").join("tracks").join("stray.txt"), b"x").expect("write stray");
+
+        let results = batch_track_thumbnails(&root, 48);
+        let ids: Vec<&str> = results.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["bad", "good"]);
+
+        assert!(matches!(
+            &results[0].1,
+            Err(ThumbError::Model(ExportError::Kn5(Kn5Error::NotKn5)))
+        ));
+        let good_png = results[1].1.as_ref().expect("good track thumbnail");
+        assert_eq!(good_png, &track_cache_path(&root, "good").join("48.png"));
+        assert!(good_png.is_file());
+        assert!(!track_cache_path(&root, "bad").join("48.png").exists());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn batch_without_tracks_folder_is_empty() {
+        let root = scratch_root("batch_none");
+        assert!(batch_track_thumbnails(&root, 32).is_empty());
         fs::remove_dir_all(&root).ok();
     }
 }

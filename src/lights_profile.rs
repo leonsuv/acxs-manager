@@ -17,6 +17,15 @@ use std::path::{Path, PathBuf};
 /// Sections of the lighting configuration that a profile covers.
 pub const PROFILE_SECTIONS: [&str; 4] = ["BASIC", "RANGES", "SHADOWS", "PERFORMANCE"];
 
+/// File name of the lighting configuration inside its folder.
+const CONFIG_FILE: &str = "lighting_fx.ini";
+
+/// `(section, key)` that only the 0.2 lighting configuration has.
+const ONLY_IN_02: [(&str, &str); 1] = [("BASIC", "BRIGHTNESS_MULT")];
+
+/// `(section, key)` that only the 0.3 lighting configuration has.
+const ONLY_IN_03: [(&str, &str); 1] = [("ℹ", "ORDER")];
+
 /// A named set of lighting values.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LightsProfile {
@@ -168,6 +177,95 @@ pub fn load_profile(path: &Path) -> io::Result<LightsProfile> {
     } else {
         Err(io::Error::new(io::ErrorKind::InvalidData, problems.join("; ")))
     }
+}
+
+/// Lighting configuration version of `config_dir`, as `"0.2"` or `"0.3"`.
+///
+/// Read from the keys in the `lighting_fx.ini` of that folder. `None` when the
+/// file cannot be read or its keys match neither version or both.
+pub fn detect_version(config_dir: &Path) -> Option<String> {
+    let ini = Ini::load(&config_dir.join(CONFIG_FILE)).ok()?;
+    let has = |keys: &[(&str, &str)]| keys.iter().any(|(s, k)| ini.get(s, k).is_some());
+    match (has(&ONLY_IN_02[..]), has(&ONLY_IN_03[..])) {
+        (true, false) => Some("0.2".to_string()),
+        (false, true) => Some("0.3".to_string()),
+        _ => None,
+    }
+}
+
+/// Differences between two lighting configuration files.
+///
+/// Lists the sections and keys that only one file has, and the values that
+/// differ for keys present in both. Values are compared without inline
+/// comments. Lines say "first" or "second" for the file, so no paths appear.
+pub fn key_differences(a: &Path, b: &Path) -> io::Result<Vec<String>> {
+    let first = Ini::load(a)?;
+    let second = Ini::load(b)?;
+    let mut out = Vec::new();
+    for (side, here, there) in [("first", &first, &second), ("second", &second, &first)] {
+        for section in here.section_names() {
+            if !has_section(there, section) {
+                out.push(format!("section [{section}] only in the {side} file"));
+                continue;
+            }
+            for (key, _) in here.entries(section) {
+                if there.get(section, key).is_none() {
+                    out.push(format!("[{section}] {key} only in the {side} file"));
+                }
+            }
+        }
+    }
+    for section in first.section_names() {
+        if !has_section(&second, section) {
+            continue;
+        }
+        for (key, value) in first.entries(section) {
+            if let Some(other) = second.get(section, key)
+                && bare(value) != bare(other)
+            {
+                out.push(format!(
+                    "[{section}] {key}: \"{}\" in the first file, \"{}\" in the second",
+                    bare(value),
+                    bare(other)
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Keys that differ between the 0.2 and 0.3 lighting configurations, from the
+/// keys each version has. Used when only one folder is at hand.
+pub fn version_differences() -> Vec<String> {
+    ONLY_IN_02
+        .iter()
+        .map(|(s, k)| format!("[{s}] {k} only in 0.2"))
+        .chain(ONLY_IN_03.iter().map(|(s, k)| format!("[{s}] {k} only in 0.3")))
+        .collect()
+}
+
+/// Keys of `profile` that the lighting configuration of `version` does not have,
+/// as `[section] key`. Empty for a version that is not known.
+pub fn unknown_keys(profile: &LightsProfile, version: &str) -> Vec<String> {
+    let missing: &[(&str, &str)] = match version {
+        "0.2" => &ONLY_IN_03,
+        "0.3" => &ONLY_IN_02,
+        _ => return Vec::new(),
+    };
+    profile
+        .values
+        .iter()
+        .filter(|(s, k, _)| {
+            missing
+                .iter()
+                .any(|(ms, mk)| s.eq_ignore_ascii_case(ms) && k.eq_ignore_ascii_case(mk))
+        })
+        .map(|(s, k, _)| format!("[{s}] {k}"))
+        .collect()
+}
+
+fn has_section(ini: &Ini, name: &str) -> bool {
+    ini.section_names().iter().any(|s| s.eq_ignore_ascii_case(name))
 }
 
 /// Value with any inline `;` comment removed and surrounding space trimmed.
@@ -365,5 +463,72 @@ mod tests {
 
         fs::write(&path, "not json").unwrap();
         assert!(load_profile(&path).is_err());
+    }
+
+    const OLD_STYLE: &str = "[BASIC]\r\nENABLED=1\r\nBRIGHTNESS_MULT=1\r\n[PERFORMANCE]\r\nLEVEL=2\r\n";
+    const NEW_STYLE: &str = "[ℹ]\r\nFULLNAME=Changed name\r\nORDER=-1.6\r\n[BASIC]\r\nENABLED=1\r\n";
+
+    /// Writes `text` as the configuration file of a new folder inside `scratch`.
+    fn config_dir(scratch: &Scratch, tag: &str, text: &str) -> PathBuf {
+        let dir = scratch.0.join(tag);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lighting_fx.ini"), text).unwrap();
+        dir
+    }
+
+    #[test]
+    fn lights_profile_detect_version_from_keys() {
+        let scratch = Scratch::new("version");
+        let old = config_dir(&scratch, "old", OLD_STYLE);
+        let new = config_dir(&scratch, "new", NEW_STYLE);
+        let neither = config_dir(&scratch, "neither", "[BASIC]\r\nENABLED=1\r\n");
+        let both = config_dir(&scratch, "both", "[ℹ]\r\nORDER=1\r\n[BASIC]\r\nBRIGHTNESS_MULT=1\r\n");
+        assert_eq!(detect_version(&old).as_deref(), Some("0.2"));
+        assert_eq!(detect_version(&new).as_deref(), Some("0.3"));
+        assert_eq!(detect_version(&neither), None);
+        assert_eq!(detect_version(&both), None);
+        assert_eq!(detect_version(&scratch.0.join("missing")), None);
+    }
+
+    #[test]
+    fn lights_profile_key_differences_lists_one_sided_keys_and_changed_values() {
+        let scratch = Scratch::new("diff");
+        let a = config_dir(&scratch, "a", OLD_STYLE).join("lighting_fx.ini");
+        let b = config_dir(&scratch, "b", NEW_STYLE).join("lighting_fx.ini");
+        let changed = config_dir(
+            &scratch,
+            "changed",
+            "[BASIC]\r\nENABLED=0 ; off\r\nBRIGHTNESS_MULT=1\r\n[PERFORMANCE]\r\nLEVEL=2\r\n",
+        )
+        .join("lighting_fx.ini");
+
+        let diffs = key_differences(&a, &b).unwrap();
+        assert_eq!(diffs.len(), 3, "{diffs:?}");
+        assert!(diffs.contains(&"[BASIC] BRIGHTNESS_MULT only in the first file".to_string()));
+        assert!(diffs.contains(&"section [PERFORMANCE] only in the first file".to_string()));
+        assert!(diffs.contains(&"section [ℹ] only in the second file".to_string()));
+
+        let value_diffs = key_differences(&a, &changed).unwrap();
+        assert_eq!(value_diffs.len(), 1, "{value_diffs:?}");
+        assert!(value_diffs[0].starts_with("[BASIC] ENABLED: \"1\" in the first file, \"0\""));
+
+        assert!(key_differences(&a, &a).unwrap().is_empty());
+        assert!(key_differences(&scratch.0.join("missing.ini"), &a).is_err());
+    }
+
+    #[test]
+    fn lights_profile_version_differences_lists_both_directions() {
+        let diffs = version_differences();
+        assert_eq!(diffs.len(), 2);
+        assert!(diffs.iter().any(|d| d.contains("BRIGHTNESS_MULT") && d.ends_with("only in 0.2")));
+        assert!(diffs.iter().any(|d| d.contains("ORDER") && d.ends_with("only in 0.3")));
+    }
+
+    #[test]
+    fn lights_profile_unknown_keys_follow_version() {
+        let p = profile(&[("BASIC", "BRIGHTNESS_MULT", "1"), ("PERFORMANCE", "LEVEL", "2")]);
+        assert_eq!(unknown_keys(&p, "0.3"), vec!["[BASIC] BRIGHTNESS_MULT".to_string()]);
+        assert!(unknown_keys(&p, "0.2").is_empty());
+        assert!(unknown_keys(&p, "9.9").is_empty());
     }
 }

@@ -264,6 +264,59 @@ pub fn validate(cfg: &ServerConfig) -> Vec<String> {
     problems
 }
 
+/// Names of the starting presets, in menu order. Each one is accepted by [`preset`].
+pub fn preset_names() -> &'static [&'static str] {
+    &["Casual race", "Practice", "Sprint"]
+}
+
+/// A starting config for one of the [`preset_names`]. Any other name returns `None`.
+///
+/// Presets only pick the fields a server config owns. They set `admin_password` to a
+/// placeholder so [`validate`] passes; callers should replace it before saving.
+pub fn preset(name: &str) -> Option<ServerConfig> {
+    let cars = ["ks_ferrari_488_gt3", "bmw_m3_e30", "ks_mazda_mx5"].map(str::to_string).to_vec();
+    let cfg = match name {
+        "Casual race" => ServerConfig {
+            name: "Casual Race".to_string(),
+            admin_password: "change-me".to_string(),
+            cars,
+            track: "ks_silverstone".to_string(),
+            config_track: "gp".to_string(),
+            max_clients: 16,
+            loop_mode: true,
+            pickup_mode: true,
+            dynamic_track: Some(DynamicTrack { session_start: 95, randomness: 2, session_transfer: 90, lap_gain: 10 }),
+            ..ServerConfig::default()
+        },
+        "Practice" => ServerConfig {
+            name: "Practice".to_string(),
+            admin_password: "change-me".to_string(),
+            cars,
+            track: "monza".to_string(),
+            config_track: String::new(),
+            max_clients: 12,
+            loop_mode: false,
+            pickup_mode: false,
+            dynamic_track: Some(DynamicTrack { session_start: 100, randomness: 0, session_transfer: 100, lap_gain: 10 }),
+            ..ServerConfig::default()
+        },
+        "Sprint" => ServerConfig {
+            name: "Sprint".to_string(),
+            admin_password: "change-me".to_string(),
+            cars,
+            track: "ks_red_bull_ring".to_string(),
+            config_track: String::new(),
+            max_clients: 20,
+            loop_mode: true,
+            pickup_mode: true,
+            dynamic_track: None,
+            ..ServerConfig::default()
+        },
+        _ => return None,
+    };
+    Some(cfg)
+}
+
 fn has_section(ini: &Ini, name: &str) -> bool {
     ini.section_names().iter().any(|s| s.eq_ignore_ascii_case(name))
 }
@@ -454,6 +507,21 @@ mod tests {
 
         let no_admin = ServerConfig { admin_password: String::new(), ..base };
         assert!(validate(&no_admin).iter().any(|p| p.contains("ADMIN_PASSWORD")));
+    }
+
+    #[test]
+    fn presets_validate_without_problems() {
+        for name in preset_names() {
+            let cfg = preset(name).unwrap_or_else(|| panic!("preset {name} is missing"));
+            assert!(validate(&cfg).is_empty(), "{name}: {:?}", validate(&cfg));
+        }
+    }
+
+    #[test]
+    fn unknown_preset_is_none() {
+        assert!(preset("Endurance").is_none());
+        assert!(preset("").is_none());
+        assert!(preset("casual race").is_none());
     }
 
     #[test]

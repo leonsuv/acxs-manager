@@ -1,8 +1,9 @@
 //! CSV export of decoded telemetry, for spreadsheets and analysis tools.
 //!
-//! Two kinds of CSV are produced from the types in [`crate::telemetry`]:
+//! Three kinds of CSV are produced:
 //!   * one row per [`CarUpdate`] sample, see [`car_updates_to_csv`];
-//!   * one row per completed [`LapInfo`], see [`laps_to_csv`].
+//!   * one row per completed [`LapInfo`], see [`laps_to_csv`];
+//!   * one row per [`Sample`] of a replay, see [`replay_samples_to_csv`].
 //!
 //! Output follows RFC 4180: every line, including the header and the last
 //! row, ends in CRLF, and a field that contains a comma, a double quote or a
@@ -19,12 +20,14 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 
+use crate::replay::Sample;
 use crate::telemetry::{CarUpdate, LapInfo};
 
 const NEWLINE: &str = "\r\n";
 const CAR_UPDATE_HEADER: &str =
     "time_s,speed_kmh,gear,rpm,position_x,position_y,position_z,lap_time_ms";
 const LAP_HEADER: &str = "car_id,laps,lap_time_ms,lap_time,driver,car";
+const REPLAY_SAMPLE_HEADER: &str = "time_s,speed_kmh,rpm,gear,throttle,brake,x,y,z";
 
 /// Errors returned by [`car_updates_to_csv`].
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -96,6 +99,34 @@ pub fn laps_to_csv(laps: &[LapInfo]) -> String {
             format_lap_time(lap.lap_time_ms),
             escape_field(&lap.driver),
             escape_field(&lap.car),
+        ];
+        out.push_str(&fields.join(","));
+        out.push_str(NEWLINE);
+    }
+    out
+}
+
+/// Renders replay samples as CSV with a header row, one row per sample.
+///
+/// Columns: `time_s` (taken from [`Sample::time_s`], 6 decimals), `speed_kmh`
+/// (2 decimals), `rpm` (whole numbers), `gear` (raw gear code, see
+/// [`Sample::gear`]), `throttle` and `brake` (3 decimals, 0.0 to 1.0), `x`, `y`
+/// and `z` (3 decimals, metres). An empty slice yields the header alone.
+pub fn replay_samples_to_csv(samples: &[Sample]) -> String {
+    let mut out = String::with_capacity(REPLAY_SAMPLE_HEADER.len() + samples.len() * 80);
+    out.push_str(REPLAY_SAMPLE_HEADER);
+    out.push_str(NEWLINE);
+    for sample in samples {
+        let fields = [
+            format!("{:.6}", sample.time_s),
+            format!("{:.2}", sample.speed_kmh),
+            format!("{:.0}", sample.rpm),
+            sample.gear.to_string(),
+            format!("{:.3}", sample.throttle),
+            format!("{:.3}", sample.brake),
+            format!("{:.3}", sample.x),
+            format!("{:.3}", sample.y),
+            format!("{:.3}", sample.z),
         ];
         out.push_str(&fields.join(","));
         out.push_str(NEWLINE);
@@ -315,6 +346,77 @@ mod tests {
     fn plain_fields_are_not_quoted() {
         assert_eq!(escape_field("ks_ferrari_488_gt3"), "ks_ferrari_488_gt3");
         assert_eq!(escape_field(""), "");
+    }
+
+    // ---- replay samples ----
+
+    fn replay_sample(
+        time_s: f64,
+        speed_kmh: f32,
+        rpm: f32,
+        gear: u8,
+        throttle: f32,
+        brake: f32,
+        position: (f32, f32, f32),
+    ) -> Sample {
+        Sample {
+            time_s,
+            speed_kmh,
+            rpm,
+            gear,
+            throttle,
+            brake,
+            x: position.0,
+            y: position.1,
+            z: position.2,
+        }
+    }
+
+    fn three_replay_samples() -> Vec<Sample> {
+        vec![
+            replay_sample(0.0, 187.5, 7413.0, 4, 0.5, 0.0, (10.5, -2.25, 300.0)),
+            replay_sample(0.1, 190.0, 7800.0, 5, 1.0, 0.0, (11.0, -2.0, 300.5)),
+            replay_sample(0.2, 0.0, 900.0, 1, 0.0, 1.0, (0.0, 0.0, 0.0)),
+        ]
+    }
+
+    #[test]
+    fn replay_csv_has_exact_header_and_crlf_lines() {
+        let out = replay_samples_to_csv(&three_replay_samples());
+        let header = out.split("\r\n").next().expect("header");
+        assert_eq!(header, "time_s,speed_kmh,rpm,gear,throttle,brake,x,y,z");
+        assert!(out.ends_with("\r\n"));
+        assert!(!out.replace("\r\n", "").contains('\n'), "bare LF found");
+    }
+
+    #[test]
+    fn replay_csv_row_count_matches_samples() {
+        let out = replay_samples_to_csv(&three_replay_samples());
+        // one header line plus one line per sample
+        assert_eq!(out.split_terminator("\r\n").count(), 4);
+    }
+
+    #[test]
+    fn replay_csv_empty_is_header_only() {
+        assert_eq!(
+            replay_samples_to_csv(&[]),
+            format!("{REPLAY_SAMPLE_HEADER}\r\n")
+        );
+    }
+
+    #[test]
+    fn replay_csv_is_deterministic() {
+        let samples = three_replay_samples();
+        assert_eq!(replay_samples_to_csv(&samples), replay_samples_to_csv(&samples));
+    }
+
+    #[test]
+    fn replay_csv_row_values_use_fixed_precision() {
+        let out = replay_samples_to_csv(&three_replay_samples());
+        let rows: Vec<&str> = out.split_terminator("\r\n").collect();
+        assert_eq!(rows[1], "0.000000,187.50,7413,4,0.500,0.000,10.500,-2.250,300.000");
+        assert_eq!(rows[2], "0.100000,190.00,7800,5,1.000,0.000,11.000,-2.000,300.500");
+        assert_eq!(rows[3], "0.200000,0.00,900,1,0.000,1.000,0.000,0.000,0.000");
     }
 
     // ---- write_csv ----

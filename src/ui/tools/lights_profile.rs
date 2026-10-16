@@ -31,6 +31,8 @@ pub fn tool() -> Box<dyn Tool> {
         allow_new_keys: false,
         busy: false,
         outcome: None,
+        version: None,
+        differences: lights_profile::version_differences(),
     })
 }
 
@@ -56,11 +58,24 @@ struct LightsPage {
     busy: bool,
     /// Text and success flag of the last action, shown under the apply card.
     outcome: Option<(String, bool)>,
+    /// Version of the chosen configuration file, when its keys show one.
+    version: Option<String>,
+    /// Differences between the 0.2 and 0.3 configurations.
+    differences: Vec<String>,
 }
 
 /// The configuration file inside a lights patch folder.
 fn default_config(folder: &Path) -> PathBuf {
     folder.join("extension").join("config").join("lighting_fx.ini")
+}
+
+/// Version of a chosen configuration file. Only a file named as the
+/// configuration file is read, so another file is never mistaken for it.
+fn detect(config: &Path) -> Option<String> {
+    if config.file_name().and_then(|n| n.to_str()) != Some("lighting_fx.ini") {
+        return None;
+    }
+    lights_profile::detect_version(config.parent()?)
 }
 
 /// Run `job` on a background thread and send its result back, waking the UI.
@@ -108,6 +123,7 @@ impl LightsPage {
                     self.outcome = Some((format!("Capture was not completed. {message}"), false));
                 }
                 Msg::Applied(result) => {
+                    self.refresh_version();
                     let (text, ok) = match result {
                         Ok(report) if report.changed == 0 => {
                             ("No values differed from the file, so nothing was written.".to_string(), true)
@@ -131,6 +147,11 @@ impl LightsPage {
         }
     }
 
+    /// Reads the version of the chosen configuration file again.
+    fn refresh_version(&mut self) {
+        self.version = self.config.as_deref().and_then(detect);
+    }
+
     fn save_to(&mut self, dir: &Path) {
         let Some(profile) = self.profile.as_mut() else {
             return;
@@ -151,6 +172,7 @@ impl LightsPage {
                     self.config = Some(default_config(&folder));
                     self.folder = Some(folder);
                     self.outcome = None;
+                    self.refresh_version();
                 }
                 if ui.button("Choose file...").clicked()
                     && let Some(file) = rfd::FileDialog::new()
@@ -159,6 +181,7 @@ impl LightsPage {
                 {
                     self.config = Some(file);
                     self.outcome = None;
+                    self.refresh_version();
                 }
             });
             ui.add_space(6.0);
@@ -170,6 +193,25 @@ impl LightsPage {
                     ui.label(RichText::new("No configuration file chosen").color(MUTED));
                 }
             }
+            if self.config.is_some() {
+                ui.add_space(6.0);
+                match &self.version {
+                    Some(version) => {
+                        ui.label(format!("Detected version: {version}"));
+                    }
+                    None => {
+                        ui.label(RichText::new("Version could not be detected from the keys in this file.").color(WARN));
+                    }
+                }
+            }
+            ui.add_space(6.0);
+            egui::CollapsingHeader::new("Differences between versions 0.2 and 0.3")
+                .id_salt("lights_profile_versions")
+                .show(ui, |ui| {
+                    for line in &self.differences {
+                        ui.label(RichText::new(line).monospace());
+                    }
+                });
         });
     }
 
@@ -278,6 +320,19 @@ impl LightsPage {
                 "Allow keys that are not in the file (adds them to their section)",
             );
             ui.add_space(6.0);
+            if let (Some(version), Some(profile)) = (&self.version, &self.profile) {
+                let unknown = lights_profile::unknown_keys(profile, version);
+                if !unknown.is_empty() {
+                    ui.label(
+                        RichText::new(format!(
+                            "Version {version} does not have these keys: {}. Apply refuses this profile unless \"Allow keys that are not in the file\" is checked, and then these keys are added to the file.",
+                            unknown.join(", ")
+                        ))
+                        .color(WARN),
+                    );
+                    ui.add_space(6.0);
+                }
+            }
             ui.horizontal_wrapped(|ui| {
                 if ui
                     .add_enabled(can_apply, widgets::primary_button("Apply to configuration"))

@@ -11,8 +11,9 @@ use acxs_manager::car_tuning::{
     MAX_PRESSURE_PSI, MIN_BASE_HEIGHT_M, MIN_CAMBER_DEG, MIN_FACTOR, MIN_FUEL_L, MIN_MASS_KG, MIN_PRESSURE_PSI,
 };
 use acxs_manager::content::{self, CarEntry};
+use acxs_manager::tuning_profiles::{self, ApplyProfileError, PROFILE_DIR, TuningProfile, TuningStep};
 use eframe::egui::{self, RichText};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 /// Height of the scrollable car list.
@@ -37,6 +38,8 @@ pub fn tool() -> Box<dyn Tool> {
         pressure_psi: 30.0,
         camber_deg: -2.5,
         base_height_m: 0.25,
+        profile_name: String::new(),
+        steps: Vec::new(),
         busy: false,
         tx,
         rx,
@@ -47,6 +50,9 @@ pub fn tool() -> Box<dyn Tool> {
 enum Msg {
     Cars { root: PathBuf, cars: Vec<CarEntry> },
     Applied { car: String, result: Result<Vec<Change>, String> },
+    /// A profile file was picked and read. Nothing is sent when the pick is cancelled.
+    Loaded(Result<TuningProfile, String>),
+    ProfileApplied { car: String, result: Result<Vec<Change>, ApplyProfileError> },
 }
 
 /// Which value the page changes.
@@ -135,6 +141,10 @@ struct CarTuningPage {
     camber_deg: f64,
     /// Value used by the base height kind, in metres.
     base_height_m: f64,
+    /// Name of the profile on the page. Also the saved file's name.
+    profile_name: String,
+    /// Steps of the profile on the page, applied in this order.
+    steps: Vec<TuningStep>,
     /// Set while a change runs on a background thread.
     busy: bool,
     tx: Sender<Msg>,
@@ -256,6 +266,74 @@ impl Tool for CarTuningPage {
             });
         });
 
+        ui.add_space(12.0);
+        let mut add_step = false;
+        let mut remove_step: Option<usize> = None;
+        let mut save_clicked = false;
+        let mut load_clicked = false;
+        let mut apply_profile_clicked = false;
+        theme::card().show(ui, |ui| {
+            widgets::section_title(ui, "Profile");
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.profile_name)
+                        .hint_text("Profile name")
+                        .desired_width(240.0),
+                );
+                if ui.button("Add current step").clicked() {
+                    add_step = true;
+                }
+            });
+            ui.add_space(6.0);
+            if self.steps.is_empty() {
+                ui.label(
+                    RichText::new("No steps yet. Set a change in the Change card, then add it as a step.")
+                        .small()
+                        .color(MUTED),
+                );
+            }
+            for (index, step) in self.steps.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(format!("{}. {}", index + 1, step_label(step)));
+                    if ui.small_button("Remove").clicked() {
+                        remove_step = Some(index);
+                    }
+                });
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Save profile").clicked() {
+                    save_clicked = true;
+                }
+                if ui.button("Load profile").clicked() {
+                    load_clicked = true;
+                }
+                let can_apply = self.selected.is_some() && !self.steps.is_empty() && !self.busy;
+                if ui.add_enabled(can_apply, widgets::primary_button("Apply profile")).clicked() {
+                    apply_profile_clicked = true;
+                }
+            });
+        });
+
+        if add_step {
+            self.steps.push(TuningStep {
+                kind: self.tuning(),
+                value: self.current_value(),
+            });
+        }
+        if let Some(index) = remove_step {
+            self.steps.remove(index);
+        }
+        if save_clicked {
+            self.save_current(root, notices);
+        }
+        if load_clicked {
+            self.start_load(root, &egui_ctx);
+        }
+        if apply_profile_clicked {
+            self.start_apply_profile(&egui_ctx);
+        }
         if apply_clicked {
             self.start_apply(&egui_ctx);
         }
@@ -354,6 +432,56 @@ impl CarTuningPage {
                         self.scanning = false;
                     }
                 }
+                Msg::Loaded(result) => match result {
+                    Ok(profile) => {
+                        notices.push(Notice {
+                            text: format!("Loaded profile {} with {} step(s).", profile.name, profile.steps.len()),
+                            ok: true,
+                        });
+                        self.profile_name = profile.name;
+                        self.steps = profile.steps;
+                    }
+                    Err(message) => notices.push(Notice {
+                        text: format!("Could not load profile. {message}"),
+                        ok: false,
+                    }),
+                },
+                Msg::ProfileApplied { car, result } => {
+                    self.busy = false;
+                    match result {
+                        Ok(changes) if changes.is_empty() => notices.push(Notice {
+                            text: format!("{car}: profile ran, no value changed, nothing was written."),
+                            ok: true,
+                        }),
+                        Ok(changes) => {
+                            notices.push(Notice {
+                                text: format!(
+                                    "{car}: profile applied, {} change(s) written. The previous files are kept as backups.",
+                                    changes.len()
+                                ),
+                                ok: true,
+                            });
+                            for change in &changes {
+                                notices.push(Notice {
+                                    text: change_line(change),
+                                    ok: true,
+                                });
+                            }
+                        }
+                        Err(err) => {
+                            notices.push(Notice {
+                                text: format!("{car}: profile stopped. {err}"),
+                                ok: false,
+                            });
+                            for change in &err.changes {
+                                notices.push(Notice {
+                                    text: change_line(change),
+                                    ok: true,
+                                });
+                            }
+                        }
+                    }
+                }
                 Msg::Applied { car, result } => {
                     self.busy = false;
                     match result {
@@ -402,16 +530,90 @@ impl CarTuningPage {
         });
     }
 
+    /// The folder and name of the selected car.
+    fn selected_car(&self) -> Option<(PathBuf, String)> {
+        let id = self.selected.as_deref()?;
+        let car = self.cars.iter().find(|c| c.id == id)?;
+        Some((car.path.clone(), car.name.clone()))
+    }
+
+    /// The number the page holds for the selected kind. It becomes the step's value.
+    fn current_value(&self) -> f64 {
+        match self.kind {
+            Kind::TorqueCurve | Kind::GearRatios | Kind::FinalDrive => self.factor,
+            Kind::TotalMass => self.mass_kg,
+            Kind::FuelTank => self.fuel_l,
+            Kind::IdealPressure | Kind::StaticPressure => self.pressure_psi,
+            Kind::Camber => self.camber_deg,
+            Kind::BaseHeight => self.base_height_m,
+        }
+    }
+
+    /// The profile as it stands on the page.
+    fn profile(&self) -> TuningProfile {
+        TuningProfile {
+            name: self.profile_name.trim().to_string(),
+            steps: self.steps.clone(),
+        }
+    }
+
+    /// Saves the page's profile under the AC root. Always a new file.
+    fn save_current(&self, root: &Path, notices: &mut Vec<Notice>) {
+        let profile = self.profile();
+        match tuning_profiles::save_profile(root, &profile) {
+            Ok(path) => notices.push(Notice {
+                text: format!("Saved profile {} to {}.", profile.name, path.display()),
+                ok: true,
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => notices.push(Notice {
+                text: format!("A profile named {} already exists. Choose another name.", profile.name),
+                ok: false,
+            }),
+            Err(e) => notices.push(Notice {
+                text: format!("Could not save profile. {e}"),
+                ok: false,
+            }),
+        }
+    }
+
+    /// Opens the profile picker and reads the chosen file. Runs on a background thread.
+    fn start_load(&self, root: &Path, egui_ctx: &egui::Context) {
+        let dir = root.join(PROFILE_DIR);
+        let tx = self.tx.clone();
+        let egui_ctx = egui_ctx.clone();
+        std::thread::spawn(move || {
+            let Some(path) = pick_profile(Some(dir)) else {
+                return;
+            };
+            let result = tuning_profiles::load_profile(&path).map_err(|e| format!("{}: {e}", path.display()));
+            if tx.send(Msg::Loaded(result)).is_ok() {
+                egui_ctx.request_repaint();
+            }
+        });
+    }
+
+    /// Runs the page's profile on the selected car on a background thread.
+    fn start_apply_profile(&mut self, egui_ctx: &egui::Context) {
+        let Some((path, name)) = self.selected_car() else {
+            return;
+        };
+        let profile = self.profile();
+        self.busy = true;
+        let tx = self.tx.clone();
+        let egui_ctx = egui_ctx.clone();
+        std::thread::spawn(move || {
+            let result = tuning_profiles::apply_profile(&path, &profile);
+            if tx.send(Msg::ProfileApplied { car: name, result }).is_ok() {
+                egui_ctx.request_repaint();
+            }
+        });
+    }
+
     /// Runs the selected change on a background thread.
     fn start_apply(&mut self, egui_ctx: &egui::Context) {
-        let Some(id) = self.selected.as_deref() else {
+        let Some((path, name)) = self.selected_car() else {
             return;
         };
-        let Some(car) = self.cars.iter().find(|c| c.id == id) else {
-            return;
-        };
-        let path = car.path.clone();
-        let name = car.name.clone();
         let tuning = self.tuning();
         self.busy = true;
         let tx = self.tx.clone();
@@ -433,4 +635,29 @@ fn change_line(change: &Change) -> String {
         format!("{} [{}]", change.file, change.section)
     };
     format!("{place} {}: {} -> {}", change.key, change.before, change.after)
+}
+
+/// One line for a profile step, e.g. `Front axle ideal pressure 30 psi`.
+fn step_label(step: &TuningStep) -> String {
+    let v = step.value;
+    match step.kind {
+        Tuning::TorqueCurve(_) => format!("Torque curve x {v}"),
+        Tuning::TotalMass(_) => format!("Total mass {v} kg"),
+        Tuning::FuelTank(_) => format!("Fuel tank {v} L"),
+        Tuning::GearRatios(_) => format!("Gear ratios x {v}"),
+        Tuning::FinalDrive(_) => format!("Final drive x {v}"),
+        Tuning::IdealPressure { axle, .. } => format!("{} ideal pressure {v} psi", axle_label(axle)),
+        Tuning::StaticPressure { axle, .. } => format!("{} static pressure {v} psi", axle_label(axle)),
+        Tuning::Camber { axle, .. } => format!("{} camber {v} deg", axle_label(axle)),
+        Tuning::BaseHeight { axle, .. } => format!("{} base height {v} m", axle_label(axle)),
+    }
+}
+
+/// Opens the profile picker. Runs on the background thread.
+fn pick_profile(dir: Option<PathBuf>) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new().add_filter("Tuning profile", &["json"]);
+    if let Some(dir) = dir.filter(|d| d.is_dir()) {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.pick_file()
 }

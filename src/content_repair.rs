@@ -177,6 +177,13 @@ pub fn check_car(car_dir: &Path) -> Vec<Issue> {
                         format!("skin {} has no preview image (preview.jpg or preview.png)", name_of(&skin)),
                     ));
                 }
+                if probe(&skin.join("ui_skin.json"), false, &mut issues) == Some(false) {
+                    issues.push(Issue::new(
+                        Severity::Info,
+                        &skin,
+                        format!("skin {} has no ui_skin.json", name_of(&skin)),
+                    ));
+                }
             }
         }
         None => {}
@@ -189,8 +196,21 @@ fn check_car_ini(path: &Path, issues: &mut Vec<Issue>) {
     match probe(path, false, issues) {
         Some(false) => issues.push(Issue::new(Severity::Error, path, "data/car.ini is missing")),
         Some(true) => match Ini::load(path) {
-            Ok(ini) if has_section(&ini, "BASIC") => {}
-            Ok(_) => issues.push(Issue::new(Severity::Error, path, "data/car.ini has no [BASIC] section")),
+            Ok(ini) => {
+                if !has_section(&ini, "BASIC") {
+                    issues.push(Issue::new(Severity::Error, path, "data/car.ini has no [BASIC] section"));
+                }
+                // A section with no key=value lines does nothing in the game.
+                for section in ini.section_names() {
+                    if ini.entries(section).is_empty() {
+                        issues.push(Issue::new(
+                            Severity::Warning,
+                            path,
+                            format!("data/car.ini section [{section}] is empty"),
+                        ));
+                    }
+                }
+            }
             Err(e) => issues.push(Issue::new(Severity::Error, path, format!("data/car.ini cannot be read: {e}"))),
         },
         None => {}
@@ -217,8 +237,23 @@ pub fn check_track(track_dir: &Path) -> Vec<Issue> {
     let mut layouts: Vec<String> = Vec::new();
     if ui_present == Some(true) {
         for dir in subfolders(&ui_dir, &mut issues) {
-            if probe(&dir.join("ui_track.json"), false, &mut issues) == Some(true) {
-                layouts.push(name_of(&dir));
+            let name = name_of(&dir);
+            match probe(&dir.join("ui_track.json"), false, &mut issues) {
+                Some(true) => layouts.push(name),
+                Some(false) => {
+                    // A folder that also has data or ai under the track is reported further down.
+                    let has_layout_data = ["data", "ai"]
+                        .iter()
+                        .any(|sub| probe(&track_dir.join(&name).join(sub), true, &mut issues) == Some(true));
+                    if !has_layout_data {
+                        issues.push(Issue::new(
+                            Severity::Info,
+                            &dir,
+                            format!("ui/{name} has no ui_track.json, so layout {name} is not listed"),
+                        ));
+                    }
+                }
+                None => {}
             }
         }
     }
@@ -244,10 +279,20 @@ pub fn check_track(track_dir: &Path) -> Vec<Issue> {
         check_track_unit(track_dir, &track_id, layout.as_deref(), base, &mut issues);
     }
 
+    // The track needs an ai folder, at its root or in one of its folders (a layout).
+    let root_dirs = subfolders(track_dir, &mut issues);
+    let has_ai = probe(&track_dir.join("ai"), true, &mut issues) == Some(true)
+        || root_dirs
+            .iter()
+            .any(|dir| probe(&dir.join("ai"), true, &mut issues) == Some(true));
+    if !has_ai {
+        issues.push(Issue::new(Severity::Info, track_dir, "track has no ai folder"));
+    }
+
     // A folder next to ui/ with data or ai in it is a layout folder. Without the matching
     // ui/<name>/ui_track.json the game does not list it.
     const RESERVED: [&str; 6] = ["ui", "data", "ai", "skins", "sfx", "texture"];
-    for dir in subfolders(track_dir, &mut issues) {
+    for dir in root_dirs {
         let name = name_of(&dir);
         if RESERVED.iter().any(|r| r.eq_ignore_ascii_case(&name)) {
             continue;
@@ -578,6 +623,7 @@ mod tests {
         write(&cars.join("good").join("data").join("car.ini"), "[BASIC]\nTOTALMASS=1000\n");
         write(&cars.join("good").join("good.kn5"), "");
         write(&cars.join("good").join("skins").join("red").join("preview.jpg"), "");
+        write(&cars.join("good").join("skins").join("red").join("ui_skin.json"), "{}");
         // Broken car: no ui_car.json, car.ini without [BASIC], no kn5, skin without preview.
         write(&cars.join("bad").join("data").join("car.ini"), "[ENGINE]\nTYPE=V\n");
         fs::create_dir_all(cars.join("bad").join("skins").join("blue")).unwrap();
@@ -632,9 +678,10 @@ mod tests {
                 (Severity::Error, "data/car.ini has no [BASIC] section"),
                 (Severity::Error, "no car model (*.kn5)"),
                 (Severity::Info, "skin blue has no preview image"),
+                (Severity::Info, "skin blue has no ui_skin.json"),
             ],
         );
-        assert_eq!(summary(&issues), (2, 1, 1));
+        assert_eq!(summary(&issues), (2, 1, 2));
     }
 
     #[test]
@@ -655,20 +702,27 @@ mod tests {
                 (Severity::Error, "references missing model missing.kn5"),
                 (Severity::Warning, "track: ai/fast_lane.ai is missing"),
                 (Severity::Info, "layout folder gp has no ui/gp folder"),
+                (Severity::Info, "track has no ai folder"),
             ],
         );
-        assert_eq!(summary(&issues), (2, 1, 1));
+        assert_eq!(summary(&issues), (2, 1, 2));
 
         let no_ui = check_track(&root.0.join("content/tracks/noui"));
-        assert_issues(&no_ui, &[(Severity::Warning, "ui/ui_track.json is missing")]);
+        assert_issues(
+            &no_ui,
+            &[
+                (Severity::Warning, "ui/ui_track.json is missing"),
+                (Severity::Info, "track has no ai folder"),
+            ],
+        );
     }
 
     #[test]
     fn check_all_counts_every_folder() {
         let root = fixture("all");
         let issues = check_all(&root.0);
-        assert_eq!(summary(&issues), (4, 3, 2));
-        assert_eq!(issues.len(), 9);
+        assert_eq!(summary(&issues), (4, 3, 5));
+        assert_eq!(issues.len(), 12);
     }
 
     /// A temporary AC root that is not created yet, removed when dropped.
@@ -807,5 +861,88 @@ mod tests {
         assert_eq!(summary(&check_car(&absent)), (1, 0, 0));
         assert_eq!(summary(&check_track(&absent)), (1, 0, 0));
         assert_eq!(summary(&check_all(&absent)), (2, 0, 0));
+    }
+
+    #[test]
+    fn layout_ui_folder_without_ui_json_is_reported() {
+        let root = fresh_root("layout-ui-json");
+        let track = root.0.join("content/tracks/lay");
+        write(&track.join("ui").join("ui_track.json"), "{}");
+        write(&track.join("ui").join("gp").join("map.png"), "");
+        write(&track.join("data").join("surfaces.ini"), "");
+        write(&track.join("ai").join("fast_lane.ai"), "");
+        write(&track.join("lay.kn5"), "");
+        assert_issues(
+            &check_track(&track),
+            &[(Severity::Info, "ui/gp has no ui_track.json, so layout gp is not listed")],
+        );
+
+        // A layout folder that also has data is reported once, by the existing check.
+        let dup = root.0.join("content/tracks/dup");
+        write(&dup.join("ui").join("ui_track.json"), "{}");
+        write(&dup.join("ui").join("gp").join("map.png"), "");
+        write(&dup.join("data").join("surfaces.ini"), "");
+        write(&dup.join("ai").join("fast_lane.ai"), "");
+        write(&dup.join("dup.kn5"), "");
+        write(&dup.join("gp").join("data").join("surfaces.ini"), "");
+        write(&dup.join("gp").join("ai").join("fast_lane.ai"), "");
+        assert_issues(
+            &check_track(&dup),
+            &[(Severity::Info, "layout folder gp has no ui/gp/ui_track.json")],
+        );
+    }
+
+    #[test]
+    fn skin_without_ui_skin_json_is_reported() {
+        let root = fresh_root("skin-json");
+        let car = root.0.join("content/cars/skinned");
+        write(&car.join("ui").join("ui_car.json"), "{}");
+        write(&car.join("data").join("car.ini"), "[BASIC]\nTOTALMASS=1000\n");
+        write(&car.join("skinned.kn5"), "");
+        write(&car.join("skins").join("red").join("preview.jpg"), "");
+        write(&car.join("skins").join("red").join("ui_skin.json"), "{}");
+        write(&car.join("skins").join("blue").join("preview.png"), "");
+        assert_issues(&check_car(&car), &[(Severity::Info, "skin blue has no ui_skin.json")]);
+    }
+
+    #[test]
+    fn car_ini_with_empty_sections_is_warned() {
+        let root = fresh_root("empty-section");
+        let car = root.0.join("content/cars/hollow");
+        write(&car.join("ui").join("ui_car.json"), "{}");
+        write(&car.join("data").join("car.ini"), "[BASIC]\n[ENGINE]\nTYPE=V\n[GEARS]\nCOUNT=4\n[TYRES]\n");
+        write(&car.join("hollow.kn5"), "");
+        write(&car.join("skins").join("red").join("preview.jpg"), "");
+        write(&car.join("skins").join("red").join("ui_skin.json"), "{}");
+        assert_issues(
+            &check_car(&car),
+            &[
+                (Severity::Warning, "data/car.ini section [BASIC] is empty"),
+                (Severity::Warning, "data/car.ini section [TYRES] is empty"),
+            ],
+        );
+    }
+
+    #[test]
+    fn track_without_ai_folder_is_noted() {
+        let root = fresh_root("no-ai");
+        let track = root.0.join("content/tracks/silent");
+        write(&track.join("ui").join("ui_track.json"), "{}");
+        write(&track.join("data").join("surfaces.ini"), "");
+        write(&track.join("silent.kn5"), "");
+        assert_issues(
+            &check_track(&track),
+            &[
+                (Severity::Warning, "track: ai/fast_lane.ai is missing"),
+                (Severity::Info, "track has no ai folder"),
+            ],
+        );
+
+        // Layouts that carry their own ai folder are enough.
+        let lanes = root.0.join("content/tracks/lanes");
+        write(&lanes.join("ui").join("gp").join("ui_track.json"), "{}");
+        write(&lanes.join("gp").join("data").join("surfaces.ini"), "");
+        write(&lanes.join("gp").join("ai").join("fast_lane.ai"), "");
+        assert_issues(&check_track(&lanes), &[]);
     }
 }

@@ -6,8 +6,11 @@ use crate::ui::{theme, widgets, Notice};
 use acxs_manager::content::{filter_tracks, scan_tracks, TrackEntry};
 use acxs_manager::thumbnails;
 use acxs_manager::track_compare::{compare_tracks, surface_changes, TrackDiff};
-use acxs_manager::track_surfaces::{read_surfaces, summarize, Surface};
+use acxs_manager::track_surfaces::{
+    read_surfaces, set_friction, summarize, Surface, FRICTION_MAX, FRICTION_MIN,
+};
 use eframe::egui::{self, RichText};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -38,6 +41,10 @@ pub fn tool() -> Box<dyn Tool> {
         compare_seq: 0,
         compare: Load::Idle,
         thumb_busy: false,
+        batch_busy: false,
+        friction_owner: None,
+        friction_draft: HashMap::new(),
+        friction_busy: false,
     })
 }
 
@@ -62,6 +69,10 @@ enum Msg {
     Compare { seq: u64, result: Result<Comparison, String> },
     /// A thumbnail was made or found in the cache: its file path and size in bytes.
     Thumbnail { result: Result<(PathBuf, usize), String> },
+    /// A batch thumbnail run finished: how many tracks have a thumbnail, and one line per failure.
+    Batch { made: usize, failures: Vec<String> },
+    /// A friction save finished: the surface name and the saved value or the error.
+    Friction { surface: String, result: Result<f64, String> },
 }
 
 /// What the surfaces read was requested for.
@@ -94,6 +105,14 @@ struct TrackInfo {
     compare: Load<Comparison>,
     /// A thumbnail job is running.
     thumb_busy: bool,
+    /// The all-tracks thumbnail job is running.
+    batch_busy: bool,
+    /// The surfaces read the friction drafts belong to. Drafts reset when it changes.
+    friction_owner: Option<SurfaceKey>,
+    /// Friction values being edited in the surfaces table, by surface name.
+    friction_draft: HashMap<String, f64>,
+    /// A friction save is running.
+    friction_busy: bool,
 }
 
 fn find<'a>(tracks: &'a [TrackEntry], id: Option<&str>) -> Option<&'a TrackEntry> {
@@ -132,6 +151,36 @@ impl TrackInfo {
     fn poll(&mut self, notices: &mut Vec<Notice>) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
+                Msg::Batch { made, failures } => {
+                    self.batch_busy = false;
+                    let text = if failures.is_empty() {
+                        format!("{made} track thumbnails ready ({THUMB_SIZE}x{THUMB_SIZE})")
+                    } else {
+                        format!(
+                            "{made} track thumbnails ready, {} failed. First: {}",
+                            failures.len(),
+                            failures[0]
+                        )
+                    };
+                    notices.push(Notice { text, ok: failures.is_empty() });
+                }
+                Msg::Friction { surface, result } => {
+                    self.friction_busy = false;
+                    match result {
+                        Ok(value) => {
+                            notices.push(Notice {
+                                text: format!("Saved FRICTION {value:.2} on {surface}"),
+                                ok: true,
+                            });
+                            // Re-read the file so the table shows what was written.
+                            self.surfaces_key = None;
+                        }
+                        Err(e) => notices.push(Notice {
+                            text: format!("Could not save friction on {surface}: {e}"),
+                            ok: false,
+                        }),
+                    }
+                }
                 Msg::Thumbnail { result } => {
                     self.thumb_busy = false;
                     match result {
@@ -347,7 +396,19 @@ impl TrackInfo {
             ui.label(RichText::new("Select a track to see its details.").color(theme::MUTED));
             return;
         };
+        let data_dir = match &self.layout {
+            Some(name) => track.path.join(name),
+            None => track.path.clone(),
+        }
+        .join("data");
+        if self.friction_owner != self.surfaces_key {
+            self.friction_owner = self.surfaces_key.clone();
+            self.friction_draft.clear();
+        }
+        let busy = self.friction_busy || self.thumb_busy || self.batch_busy;
         let surfaces = &self.surfaces;
+        let drafts = &mut self.friction_draft;
+        let mut save: Option<(String, f64)> = None;
         let mut layout = self.layout.clone();
 
         theme::card().show(ui, |ui| {
@@ -407,20 +468,34 @@ impl TrackInfo {
                 } else {
                     egui::Grid::new("track_info_surfaces")
                         .striped(true)
-                        .num_columns(4)
+                        .num_columns(5)
                         .show(ui, |ui| {
                             ui.label(RichText::new("Name").color(theme::MUTED));
                             ui.label(RichText::new("Friction").color(theme::MUTED));
+                            ui.label("");
                             ui.label(RichText::new("Pit").color(theme::MUTED));
                             ui.label(RichText::new("Valid track").color(theme::MUTED));
                             ui.end_row();
                             for s in list {
                                 ui.label(s.name.as_str());
-                                let friction = s
-                                    .friction
-                                    .map(|f| f.to_string())
-                                    .unwrap_or_else(|| "-".to_string());
-                                ui.label(friction);
+                                let mut value = *drafts
+                                    .entry(s.name.clone())
+                                    .or_insert(s.friction.unwrap_or(0.0));
+                                ui.add(
+                                    egui::DragValue::new(&mut value)
+                                        .range(FRICTION_MIN..=FRICTION_MAX)
+                                        .speed(0.01)
+                                        .fixed_decimals(2),
+                                );
+                                drafts.insert(s.name.clone(), value);
+                                let changed = s.friction.is_none_or(|f| (f - value).abs() > 1e-9);
+                                let save_btn = ui.add_enabled(
+                                    !busy && changed,
+                                    widgets::primary_button("Save"),
+                                );
+                                if save_btn.clicked() {
+                                    save = Some((s.name.clone(), value));
+                                }
                                 ui.label(yes_no(s.is_pit));
                                 ui.label(yes_no(s.is_valid_track));
                                 ui.end_row();
@@ -430,6 +505,15 @@ impl TrackInfo {
             }
         }
 
+        if let Some((surface, value)) = save {
+            self.friction_busy = true;
+            self.spawn(ui.ctx(), move || Msg::Friction {
+                result: set_friction(&data_dir, &surface, value)
+                    .map(|()| value)
+                    .map_err(|e| e.to_string()),
+                surface,
+            });
+        }
         if layout != self.layout {
             self.layout = layout;
         }
@@ -453,7 +537,8 @@ impl TrackInfo {
         widgets::section_title(ui, "Thumbnail");
         theme::card().show(ui, |ui| {
             ui.horizontal(|ui| {
-                let make = ui.add_enabled(!self.thumb_busy, widgets::primary_button("Make thumbnail"));
+                let busy = self.thumb_busy || self.batch_busy;
+                let make = ui.add_enabled(!busy, widgets::primary_button("Make thumbnail"));
                 if make.clicked() {
                     self.thumb_busy = true;
                     let root = root.to_path_buf();
@@ -475,6 +560,36 @@ impl TrackInfo {
             });
             ui.add_space(8.0);
             widgets::key_value(ui, "Cached thumbnail", &shown);
+        });
+    }
+
+    /// Button that makes a thumbnail for every track with a model, on a background thread.
+    fn batch_thumbnail_row(&mut self, ui: &mut egui::Ui, root: &Path) {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            let enabled = !(self.thumb_busy || self.batch_busy);
+            if ui
+                .add_enabled(enabled, widgets::primary_button("Make all track thumbnails"))
+                .clicked()
+            {
+                self.batch_busy = true;
+                let root = root.to_path_buf();
+                self.spawn(ui.ctx(), move || {
+                    let mut made = 0;
+                    let mut failures = Vec::new();
+                    for (id, result) in thumbnails::batch_track_thumbnails(&root, THUMB_SIZE) {
+                        match result {
+                            Ok(_) => made += 1,
+                            Err(e) => failures.push(format!("{id}: {e}")),
+                        }
+                    }
+                    Msg::Batch { made, failures }
+                });
+            }
+            if self.batch_busy {
+                ui.add(egui::Spinner::new());
+                ui.label(RichText::new("Working...").color(theme::MUTED));
+            }
         });
     }
 
@@ -620,6 +735,7 @@ impl Tool for TrackInfo {
                 self.details_section(ui);
                 if let Some(root) = root {
                     self.thumbnail_section(ui, root);
+                    self.batch_thumbnail_row(ui, root);
                 }
                 ui.add_space(12.0);
                 self.compare_section(ui);

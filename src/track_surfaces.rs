@@ -73,6 +73,56 @@ pub fn find_surface<'a>(surfaces: &'a [Surface], name: &str) -> Option<&'a Surfa
     surfaces.iter().find(|s| s.name.eq_ignore_ascii_case(name))
 }
 
+/// Lowest `FRICTION` value accepted by [`set_friction`].
+pub const FRICTION_MIN: f64 = 0.0;
+/// Highest `FRICTION` value accepted by [`set_friction`].
+pub const FRICTION_MAX: f64 = 2.0;
+
+/// Sets `FRICTION` on the surface named `surface_name` in `data_dir/surfaces.ini`.
+///
+/// The name matches ASCII case-insensitively, as [`find_surface`] does. The file is
+/// saved through [`Ini::save_with_backup`], so the previous version is kept. Other
+/// surfaces and keys are left as they were.
+///
+/// Fails with `NotFound` when the file is missing or no surface has that name, and with
+/// `InvalidInput` when `friction` is not in `FRICTION_MIN..=FRICTION_MAX` (NaN included).
+/// Nothing is written on failure.
+pub fn set_friction(data_dir: &Path, surface_name: &str, friction: f64) -> io::Result<()> {
+    if !(FRICTION_MIN..=FRICTION_MAX).contains(&friction) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("friction {friction} is outside {FRICTION_MIN}..={FRICTION_MAX}"),
+        ));
+    }
+    let path = data_dir.join("surfaces.ini");
+    let mut ini = Ini::load(&path)?;
+    let Some(section) = find_surface_section(&ini, surface_name) else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no surface named {:?} in {}", surface_name.trim(), path.display()),
+        ));
+    };
+    ini.set(&section, "FRICTION", friction);
+    ini.save_with_backup(&path)
+}
+
+/// Section name (`SURFACE_<n>`) of the first surface whose `KEY` matches `name`.
+/// Scans the same numbered sections, in the same order, as [`read_surfaces`].
+fn find_surface_section(ini: &Ini, name: &str) -> Option<String> {
+    let name = name.trim();
+    let section_names: Vec<String> = ini.section_names().iter().map(|s| s.to_ascii_lowercase()).collect();
+    for index in 0u32.. {
+        let section = format!("SURFACE_{index}");
+        if !section_names.contains(&section.to_ascii_lowercase()) {
+            return None;
+        }
+        if non_empty(ini.get(&section, "KEY")).is_some_and(|key| key.eq_ignore_ascii_case(name)) {
+            return Some(section);
+        }
+    }
+    None
+}
+
 fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|v| !v.is_empty())
 }
@@ -189,5 +239,83 @@ mod tests {
         assert_eq!(find_surface(&surfaces, "pit_lane").map(|s| s.name.as_str()), Some("PIT_LANE"));
         assert_eq!(find_surface(&surfaces, "GRASS_SIDE").map(|s| s.name.as_str()), Some("grass_side"));
         assert!(find_surface(&surfaces, "kerb").is_none());
+    }
+
+    fn backup_count(dir: &Path) -> usize {
+        fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("surfaces.ini.acxs-backup-"))
+            .count()
+    }
+
+    #[test]
+    fn set_friction_edits_one_surface_and_keeps_a_backup() {
+        let dir = TempDir::new("set_ok");
+        fs::write(dir.0.join("surfaces.ini"), SAMPLE).unwrap();
+
+        set_friction(&dir.0, "grass_side", 0.6).unwrap();
+
+        let ini = Ini::load(&dir.0.join("surfaces.ini")).unwrap();
+        assert_eq!(ini.get_f64("SURFACE_1", "FRICTION"), Some(0.6));
+        // The other surface keeps its value and its keys.
+        assert_eq!(ini.get_f64("SURFACE_0", "FRICTION"), Some(0.85));
+        assert_eq!(ini.get("SURFACE_0", "WAV"), Some("pit.wav"));
+        assert_eq!(backup_count(&dir.0), 1);
+
+        // The old file is kept as the backup, unchanged.
+        let backup = fs::read_dir(&dir.0)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.file_name().unwrap().to_string_lossy().starts_with("surfaces.ini.acxs-backup-"))
+            .unwrap();
+        assert_eq!(fs::read_to_string(backup).unwrap(), SAMPLE);
+    }
+
+    #[test]
+    fn set_friction_matches_name_ignoring_case_and_accepts_bounds() {
+        let dir = TempDir::new("set_bounds");
+        fs::write(dir.0.join("surfaces.ini"), SAMPLE).unwrap();
+
+        set_friction(&dir.0, "pit_lane", 0.0).unwrap();
+        let ini = Ini::load(&dir.0.join("surfaces.ini")).unwrap();
+        assert_eq!(ini.get_f64("SURFACE_0", "FRICTION"), Some(0.0));
+
+        set_friction(&dir.0, "PIT_LANE", FRICTION_MAX).unwrap();
+        let ini = Ini::load(&dir.0.join("surfaces.ini")).unwrap();
+        assert_eq!(ini.get_f64("SURFACE_0", "FRICTION"), Some(2.0));
+    }
+
+    #[test]
+    fn set_friction_refuses_unknown_surface_without_writing() {
+        let dir = TempDir::new("set_unknown");
+        fs::write(dir.0.join("surfaces.ini"), SAMPLE).unwrap();
+
+        let err = set_friction(&dir.0, "kerb", 1.0).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert_eq!(fs::read_to_string(dir.0.join("surfaces.ini")).unwrap(), SAMPLE);
+        assert_eq!(backup_count(&dir.0), 0);
+    }
+
+    #[test]
+    fn set_friction_refuses_out_of_range_values_without_writing() {
+        let dir = TempDir::new("set_range");
+        fs::write(dir.0.join("surfaces.ini"), SAMPLE).unwrap();
+
+        for bad in [-0.01, 2.01, f64::NAN, f64::INFINITY] {
+            let err = set_friction(&dir.0, "grass_side", bad).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "value {bad}");
+        }
+        assert_eq!(fs::read_to_string(dir.0.join("surfaces.ini")).unwrap(), SAMPLE);
+        assert_eq!(backup_count(&dir.0), 0);
+    }
+
+    #[test]
+    fn set_friction_fails_when_file_is_missing() {
+        let dir = TempDir::new("set_missing");
+        let err = set_friction(&dir.0, "grass_side", 1.0).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(!dir.0.join("surfaces.ini").exists());
     }
 }

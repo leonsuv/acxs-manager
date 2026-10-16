@@ -1,6 +1,6 @@
 //! Replay Viewer tool page: opens an `.acreplay` file, plays back its telemetry,
-//! shows its summary and exports the lap table as CSV. Parsing and writing run on
-//! background threads.
+//! shows its summary and exports the lap table and the telemetry samples as CSV.
+//! Parsing and writing run on background threads.
 
 use super::{Tool, ToolContext};
 use crate::ui::{theme, widgets, Notice};
@@ -9,7 +9,7 @@ use acxs_manager::replay::{
 };
 use acxs_manager::replay_player::Player;
 use acxs_manager::telemetry::LapInfo;
-use acxs_manager::telemetry_csv::{laps_to_csv, write_csv};
+use acxs_manager::telemetry_csv::{laps_to_csv, replay_samples_to_csv, write_csv};
 use eframe::egui::{self, RichText};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -30,6 +30,8 @@ enum Msg {
         result: Result<Box<ReplaySamples>, String>,
     },
     Exported(Result<PathBuf, String>),
+    /// Result of the samples export: the path written and the number of data rows.
+    SamplesExported(Result<(PathBuf, usize), String>),
 }
 
 /// A replay shown in the viewer: its summary plus the playback model over its samples.
@@ -78,17 +80,36 @@ impl ReplayViewer {
         let tx = self.tx.clone();
         thread::spawn(move || {
             let csv = laps_to_csv(&laps);
-            let result = match write_csv(&path, &csv) {
-                Ok(()) => Ok(path),
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(format!(
-                    "{} already exists. Choose another file name.",
-                    path.display()
-                )),
-                Err(e) => Err(format!("Could not write {}: {e}", path.display())),
-            };
+            let result = write_csv(&path, &csv)
+                .map(|()| path.clone())
+                .map_err(|e| write_failure(&path, &e));
             let _ = tx.send(Msg::Exported(result));
             ctx.request_repaint();
         });
+    }
+
+    /// Write the telemetry samples of the loaded replay to `path` on a background thread.
+    fn start_samples_export(&mut self, path: PathBuf, samples: Vec<Sample>, ctx: egui::Context) {
+        self.busy = true;
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let rows = samples.len();
+            let csv = replay_samples_to_csv(&samples);
+            let result = write_csv(&path, &csv)
+                .map(|()| (path.clone(), rows))
+                .map_err(|e| write_failure(&path, &e));
+            let _ = tx.send(Msg::SamplesExported(result));
+            ctx.request_repaint();
+        });
+    }
+}
+
+/// User-facing message for a failed write to `path`.
+fn write_failure(path: &Path, e: &io::Error) -> String {
+    if e.kind() == io::ErrorKind::AlreadyExists {
+        format!("{} already exists. Choose another file name.", path.display())
+    } else {
+        format!("Could not write {}: {e}", path.display())
     }
 }
 
@@ -132,6 +153,11 @@ impl Tool for ReplayViewer {
                     ok: true,
                 }),
                 Msg::Exported(Err(e)) => notices.push(Notice { text: e, ok: false }),
+                Msg::SamplesExported(Ok((path, rows))) => notices.push(Notice {
+                    text: format!("Wrote {rows} sample rows to {}", path.display()),
+                    ok: true,
+                }),
+                Msg::SamplesExported(Err(e)) => notices.push(Notice { text: e, ok: false }),
             }
         }
 
@@ -175,6 +201,23 @@ impl Tool for ReplayViewer {
                     .save_file();
                 if let Some(path) = picked {
                     self.start_export(path, laps, ui.ctx().clone());
+                }
+            }
+
+            let export_samples =
+                ui.add_enabled(can_export, egui::Button::new("Export samples CSV"));
+            if export_samples.clicked() {
+                let picked = rfd::FileDialog::new()
+                    .add_filter("CSV", &["csv"])
+                    .set_file_name("samples.csv")
+                    .save_file();
+                if let Some(path) = picked {
+                    let samples = self
+                        .loaded
+                        .as_ref()
+                        .map(|loaded| loaded.player.samples().to_vec())
+                        .unwrap_or_default();
+                    self.start_samples_export(path, samples, ui.ctx().clone());
                 }
             }
 
@@ -350,8 +393,9 @@ fn summary(ui: &mut egui::Ui, path: &Path, info: &ReplayInfo) {
         ui.add_space(6.0);
         ui.label(
             RichText::new(
-                "Export writes this lap table only (first car). The replay's telemetry \
-                 samples are not exported, and car_id is 0 because replays carry no numeric car ID.",
+                "Export laps CSV writes this lap table, and Export samples CSV writes one row \
+                 per telemetry sample. Both cover the first car only. car_id is 0 because \
+                 replays carry no numeric car ID.",
             )
             .small()
             .color(theme::MUTED),

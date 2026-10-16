@@ -77,6 +77,7 @@ pub mod timing;
 pub mod track_compare;
 pub mod track_map;
 pub mod track_surfaces;
+pub mod tuning_profiles;
 pub mod udp_client;
 pub mod update;
 pub mod util;

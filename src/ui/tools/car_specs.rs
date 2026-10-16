@@ -13,11 +13,15 @@ use acxs_manager::cardata::{self, CarSpecs};
 use acxs_manager::content::{self, CarEntry};
 use acxs_manager::shift_lights::{self, ShiftProfile};
 use acxs_manager::thumbnails;
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, Align2, Color32, FontId, RichText};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 const ROW_HEIGHT: f32 = 56.0;
+/// Edge length in points of a thumbnail in the car lists.
+const LIST_THUMB: f32 = 40.0;
+/// Edge length in points of the thumbnail shown in the car details.
+const DETAIL_THUMB: f32 = 160.0;
 /// Edge length in pixels of the square thumbnail made by the "Make thumbnail" button.
 const THUMB_SIZE: u32 = 512;
 /// Edge length in pixels of the square badge made by the "Make badge" button.
@@ -151,19 +155,23 @@ impl CarSpecsPage {
     }
 
     /// Apply finished jobs. Results for a car that is no longer selected are dropped.
-    fn poll(&mut self, notices: &mut Vec<Notice>) {
+    fn poll(&mut self, egui_ctx: &egui::Context, notices: &mut Vec<Notice>) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Msg::Thumbnail { result } => {
                     self.thumb_busy = false;
                     match result {
-                        Ok((path, size)) => notices.push(Notice {
+                        Ok((path, size)) => {
+                            // The file was overwritten, so drop the decoded copy egui kept.
+                            egui_ctx.forget_image(&thumb_uri(&path));
+                            notices.push(Notice {
                             text: format!(
                                 "Thumbnail saved to {} ({THUMB_SIZE}x{THUMB_SIZE}, {size} bytes)",
                                 path.display()
                             ),
                             ok: true,
-                        }),
+                        });
+                        }
                         Err(e) => notices.push(Notice {
                             text: format!("Thumbnail failed: {e}"),
                             ok: false,
@@ -241,9 +249,10 @@ impl CarSpecsPage {
     }
 
     /// Thumbnail button, the cached thumbnail path and a button to open its folder.
-    fn thumbnail_section(&mut self, ui: &mut egui::Ui, id: &str, notices: &mut Vec<Notice>) {
+    fn thumbnail_section(&mut self, ui: &mut egui::Ui, car: &CarEntry, notices: &mut Vec<Notice>) {
         let Some(root) = self.root.clone() else { return };
         let badge_root = root.clone();
+        let id = car.id.as_str();
         let cache = thumbnails::cache_path(&root, id);
         let thumb_file = cache.join(format!("{THUMB_SIZE}.png"));
         let shown = if thumb_file.is_file() {
@@ -255,6 +264,8 @@ impl CarSpecsPage {
         ui.add_space(16.0);
         widgets::section_title(ui, "Thumbnail");
         theme::card().show(ui, |ui| {
+            car_thumb(ui, Some(root.as_path()), car, DETAIL_THUMB);
+            ui.add_space(8.0);
             ui.horizontal(|ui| {
                 let make = ui.add_enabled(!self.thumb_busy, widgets::primary_button("Make thumbnail"));
                 if make.clicked() {
@@ -324,7 +335,7 @@ impl CarSpecsPage {
             return None;
         };
         car_header(ui, &car);
-        self.thumbnail_section(ui, &selected, notices);
+        self.thumbnail_section(ui, &car, notices);
 
         let loaded = self.loaded.as_ref().filter(|l| l.id == selected);
         ui.add_space(16.0);
@@ -373,6 +384,7 @@ impl CarSpecsPage {
         widgets::section_title(ui, "Compare with");
         let picked = car_list(
             ui,
+            self.root.as_deref(),
             &self.cars,
             &mut self.compare_query,
             self.compare_id.as_deref(),
@@ -431,8 +443,9 @@ impl Tool for CarSpecsPage {
             return;
         };
         let egui_ctx = ui.ctx().clone();
+        install_loaders_once(&egui_ctx);
 
-        self.poll(notices);
+        self.poll(&egui_ctx, notices);
         if self.root.as_deref() != Some(root) {
             self.root = Some(root.to_path_buf());
             self.cars.clear();
@@ -466,6 +479,7 @@ impl Tool for CarSpecsPage {
                 left.add_space(6.0);
                 picked_car = car_list(
                     left,
+                    self.root.as_deref(),
                     &self.cars,
                     &mut self.car_query,
                     self.selected.as_deref(),
@@ -502,6 +516,7 @@ impl Tool for CarSpecsPage {
 /// Searchable list of cars. Returns the id of the car clicked this frame.
 fn car_list(
     ui: &mut egui::Ui,
+    root: Option<&Path>,
     cars: &[CarEntry],
     query: &mut String,
     selected: Option<&str>,
@@ -529,7 +544,7 @@ fn car_list(
     }
     scroll.show_rows(ui, row_height, filtered.len(), |ui, range| {
         for car in &filtered[range] {
-            if widgets::list_row(ui, selected == Some(car.id.as_str()), |ui| car_row(ui, car)) {
+            if widgets::list_row(ui, selected == Some(car.id.as_str()), |ui| car_row(ui, root, car)) {
                 picked = Some(car.id.clone());
             }
         }
@@ -537,19 +552,77 @@ fn car_list(
     picked
 }
 
-fn car_row(ui: &mut egui::Ui, car: &CarEntry) {
+fn car_row(ui: &mut egui::Ui, root: Option<&Path>, car: &CarEntry) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(car.name.as_str()).strong());
-        if !car.car_class.is_empty() {
-            widgets::pill(ui, &car.car_class, theme::INFO);
-        }
+        car_thumb(ui, root, car, LIST_THUMB);
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(car.name.as_str()).strong());
+                if !car.car_class.is_empty() {
+                    widgets::pill(ui, &car.car_class, theme::INFO);
+                }
+            });
+            let subtitle = [car.brand.as_str(), car.year.as_str()]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join("  ·  ");
+            ui.label(RichText::new(subtitle).small().color(theme::MUTED));
+        });
     });
-    let subtitle = [car.brand.as_str(), car.year.as_str()]
-        .into_iter()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("  ·  ");
-    ui.label(RichText::new(subtitle).small().color(theme::MUTED));
+}
+
+/// Loads egui's image loaders the first time the page draws. The flag lives in egui memory.
+fn install_loaders_once(egui_ctx: &egui::Context) {
+    let flag = egui::Id::unique("car_specs_image_loaders");
+    if !egui_ctx.data(|d| d.get_temp::<bool>(flag).unwrap_or(false)) {
+        egui_extras::install_image_loaders(egui_ctx);
+        egui_ctx.data_mut(|d| d.insert_temp(flag, true));
+    }
+}
+
+/// The `file://` URI egui uses to load a thumbnail file.
+fn thumb_uri(path: &Path) -> String {
+    format!("file://{}", path.display())
+}
+
+/// The car's cached thumbnail, drawn `size` points square. Without one, a grey square
+/// with the brand initials.
+fn car_thumb(ui: &mut egui::Ui, root: Option<&Path>, car: &CarEntry, size: f32) {
+    let thumb = root.map(|root| thumbnails::cache_path(root, &car.id).join(format!("{THUMB_SIZE}.png")));
+    let side = egui::vec2(size, size);
+    match thumb.filter(|path| path.is_file()) {
+        Some(path) => {
+            ui.add(egui::Image::from_uri(thumb_uri(&path)).fit_to_exact_size(side));
+        }
+        None => {
+            let (rect, _) = ui.allocate_exact_size(side, egui::Sense::hover());
+            let painter = ui.painter();
+            painter.rect_filled(rect, 6.0, theme::CARD_HOVER);
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                brand_initials(car),
+                FontId::proportional(size * 0.36),
+                theme::MUTED,
+            );
+        }
+    }
+}
+
+/// Up to two initials from the brand, or from the name when there is no brand.
+fn brand_initials(car: &CarEntry) -> String {
+    let source = if car.brand.trim().is_empty() { &car.name } else { &car.brand };
+    let words: Vec<&str> = source
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let out: String = match words.as_slice() {
+        [] => "?".to_string(),
+        [first, second, ..] => [first, second].iter().filter_map(|w| w.chars().next()).collect(),
+        [only] => only.chars().take(2).collect(),
+    };
+    out.to_uppercase()
 }
 
 fn car_header(ui: &mut egui::Ui, car: &CarEntry) {

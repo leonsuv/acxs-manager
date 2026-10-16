@@ -2,7 +2,8 @@
 //!
 //! The bundle holds three entries and nothing else:
 //! - `summary.txt`: app version, OS family, whether the AC root looks valid, graphics
-//!   proxy DLL names and sizes, lights-patch state and content counts.
+//!   proxy DLL names and sizes with the overall graphics status and any conflicts,
+//!   the lights-patch version and content counts.
 //! - `ac-log-tail.txt`: the last [`LOG_TAIL_BYTES`] of the game log, when it can be found.
 //! - `settings.json`: the app's own settings file with every path replaced by a placeholder.
 //!
@@ -127,7 +128,7 @@ fn build_bundle(
     summary.push_str(&format!("os family: {}\n", std::env::consts::FAMILY));
     summary.push_str(&format!("ac root: {}\n", ac_root_status(inputs.ac_root)));
     summary.push_str(&graphics_section(inputs.ac_root));
-    summary.push_str(&format!("lights patch: {}\n", lights_patch_status(inputs.ac_root)));
+    summary.push_str(&lights_patch_status(inputs.ac_root));
     summary.push_str(&content_section(inputs.ac_root));
 
     let mut entries: Vec<(&str, Vec<u8>)> = Vec::new();
@@ -188,31 +189,66 @@ fn ac_root_status(ac_root: &Path) -> &'static str {
     }
 }
 
+/// Graphics proxy DLLs, the overall graphics status, and each conflict found between them.
+/// Conflict text names files by full path, so the AC root prefix is replaced first.
 fn graphics_section(ac_root: &Path) -> String {
     match graphics_check::scan(ac_root) {
-        Ok(files) if files.is_empty() => "graphics proxy dlls: none\n".to_string(),
         Ok(files) => {
-            let mut out = String::from("graphics proxy dlls:\n");
-            for file in files {
-                let role = match file.role {
-                    graphics_check::Role::LightsPatch => "lights patch",
-                    graphics_check::Role::ReShade => "reshade",
-                    graphics_check::Role::RemixRuntime => "remix runtime",
-                    graphics_check::Role::Other => "other",
-                };
-                out.push_str(&format!("  {} ({} bytes, {role})\n", file.name, file.size));
+            let conflicts = graphics_check::conflicts(&files);
+            let mut out = String::new();
+            if files.is_empty() {
+                out.push_str("graphics proxy dlls: none\n");
+            } else {
+                out.push_str("graphics proxy dlls:\n");
+                for file in &files {
+                    let role = match file.role {
+                        graphics_check::Role::LightsPatch => "lights patch",
+                        graphics_check::Role::ReShade => "reshade",
+                        graphics_check::Role::RemixRuntime => "remix runtime",
+                        graphics_check::Role::Other => "other",
+                    };
+                    out.push_str(&format!("  {} ({} bytes, {role})\n", file.name, file.size));
+                }
+            }
+            out.push_str(&format!(
+                "graphics status: {}\n",
+                graphics_status(files.len(), conflicts.len())
+            ));
+            for conflict in &conflicts {
+                let text = scrub_root(conflict, ac_root);
+                out.push_str(&format!("graphics conflict: {text}\n"));
             }
             out
         }
-        Err(e) => format!("graphics proxy dlls: could not scan: {e}\n"),
+        Err(e) => format!("graphics status: could not scan: {e}\n"),
     }
 }
 
+fn graphics_status(proxies: usize, conflicts: usize) -> String {
+    if proxies == 0 {
+        "no proxy dlls found, no conflicts".to_string()
+    } else if conflicts == 0 {
+        format!("{proxies} proxy dll(s), no conflicts")
+    } else {
+        format!("{proxies} proxy dll(s), {conflicts} conflict(s)")
+    }
+}
+
+/// Replaces the AC root prefix in `text` with a placeholder, so no full path is written out.
+fn scrub_root(text: &str, ac_root: &Path) -> String {
+    let root = ac_root.display().to_string();
+    if root.is_empty() {
+        return text.to_string();
+    }
+    text.replace(&root, AC_ROOT_PLACEHOLDER)
+}
+
+/// The lighting configuration version of the installed lights patch, one summary line.
 fn lights_patch_status(ac_root: &Path) -> String {
     match csp::installed_version(ac_root) {
-        Ok(Some(version)) => format!("installed ({version})"),
-        Ok(None) => "not installed".to_string(),
-        Err(e) => format!("could not check: {e}"),
+        Ok(Some(version)) => format!("lights patch version: {version}\n"),
+        Ok(None) => "lights patch version: not installed\n".to_string(),
+        Err(e) => format!("lights patch version: could not check: {e}\n"),
     }
 }
 
@@ -496,5 +532,44 @@ mod tests {
         let accented = "ééééééé\nend";
         let tail = tail_text(accented, 6);
         assert!(tail.ends_with("end"));
+    }
+
+    #[test]
+    fn summary_lists_each_item_for_fake_root() {
+        let dir = TempDir::new("summary_items");
+        let root = fake_ac_root(dir.path());
+        let settings_file = dir.path().join("missing_settings.json");
+        let out_dir = dir.path().join("out");
+        let inputs = Inputs {
+            ac_root: &root,
+            app_version: "4.5.6-test",
+            settings_file: &settings_file,
+            log_file: None,
+        };
+        let report = build_bundle(&inputs, &out_dir, Local::now()).unwrap();
+
+        let mut archive = ZipArchive::new(File::open(&report.path).unwrap()).unwrap();
+        let mut entry = archive.by_name("summary.txt").unwrap();
+        let mut summary = String::new();
+        io::Read::read_to_string(&mut entry, &mut summary).unwrap();
+
+        // fake_ac_root holds dwrite.dll (lights patch, unrecognized version), d3d11.dll
+        // (a proxy with no owner, so one conflict), one car and one track.
+        let items = [
+            "app version: 4.5.6-test",
+            "os family: ",
+            "ac root: found (acs.exe present)",
+            "graphics proxy dlls:\n",
+            "  dwrite.dll (",
+            "  d3d11.dll (",
+            "graphics status: 2 proxy dll(s), 1 conflict(s)\n",
+            "graphics conflict: <AC_ROOT>",
+            "lights patch version: unrecognized\n",
+            "content: 1 car(s), 1 track(s)\n",
+        ];
+        for item in items {
+            assert!(summary.contains(item), "summary is missing {item:?}:\n{summary}");
+        }
+        assert!(!summary.contains(&root.display().to_string()));
     }
 }
