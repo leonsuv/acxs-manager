@@ -709,3 +709,23 @@ Not determined:
 - What the `csp_` functions do. The implementations live in the module that gets loaded, which is not part of these DLLs.
 - The decoded Steam module name. The decoding routine was located but its output was not computed.
 - Whether the integrity value is a fixed checksum or depends on the caller.
+
+## 12. Plugin loading path (from the saved Ghidra project)
+
+Commands, run against the saved project (no re-analysis, about 4 seconds each):
+
+```
+analyzeHeadless proj lightsB -process dwrite.dll -noanalysis -scriptPath scripts -postScript DumpLoader.java <out> 2 18093e090
+```
+
+Result for the 0.3.0 build:
+
+- The function at 18093e090 builds the plugin path from two configuration lookups (a helper at 1802ea5e0 with the arguments `CUSTOM_RAYCASTER` and a key):
+  - section `CUSTOM_RAYCASTER`, key `MODULE`: the path of the plugin module to load.
+  - section `CUSTOM_RAYCASTER`, key `CHECKSUM` (the 8-byte constant `0x4d55534b43454843` decodes to `CHECKSUM`): the expected integrity value. The loader checks the module against it before loading it.
+- Only when the lookup succeeds does it call the loader at 1815c4bd0, which calls `LoadLibraryW` on the path and resolves `csp_Initialize_v1`, `csp_GetLastError_v1` and `csp_Raycast_v1`.
+- The strings `CUSTOM_RAYCASTER`, `MODULE` and `CHECKSUM` are present in the DLL (checked with `strings`).
+
+What this means for an alternative: the rendering-side hook is a separate plugin module that the DLL loads by path after a checksum check. Replacing that module means writing a new plugin DLL. Reproducing the `csp_` function behaviour is still open, because the implementations live in the module.
+
+Not determined: the value format of `CHECKSUM` (the helper that compares it was not decoded), and what the plugin module does internally.
