@@ -11,9 +11,11 @@ use crate::csp::{self, LightsPatch, UNRECOGNIZED};
 use acxs_manager::dashboard_stats::{self, ContentStats, CountEntry};
 use acxs_manager::skins;
 use acxs_manager::update::{self, Release, Version};
+use acxs_manager::{crash_report, settings};
 use eframe::egui::{self, RichText};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Row height for `show_rows` (without item spacing). Matches the two-line list rows.
 const ROW_HEIGHT: f32 = 60.0;
@@ -101,6 +103,9 @@ pub fn home(app: &mut App, ui: &mut egui::Ui) {
 
         ui.add_space(16.0);
         update_card(app, ui);
+
+        ui.add_space(16.0);
+        crash_card(app, ui);
 
         ui.add_space(16.0);
         ui.horizontal(|ui| {
@@ -435,6 +440,55 @@ fn update_card(app: &mut App, ui: &mut egui::Ui) {
     });
 
     ui.ctx().data_mut(|data| data.insert_temp(id, state));
+}
+
+const CRASH_COUNT_ID: &str = "home_crash_count";
+/// How long the count of waiting crash reports is reused before the folder is read again.
+const CRASH_COUNT_TTL: Duration = Duration::from_secs(5);
+
+/// Opt-in crash report sending, and how many stored reports are waiting.
+fn crash_card(app: &mut App, ui: &mut egui::Ui) {
+    let id = egui::Id::unique(CRASH_COUNT_ID);
+    let cached: Option<(Instant, usize)> = ui.ctx().data_mut(|data| data.get_temp(id));
+    let waiting = match cached {
+        Some((at, count)) if at.elapsed() < CRASH_COUNT_TTL => count,
+        _ => {
+            let settings_file = settings::settings_path();
+            let dir = crash_report::pending_dir(settings_file.parent().unwrap_or(Path::new(".")));
+            let count = crash_report::load_pending(&dir).len();
+            ui.ctx().data_mut(|data| data.insert_temp(id, (Instant::now(), count)));
+            count
+        }
+    };
+
+    theme::card().show(ui, |ui| {
+        widgets::section_title(ui, "Crash reports");
+        let mut enabled = app.settings.crash_reports;
+        if ui
+            .checkbox(&mut enabled, "Send crash reports to the developer (anonymous, opt-in)")
+            .changed()
+        {
+            app.settings.crash_reports = enabled;
+            match app.settings.save(&settings::settings_path()) {
+                Ok(()) if enabled => app.push_notice("Crash reports will be sent when the app starts.", true),
+                Ok(()) => app.push_notice("Crash reports will not be sent.", true),
+                Err(e) => app.push_notice(format!("Could not save settings: {e}"), false),
+            }
+        }
+        ui.label(
+            RichText::new(
+                "Only the error message, where in the code it happened, the stack trace, app version and OS \
+                 are sent to the developer's own GlitchTip server (test6.azendix.de). Paths in your user \
+                 folder are removed. Off by default.",
+            )
+            .small()
+            .color(MUTED),
+        );
+        if waiting > 0 {
+            ui.add_space(4.0);
+            ui.label(RichText::new(format!("{waiting} report(s) waiting")).color(MUTED));
+        }
+    });
 }
 
 /// Runs `update::check` for the running version on a worker thread.

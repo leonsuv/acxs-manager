@@ -12,7 +12,7 @@ use crate::game;
 use crate::settings::{self, Settings};
 use eframe::egui::{self, Color32, RichText};
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
@@ -125,6 +125,15 @@ impl App {
         {
             settings.ac_root = found.display().to_string();
             let _ = settings.save(&settings::settings_path());
+        }
+        if settings.crash_reports
+            && let Ok(dsn) = acxs_manager::crash_report::Dsn::parse(acxs_manager::crash_report::DEFAULT_DSN)
+        {
+            let settings_file = settings::settings_path();
+            let dir = acxs_manager::crash_report::pending_dir(settings_file.parent().unwrap_or(Path::new(".")));
+            thread::spawn(move || {
+                let _ = acxs_manager::crash_report::send_pending(&dsn, &dir, std::time::Duration::from_secs(10));
+            });
         }
         let (tx, rx) = mpsc::channel();
         let mut app = App {

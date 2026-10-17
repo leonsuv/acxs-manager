@@ -19,6 +19,7 @@ pub mod content;
 pub mod content_export;
 pub mod content_meta;
 pub mod content_repair;
+pub mod crash_report;
 pub mod csp;
 pub mod csp_config;
 pub mod dashboard_stats;

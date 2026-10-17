@@ -22,6 +22,7 @@ Fixes:
 - `race.ini` follows the format Content Manager writes (`CAR_0 MODEL=-`, `[RACE] SKIN`, `[WIND]`, `[GROOVE]`, `[GHOST_CAR]`, Optimum `[DYNAMIC_TRACK]` preset, inactive `[REPLAY]`/`[RESTART]`/`[BENCHMARK]`).
 - Update check supports `https://` feeds with certificate checks (Windows TLS stack on Windows, rustls elsewhere); plain `http://` still works but is flagged as unprotected. Redirects that leave HTTPS are refused.
 - Gamepad tab: Advanced Gamepad Assist keeps its tuning in CSP's script storage and ignores `gamepad_fx.ini`, so the tab no longer writes those keys. It now selects AGA as CSP's gamepad script (user `gamepad_fx.ini`) and edits the controller values in `controls.ini [X360]` (gamma, deadzone, rumble, gamepad input method).
+- Opt-in crash reports: panics are stored locally and, only when enabled on the Home page, sent to the project's GlitchTip server with user paths removed.
 
 ## 0.3.0
 

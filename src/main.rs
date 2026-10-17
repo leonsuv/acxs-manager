@@ -6,10 +6,18 @@
 
 mod ui;
 
-use acxs_manager::{content, csp, game, settings};
+use acxs_manager::{content, crash_report, csp, game, settings};
 use eframe::egui;
+use std::path::PathBuf;
 
 fn main() -> eframe::Result {
+    // Panics are stored next to settings.json, whether or not reports are sent.
+    let settings_dir = settings::settings_path()
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    crash_report::install_panic_hook(settings_dir);
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("ACXS Manager")

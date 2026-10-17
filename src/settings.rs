@@ -17,6 +17,9 @@ const DEFAULT_AC_ROOTS: &[&str] = &[
 pub struct Settings {
     pub ac_root: String,
     pub patch_library: String,
+    /// Send stored crash reports to the developer's GlitchTip server on start.
+    /// Off by default. Panics are stored locally either way.
+    pub crash_reports: bool,
 }
 
 impl Settings {
@@ -166,6 +169,7 @@ mod tests {
         let settings = Settings {
             ac_root: r"D:\Games\assettocorsa".into(),
             patch_library: r"D:\Patches".into(),
+            crash_reports: true,
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);
