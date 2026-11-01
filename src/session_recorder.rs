@@ -68,6 +68,8 @@ pub enum EventKind {
     Jump,
     Understeer,
     Oversteer,
+    WallHit,
+    CarHit,
 }
 
 impl EventKind {
@@ -81,6 +83,8 @@ impl EventKind {
             EventKind::Jump => "jumps",
             EventKind::Understeer => "understeer",
             EventKind::Oversteer => "oversteer",
+            EventKind::WallHit => "wall hits",
+            EventKind::CarHit => "car hits",
         }
     }
 }
@@ -126,6 +130,16 @@ pub struct RecordedSession {
     pub best_lap_ms: Option<i32>,
     #[serde(default)]
     pub hotspots: Vec<Hotspot>,
+    /// Unix seconds, to match the collision log.
+    #[serde(default)]
+    pub started_unix: i64,
+    #[serde(default)]
+    pub ended_unix: i64,
+    /// Hits logged by the ACXS Collisions app, zero without it.
+    #[serde(default)]
+    pub wall_hits: u32,
+    #[serde(default)]
+    pub car_hits: u32,
     /// Average world position per slice of the lap as `(slice, x, z)`, enough to draw the track.
     #[serde(default)]
     pub path: Vec<(u8, f32, f32)>,
@@ -263,7 +277,8 @@ pub struct SessionAggregator {
 
 impl SessionAggregator {
     pub fn new(started_at: String) -> Self {
-        Self { session: RecordedSession { started_at, ..RecordedSession::default() }, ..Self::default() }
+        let started_unix = chrono::Utc::now().timestamp();
+        Self { session: RecordedSession { started_at, started_unix, ..RecordedSession::default() }, ..Self::default() }
     }
 
     /// Car and track this aggregator was opened for, `None` until the first live sample.
@@ -563,7 +578,10 @@ pub fn archive_replays(source: &Path, archive: &Path, since: std::time::SystemTi
 }
 
 fn close(agg: Option<SessionAggregator>, dir: &Path, on_saved: &dyn Fn()) {
-    if let Some(session) = agg.and_then(SessionAggregator::finish) {
+    if let Some(mut session) = agg.and_then(SessionAggregator::finish) {
+        session.ended_unix = chrono::Utc::now().timestamp();
+        let hits = crate::collision_app::collisions_between(session.started_unix - 1, session.ended_unix + 5);
+        attach_collisions(&mut session, &hits);
         if save(dir, &session).is_ok() {
             if let Some(docs) = crate::settings::ac_documents_dir() {
                 // The game finishes writing the replay when the session ends; a start window of
@@ -868,5 +886,43 @@ mod replay_cfg_tests {
         assert_eq!(ini.get_i64("AUTOSAVE", "RACE"), Some(RACE_KEEP));
         assert_eq!(ini.get_i64("AUTOSAVE", "QUALIFY"), Some(-1));
         assert_eq!(ini.get_i64("AUTOSAVE", "OTHERS"), Some(40));
+    }
+}
+
+/// Adds logged collisions to a finished session: the two counters and one hotspot per slice.
+pub fn attach_collisions(session: &mut RecordedSession, hits: &[crate::collision_app::Collision]) {
+    use crate::collision_app::HitKind;
+    for hit in hits {
+        let kind = match hit.kind {
+            HitKind::Wall => {
+                session.wall_hits += 1;
+                EventKind::WallHit
+            }
+            HitKind::Car => {
+                session.car_hits += 1;
+                EventKind::CarHit
+            }
+        };
+        let segment = (hit.position.clamp(0.0, 0.9999) * SEGMENTS as f32) as u8;
+        match session.hotspots.iter_mut().find(|h| h.segment == segment && h.kind == kind) {
+            Some(spot) => spot.count += 1,
+            None => session.hotspots.push(Hotspot { segment, kind, count: 1 }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod collision_tests {
+    use super::*;
+    use crate::collision_app::{Collision, HitKind};
+
+    #[test]
+    fn collisions_are_counted_and_placed() {
+        let mut s = RecordedSession::default();
+        let hit = |kind, position| Collision { unix: 0, kind, speed_kmh: 90.0, position };
+        attach_collisions(&mut s, &[hit(HitKind::Wall, 0.5), hit(HitKind::Wall, 0.505), hit(HitKind::Car, 0.1)]);
+        assert_eq!((s.wall_hits, s.car_hits), (2, 1));
+        assert!(s.hotspots.contains(&Hotspot { segment: 50, kind: EventKind::WallHit, count: 2 }));
+        assert!(s.hotspots.contains(&Hotspot { segment: 10, kind: EventKind::CarHit, count: 1 }));
     }
 }

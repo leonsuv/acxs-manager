@@ -2,6 +2,7 @@
 
 use super::{Tool, ToolContext};
 use crate::ui::{theme, widgets, Notice};
+use acxs_manager::collision_app;
 use acxs_manager::driving_advice;
 use acxs_manager::laptimes::format_lap;
 use acxs_manager::session_recorder::{self, EventKind, RecordedSession};
@@ -53,7 +54,7 @@ impl Tool for Sessions {
         self.goto.take()
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _ctx: &ToolContext, notices: &mut Vec<Notice>) {
+    fn ui(&mut self, ui: &mut egui::Ui, ctx: &ToolContext, notices: &mut Vec<Notice>) {
         widgets::heading(ui, "Sessions", "Sessions recorded by ACXS while Assetto Corsa was running.");
         let ready = self.sessions.lock().ok().is_some_and(|g| g.is_some());
         if !ready && !self.loading {
@@ -71,6 +72,19 @@ impl Tool for Sessions {
                 match session_recorder::keep_more_replays() {
                     Ok(path) => notices.push(Notice { text: format!("Updated {}", path.display()), ok: true }),
                     Err(err) => notices.push(Notice { text: format!("Could not update replay.ini: {err}"), ok: false }),
+                }
+            }
+            if let Some(root) = &ctx.ac_root {
+                let installed = collision_app::is_installed(root);
+                let label = if installed { "Reinstall collision app" } else { "Install collision app" };
+                let response = ui.add_enabled(!ctx.game_running, egui::Button::new(label)).on_hover_text(
+                    "A small CSP Lua app that tells wall hits from car hits. After installing, switch on \"ACXS Collisions\" once in the in-game app bar. The game must be closed.",
+                );
+                if response.clicked() {
+                    match collision_app::install(root, ctx.game_running) {
+                        Ok(_) => notices.push(Notice { text: "Installed ACXS Collisions. Enable it once in the in-game app bar.".into(), ok: true }),
+                        Err(err) => notices.push(Notice { text: format!("Could not install the collision app: {err}"), ok: false }),
+                    }
                 }
             }
             if ui.button("Open folder").clicked() {
@@ -127,6 +141,7 @@ impl Tool for Sessions {
                         format!("top {:.0} km/h", s.max_speed),
                         format!("{} laps, best {best}", s.laps.len()),
                         format!("{} crashes", s.crashes),
+                        if s.wall_hits + s.car_hits > 0 { format!("hits: {} wall / {} car", s.wall_hits, s.car_hits) } else { String::new() },
                         format!("{} off track", s.offroad),
                         format!("{} jumps (longest {:.1} s)", s.jumps, s.longest_airborne),
                         format!("lock-ups {} front / {} rear", s.front_lockups, s.rear_lockups),
@@ -137,6 +152,7 @@ impl Tool for Sessions {
                             percent(s.oversteer_seconds, s.cornering_seconds)
                         ),
                     ];
+                    let facts: Vec<String> = facts.into_iter().filter(|f| !f.is_empty()).collect();
                     ui.label(RichText::new(facts.join("   ·   ")).size(12.5));
                     if s.path.len() >= 20 {
                         ui.add_space(6.0);
@@ -174,6 +190,8 @@ fn kind_color(kind: EventKind) -> egui::Color32 {
         EventKind::Jump => egui::Color32::from_rgb(110, 200, 235),
         EventKind::Understeer => egui::Color32::from_rgb(90, 130, 245),
         EventKind::Oversteer => egui::Color32::from_rgb(200, 100, 235),
+        EventKind::WallHit => egui::Color32::from_rgb(255, 255, 255),
+        EventKind::CarHit => egui::Color32::from_rgb(255, 110, 170),
     }
 }
 

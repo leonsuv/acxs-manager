@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Phase 6: optional "ACXS Collisions" CSP Lua app (installed from the Sessions page) logs wall and car hits; the recorder adds them to each session and to the track map. Untested in the game.
+
 - Sessions suggestions card has an "Open Setups" button (tools can now ask the app to open another tool page).
 
 - Replay Viewer: the summary now shows distance, top and average speed, full-throttle share, hard braking time and impact and drop counts worked out from the replay samples. Home ignores impossible "jumps" over a minute (falls off the map).

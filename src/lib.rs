@@ -15,6 +15,7 @@ pub mod cardata;
 pub mod championship;
 pub mod charts;
 pub mod collection;
+pub mod collision_app;
 pub mod content;
 pub mod content_export;
 pub mod content_meta;
