@@ -1,4 +1,4 @@
-//! The egui front end. Heavy work (scanning, hashing, installing) runs on
+﻿//! The egui front end. Heavy work (scanning, hashing, installing) runs on
 //! background threads and reports back through a channel, so the window stays responsive.
 
 mod media;
@@ -330,7 +330,7 @@ impl App {
                 Err(e) => Notice { text: format!("Install failed: {e}"), ok: false },
             })
         });
-        self.push_notice(format!("Installing {label}…"), true);
+        self.push_notice(format!("Installing {label}â€¦"), true);
     }
 
     fn uninstall_patch(&mut self) {
@@ -356,7 +356,7 @@ impl App {
             return;
         };
         match game::launch_game(&root) {
-            Ok(_) => self.push_notice("Launching Assetto Corsa…", true),
+            Ok(_) => self.push_notice("Launching Assetto Corsaâ€¦", true),
             Err(e) => self.push_notice(format!("Could not launch: {e}"), false),
         }
     }
@@ -545,7 +545,7 @@ impl App {
         ui.painter().text(
             rect.left_center() + egui::vec2(12.0, 0.0),
             egui::Align2::LEFT_CENTER,
-            "Search or jump to…",
+            "Search or jump toâ€¦",
             egui::FontId::proportional(13.5),
             theme::MUTED,
         );
@@ -574,7 +574,7 @@ impl App {
                 }
                 ui.horizontal(|ui| {
                     ui.add_space(10.0);
-                    let version = format!("v{}  ·  Check for updates", env!("CARGO_PKG_VERSION"));
+                    let version = format!("v{}  Â·  Check for updates", env!("CARGO_PKG_VERSION"));
                     let link = ui.add(egui::Label::new(RichText::new(version).size(11.5).color(theme::FAINT)).sense(egui::Sense::click()));
                     if link.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                         ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique(pages::UPDATE_RUN_ID), true));
@@ -767,7 +767,7 @@ impl App {
         ui.horizontal_centered(|ui| {
             if self.busy {
                 ui.add(egui::Spinner::new().size(14.0));
-                ui.label(RichText::new("Working…").size(13.0).color(theme::MUTED));
+                ui.label(RichText::new("Workingâ€¦").size(13.0).color(theme::MUTED));
             }
             let response = if let Some(notice) = self.notices.front().cloned() {
                 let color = if notice.ok { theme::OK } else { theme::DANGER };
@@ -829,7 +829,7 @@ impl App {
         }
         for (i, tool) in self.tools.iter().enumerate() {
             if hit(tool.name()) || hit(tool.group()) {
-                items.push((tool.name().into(), format!("Tool  ·  {}", tool.group()), Do::Go(Page::Tool(i))));
+                items.push((tool.name().into(), format!("Tool  Â·  {}", tool.group()), Do::Go(Page::Tool(i))));
             }
         }
         if query.len() >= 2 {
@@ -840,13 +840,13 @@ impl App {
                 .filter(|c| hit(&c.name) || hit(&c.brand) || hit(&c.id))
                 .take(8)
             {
-                items.push((car.name.clone(), format!("Car  ·  {}", car.brand), Do::Car(car.id.clone())));
+                items.push((car.name.clone(), format!("Car  Â·  {}", car.brand), Do::Car(car.id.clone())));
             }
             for track in self.snapshot.tracks.iter().filter(|t| hit(&t.name) || hit(&t.country)).take(5) {
-                items.push((track.name.clone(), format!("Track  ·  {}", track.country), Do::Track(track.id.clone())));
+                items.push((track.name.clone(), format!("Track  Â·  {}", track.country), Do::Track(track.id.clone())));
             }
             for (key, name, hint) in self.servers.search(&query, 6) {
-                items.push((name, format!("Server  ·  {hint}"), Do::Server(key)));
+                items.push((name, format!("Server  Â·  {hint}"), Do::Server(key)));
             }
         }
         items.truncate(14);
@@ -887,7 +887,7 @@ impl App {
                         ui.set_width(560.0);
                         let edit = ui.add(
                             egui::TextEdit::singleline(&mut self.palette_query)
-                                .hint_text("Type to search tools, cars, tracks, servers…")
+                                .hint_text("Type to search tools, cars, tracks, serversâ€¦")
                                 .desired_width(f32::INFINITY)
                                 .font(egui::FontId::proportional(17.0))
                                 .margin(egui::Margin::symmetric(12, 10)),
@@ -932,7 +932,7 @@ impl App {
                             }
                         }
                         ui.add_space(4.0);
-                        ui.label(RichText::new("↑ ↓ to move   Enter to open   Esc to close").size(11.5).color(theme::FAINT));
+                        ui.label(RichText::new("â†‘ â†“ to move   Enter to open   Esc to close").size(11.5).color(theme::FAINT));
                     });
             });
 
@@ -1017,7 +1017,7 @@ impl App {
             match taken {
                 Some(i) => {
                     self.page = Page::Tool(i);
-                    self.push_notice("Package received. Checking it now…", true);
+                    self.push_notice("Package received. Checking it nowâ€¦", true);
                 }
                 None => self.push_notice("Drop a car or track .zip here to install it.", false),
             }

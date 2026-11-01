@@ -158,7 +158,7 @@ fn session_card(ui: &mut egui::Ui, s: &RecordedSession) {
     theme::card().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal_top(|ui| {
-            if s.path.len() >= 20 {
+            if s.path.len() >= 20 || s.trace.len() >= 20 {
                 ui.vertical(|ui| {
                     track_map(ui, s);
                     legend(ui, s);
@@ -216,6 +216,12 @@ fn stat_grid(ui: &mut egui::Ui, s: &RecordedSession) {
 /// How the car handled in hard corners: one bar split into understeer, neutral and oversteer.
 fn balance_bar(ui: &mut egui::Ui, s: &RecordedSession) {
     if s.cornering_seconds < 3.0 {
+        ui.label(
+            RichText::new("Handling not judged: this session had too little steady cornering to measure it.")
+                .size(11.5)
+                .color(theme::FAINT),
+        );
+        ui.add_space(8.0);
         return;
     }
     let under = (s.understeer_seconds / s.cornering_seconds).clamp(0.0, 1.0) as f32;
@@ -280,7 +286,9 @@ fn trouble_spots(ui: &mut egui::Ui, s: &RecordedSession) {
                 first.make_ascii_uppercase();
             }
             ui.label(RichText::new(format!("{label}  {amount}")).font(theme::bold(13.0)));
-            ui.label(RichText::new(format!("at {place} of the lap")).size(12.5).color(theme::MUTED));
+            if s.path.len() >= 20 {
+                ui.label(RichText::new(format!("at {place} of the lap")).size(12.5).color(theme::MUTED));
+            }
         });
     }
 }
@@ -320,14 +328,64 @@ fn kind_color(kind: EventKind) -> egui::Color32 {
 
 const MAP_SIZE: f32 = 250.0;
 
-/// The track outline from the recorded path with a dot for every trouble spot. Hovering a dot
-/// names it.
+
+fn amount_text(kind: EventKind, count: u32) -> String {
+    if kind.is_timed() { format!("{:.1} s", f64::from(count) / 10.0) } else { format!("{count}\u{00D7}") }
+}
+
+/// The track outline with a dot for every trouble spot; hovering a dot names it.
+///
+/// Tracks with a lap position (the game's spline) are drawn from 100 slices of the lap. Tracks
+/// without one, such as drift pads and freeroam maps, are drawn from the driven trace and the
+/// events keep their own coordinates.
 fn track_map(ui: &mut egui::Ui, s: &RecordedSession) {
-    let world: Vec<[f32; 2]> = s.path.iter().map(|&(_, x, z)| [x, z]).collect();
+    // World points: first the line, then the dots. They are projected together so both share one scale.
+    let sliced = s.path.len() >= 20;
+    let mut world: Vec<[f32; 2]> = Vec::new();
+    let mut breaks: Vec<bool> = Vec::new();
+    let mut dots_meta: Vec<(EventKind, String)> = Vec::new();
+    if sliced {
+        let mut last: Option<u8> = None;
+        for &(segment, x, z) in &s.path {
+            breaks.push(last.is_none_or(|l| segment.saturating_sub(l) > 2));
+            world.push([x, z]);
+            last = Some(segment);
+        }
+    } else {
+        // The trace is sampled every few metres; a step far beyond the usual one means the car was
+        // moved (pits, reset), so the line is cut there.
+        let mut steps: Vec<f32> = s.trace.windows(2).map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1)).collect();
+        steps.sort_by(f32::total_cmp);
+        let limit = (steps.get(steps.len() / 2).copied().unwrap_or(0.0) * 6.0).max(60.0);
+        let mut last: Option<(f32, f32)> = None;
+        for &(x, z) in &s.trace {
+            breaks.push(last.is_none_or(|(lx, lz)| (x - lx).hypot(z - lz) > limit));
+            world.push([x, z]);
+            last = Some((x, z));
+        }
+    }
+    let line_len = world.len();
+    if sliced {
+        for spot in s.worst_spots(40) {
+            let mid = ((spot.start + spot.end) * 50.0) as u8;
+            let Some(i) = s.path.iter().position(|&(seg, _, _)| seg >= mid.saturating_sub(1)) else { continue };
+            world.push(world[i]);
+            dots_meta.push((
+                spot.kind,
+                format!("{} {} at {:.0}% of the lap", spot.kind.label(), amount_text(spot.kind, spot.count), spot.start * 100.0),
+            ));
+        }
+    } else {
+        for p in &s.event_points {
+            world.push([p.x, p.z]);
+            dots_meta.push((p.kind, format!("{} {}", p.kind.label(), amount_text(p.kind, p.count))));
+        }
+    }
     let unit = project_lap(&world);
-    if unit.len() != s.path.len() {
+    if unit.len() != world.len() || line_len < 2 {
         return;
     }
+
     let (rect, response) = ui.allocate_exact_size(egui::vec2(MAP_SIZE, MAP_SIZE), egui::Sense::hover());
     let pad = 22.0;
     let to_screen = |p: [f32; 2]| {
@@ -342,20 +400,17 @@ fn track_map(ui: &mut egui::Ui, s: &RecordedSession) {
         egui::StrokeKind::Inside,
     );
 
-    // Runs of consecutive slices; a gap in the data ends a run so no false shortcut is drawn.
     let mut runs: Vec<Vec<egui::Pos2>> = Vec::new();
-    let mut last_segment: Option<u8> = None;
-    for (point, &(segment, _, _)) in unit.iter().zip(&s.path) {
-        if last_segment.is_none_or(|l| segment.saturating_sub(l) > 2) {
+    for (point, &new_run) in unit[..line_len].iter().zip(&breaks) {
+        if new_run {
             runs.push(Vec::new());
         }
         if let Some(run) = runs.last_mut() {
             run.push(to_screen(*point));
         }
-        last_segment = Some(segment);
     }
     // A full lap closes the loop.
-    if runs.len() == 1 && s.path.len() >= 90 {
+    if sliced && runs.len() == 1 && s.path.len() >= 90 {
         if let Some(first) = runs[0].first().copied() {
             runs[0].push(first);
         }
@@ -366,8 +421,8 @@ fn track_map(ui: &mut egui::Ui, s: &RecordedSession) {
     for run in runs.iter().filter(|r| r.len() > 1) {
         painter.add(egui::Shape::line(run.clone(), egui::Stroke::new(3.0, theme::BORDER_STRONG)));
     }
-    // Start and finish.
-    if s.path.first().is_some_and(|&(seg, _, _)| seg <= 2) {
+    // Start marker.
+    if !sliced || s.path.first().is_some_and(|&(seg, _, _)| seg <= 2) {
         let p = to_screen(unit[0]);
         painter.circle_filled(p, 5.0, egui::Color32::WHITE);
         painter.circle_stroke(p, 5.0, egui::Stroke::new(1.5, theme::BG));
@@ -375,21 +430,14 @@ fn track_map(ui: &mut egui::Ui, s: &RecordedSession) {
 
     let hover = response.hover_pos();
     let mut tip: Option<String> = None;
-    for spot in s.worst_spots(40) {
-        let mid = ((spot.start + spot.end) * 50.0) as u8;
-        let Some(i) = s.path.iter().position(|&(seg, _, _)| seg >= mid.saturating_sub(1)) else { continue };
-        let p = to_screen(unit[i]);
-        let color = kind_color(spot.kind);
+    for (point, (kind, text)) in unit[line_len..].iter().zip(&dots_meta) {
+        let p = to_screen(*point);
+        let color = kind_color(*kind);
         painter.circle_filled(p, 8.0, color.gamma_multiply(0.25));
         painter.circle_filled(p, 4.5, color);
         painter.circle_stroke(p, 4.5, egui::Stroke::new(1.0, theme::BG));
         if hover.is_some_and(|h| h.distance(p) < 10.0) {
-            let amount = if spot.kind.is_timed() {
-                format!("{:.1} s", f64::from(spot.count) / 10.0)
-            } else {
-                format!("{}\u{00D7}", spot.count)
-            };
-            tip = Some(format!("{} {amount} at {:.0}% of the lap", spot.kind.label(), spot.start * 100.0));
+            tip = Some(text.clone());
         }
     }
     if let Some(text) = tip {

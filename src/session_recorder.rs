@@ -99,6 +99,23 @@ pub struct Hotspot {
     pub count: u32,
 }
 
+/// Metres between points of the recorded trace.
+const TRACE_STEP_M: f64 = 8.0;
+/// Most trace points kept, so a very long session stays small.
+const TRACE_MAX: usize = 3000;
+/// Events are merged per square of this many metres on the trace.
+const EVENT_CELL_M: f32 = 25.0;
+
+/// An event with its world position, for tracks the game gives no lap position for.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EventPoint {
+    pub kind: EventKind,
+    pub x: f32,
+    pub z: f32,
+    /// Occurrences, or tenths of a second for understeer and oversteer.
+    pub count: u32,
+}
+
 /// What was recorded for one session. This is the file format.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct RecordedSession {
@@ -143,6 +160,20 @@ pub struct RecordedSession {
     /// Average world position per slice of the lap as `(slice, x, z)`, enough to draw the track.
     #[serde(default)]
     pub path: Vec<(u8, f32, f32)>,
+    /// Positions every few metres as `(x, z)`: the drawn line on tracks without lap position.
+    #[serde(default)]
+    pub trace: Vec<(f32, f32)>,
+    #[serde(default)]
+    pub event_points: Vec<EventPoint>,
+    /// What the balance check saw, to explain a missing result.
+    #[serde(default)]
+    pub balance_samples: u32,
+    #[serde(default)]
+    pub max_steer: f32,
+    #[serde(default)]
+    pub max_yaw: f32,
+    #[serde(default)]
+    pub max_lateral_g: f32,
 }
 
 impl RecordedSession {
@@ -176,11 +207,11 @@ impl RecordedSession {
 /// Lateral g above which a corner is judged for balance.
 const BALANCE_MIN_G: f32 = 0.7;
 /// Speed band, km/h, for learning the steering-to-yaw gain at low load.
-const CAL_SPEED: (f32, f32) = (20.0, 80.0);
+const CAL_SPEED: (f32, f32) = (15.0, 120.0);
 /// Lateral g below which the car is assumed to steer neutrally while calibrating.
-const CAL_MAX_G: f32 = 0.2;
+const CAL_MAX_G: f32 = 0.4;
 /// Samples needed before the gain is trusted.
-const CAL_SAMPLES: u32 = 200;
+const CAL_SAMPLES: u32 = 100;
 /// Yaw ratio below this is understeer, above [`OVERSTEER_RATIO`] is oversteer.
 const UNDERSTEER_RATIO: f64 = 0.8;
 const OVERSTEER_RATIO: f64 = 1.25;
@@ -208,6 +239,11 @@ pub enum Handling {
 }
 
 impl Balance {
+    /// Calibration samples gathered so far.
+    pub fn samples(&self) -> u32 {
+        self.samples
+    }
+
     /// Feeds one sample. Returns a verdict only for hard cornering once the gain is known.
     pub fn sample(&mut self, speed_kmh: f32, steer: f32, yaw_rate: f32, lateral_g: f32) -> Option<Handling> {
         let v = f64::from(speed_kmh) / 3.6;
@@ -215,7 +251,7 @@ impl Balance {
             return None;
         }
         let (x, y) = (f64::from(steer), f64::from(yaw_rate) / v);
-        if (CAL_SPEED.0..=CAL_SPEED.1).contains(&speed_kmh) && lateral_g.abs() < CAL_MAX_G && steer.abs() > 0.02 {
+        if (CAL_SPEED.0..=CAL_SPEED.1).contains(&speed_kmh) && lateral_g.abs() < CAL_MAX_G && steer.abs() > 0.01 {
             self.sum_xy += x * y;
             self.sum_xx += x * x;
             self.samples = self.samples.saturating_add(1);
@@ -272,6 +308,9 @@ pub struct SessionAggregator {
     balance: Balance,
     hot: std::collections::BTreeMap<(u8, EventKind), f64>,
     path_sum: Vec<[f64; 3]>,
+    trace_gap: f64,
+    last_xz: Option<(f32, f32)>,
+    points: std::collections::BTreeMap<(EventKind, i32, i32), (f32, f32, f64)>,
     started: bool,
 }
 
@@ -325,26 +364,54 @@ impl SessionAggregator {
         cell[0] += f64::from(g.car_coordinates[0]);
         cell[1] += f64::from(g.car_coordinates[2]);
         cell[2] += 1.0;
+        let xz = (g.car_coordinates[0], g.car_coordinates[2]);
+        let here = (xz.0.is_finite() && xz.1.is_finite()).then_some(xz);
+        self.add_trace(here, speed / 3.6 * dt);
         let after = self.event_counts();
         for (i, kind) in COUNTED.iter().enumerate() {
             if after[i] > before[i] {
-                *self.hot.entry((segment, *kind)).or_default() += f64::from(after[i] - before[i]);
+                let n = after[i] - before[i];
+                *self.hot.entry((segment, *kind)).or_default() += f64::from(n);
+                self.add_point(*kind, here, f64::from(n));
             }
         }
+        self.session.max_steer = self.session.max_steer.max(p.steer_angle.abs());
+        self.session.max_yaw = self.session.max_yaw.max(p.local_angular_velocity[1].abs());
+        self.session.max_lateral_g = self.session.max_lateral_g.max(p.g_forces[0].abs());
+        self.session.balance_samples = self.balance.samples();
         if let Some(h) = handling {
             self.session.cornering_seconds += dt;
             match h {
                 Handling::Understeer => {
                     self.session.understeer_seconds += dt;
                     *self.hot.entry((segment, EventKind::Understeer)).or_default() += dt * 10.0;
+                    self.add_point(EventKind::Understeer, here, dt * 10.0);
                 }
                 Handling::Oversteer => {
                     self.session.oversteer_seconds += dt;
                     *self.hot.entry((segment, EventKind::Oversteer)).or_default() += dt * 10.0;
+                    self.add_point(EventKind::Oversteer, here, dt * 10.0);
                 }
                 Handling::Neutral => {}
             }
         }
+    }
+
+    /// Adds a point to the trace once the car has moved [`TRACE_STEP_M`] since the last one.
+    fn add_trace(&mut self, here: Option<(f32, f32)>, metres: f64) {
+        let Some(here) = here else { return };
+        self.trace_gap += metres;
+        if (self.last_xz.is_none() || self.trace_gap >= TRACE_STEP_M) && self.session.trace.len() < TRACE_MAX {
+            self.session.trace.push(here);
+            self.trace_gap = 0.0;
+        }
+        self.last_xz = Some(here);
+    }
+
+    fn add_point(&mut self, kind: EventKind, here: Option<(f32, f32)>, amount: f64) {
+        let Some((x, z)) = here else { return };
+        let key = (kind, (x / EVENT_CELL_M).floor() as i32, (z / EVENT_CELL_M).floor() as i32);
+        self.points.entry(key).or_insert((x, z, 0.0)).2 += amount;
     }
 
     fn event_counts(&self) -> [u32; 6] {
@@ -437,6 +504,12 @@ impl SessionAggregator {
             .iter()
             .map(|(&(segment, kind), &value)| Hotspot { segment, kind, count: value.round() as u32 })
             .filter(|h| h.count > 0)
+            .collect();
+        self.session.event_points = self
+            .points
+            .iter()
+            .map(|(&(kind, _, _), &(x, z, amount))| EventPoint { kind, x, z, count: amount.round() as u32 })
+            .filter(|p| p.count > 0)
             .collect();
         Some(self.session)
     }

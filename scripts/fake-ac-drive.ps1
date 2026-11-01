@@ -11,7 +11,9 @@ param(
     [string]$TrackId = "ks_nordschleife",
     [string]$Layout = "nordschleife",
     # Leave the memory behind, frozen on Live, for this many seconds after the lap (what a launcher holding the mapping does).
-    [int]$FreezeSeconds = 0
+    [int]$FreezeSeconds = 0,
+    # Report no lap position (normalized position stays 0), like drift pads and freeroam maps.
+    [switch]$NoSpline
 )
 Add-Type -AssemblyName System.Core
 
@@ -75,7 +77,7 @@ while (((Get-Date) - $start).TotalSeconds -lt $Seconds) {
     $ga.Write(4, [int]2)
     $ga.Write(132, [int]0)
     $idx = [math]::Min($n - 1, [int]($p * $n))
-    $ga.Write(248, [single]$p)
+    if ($NoSpline) { $ga.Write(248, [single]0.0) } else { $ga.Write(248, [single]$p) }
     $ga.Write(252, [single]$line[$idx][0])
     $ga.Write(260, [single]$line[$idx][1])
     Start-Sleep -Milliseconds 25
