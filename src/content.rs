@@ -39,11 +39,47 @@ pub fn read_ui_json(path: &Path) -> Map<String, Value> {
     let text = String::from_utf8_lossy(&raw);
     let text = text.trim_start_matches('\u{feff}');
     let parsed = serde_json::from_str::<Value>(text)
-        .or_else(|_| serde_json::from_str::<Value>(&strip_trailing_commas(text)));
+        .or_else(|_| serde_json::from_str::<Value>(&strip_trailing_commas(text)))
+        .or_else(|_| serde_json::from_str::<Value>(&strip_trailing_commas(&escape_control_chars(text))));
     match parsed {
         Ok(Value::Object(map)) => map,
         _ => Map::new(),
     }
+}
+
+/// Escape raw newlines and tabs inside strings. The game accepts them, strict JSON does not,
+/// and many stock `ui_car.json` files contain them.
+fn escape_control_chars(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let (mut in_string, mut escaped) = (false, false);
+    for c in text.chars() {
+        if in_string {
+            match c {
+                _ if escaped => {
+                    escaped = false;
+                    out.push(c);
+                }
+                '\\' => {
+                    escaped = true;
+                    out.push(c);
+                }
+                '"' => {
+                    in_string = false;
+                    out.push(c);
+                }
+                '\n' => out.push_str("\\n"),
+                '\r' => {}
+                '\t' => out.push_str("\\t"),
+                c => out.push(c),
+            }
+        } else {
+            if c == '"' {
+                in_string = true;
+            }
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Remove commas that directly precede `}` or `]` (outside of strings).

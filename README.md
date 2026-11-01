@@ -9,6 +9,23 @@ It is a Windows program. The user interface is built with egui/eframe. The core
 logic is a library (`acxs_manager`) with no UI code, so it can be tested on the
 host and cross-compiled for Windows.
 
+## A look at it
+
+| | |
+|---|---|
+| ![Home](docs/screenshots/home.png) | ![Cars](docs/screenshots/cars.png) |
+| Home: a featured car, launch, and your content at a glance | Cars: a card grid with real previews, skins, favorites and filters |
+| ![Showroom](docs/screenshots/showroom.png) | ![Tracks](docs/screenshots/tracks.png) |
+| Showroom: one car large, its skins, specs and description | Tracks: previews, layouts and the track map |
+| ![Servers](docs/screenshots/servers.png) | ![Quick Race](docs/screenshots/quick-race.png) |
+| Servers: your list and the public lobby, with a car chooser and drivers | Quick Race: choose car and track with pictures, then sessions, weather and driver aids |
+| ![CSP config](docs/screenshots/csp-config.png) | |
+| CSP config: searchable files, changed values marked, one save bar | |
+
+Press `Ctrl+K` anywhere to jump to a page, a tool, a car or a track. Drop a car or
+track `.zip` on the window to install it. Joining a server and Quick Race start the
+game directly; Content Manager is not needed.
+
 ## What it does today
 
 - **Install and launch:** finds installs through Steam library folders, checks a

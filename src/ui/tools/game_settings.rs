@@ -42,12 +42,14 @@ pub fn tool() -> Box<dyn Tool> {
         video_file_present: false,
         video_pending: 0,
         form: VideoForm::from_settings(&VideoSettings::default()),
+        saved_form: VideoForm::from_settings(&VideoSettings::default()),
         ac_dir: String::new(),
         ac_for_root: None,
         ac_loaded: false,
         ac_file_present: false,
         ac_pending: 0,
         ac_form: AcForm::from_settings(&AssettoCorsaSettings::default()),
+        saved_ac_form: AcForm::from_settings(&AssettoCorsaSettings::default()),
         snapshots: Vec::new(),
         listed_root: None,
         snap_pending: 0,
@@ -97,7 +99,7 @@ enum Verify {
 }
 
 /// Text and checkbox state of the video form.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct VideoForm {
     /// Empty means not set, which leaves the file's current value alone on save.
     width: String,
@@ -177,7 +179,7 @@ fn parse_required<T: FromStr>(text: &str, label: &str, problems: &mut Vec<String
 }
 
 /// Text and checkbox state of the assetto_corsa.ini form.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct AcForm {
     simulation_value: String,
     logging: bool,
@@ -253,6 +255,8 @@ struct GameSettings {
     video_file_present: bool,
     video_pending: usize,
     form: VideoForm,
+    /// The form as last loaded or saved: what the file holds right now.
+    saved_form: VideoForm,
 
     ac_dir: String,
     /// The Assetto Corsa root the assetto_corsa.ini folder was last set from.
@@ -261,6 +265,7 @@ struct GameSettings {
     ac_file_present: bool,
     ac_pending: usize,
     ac_form: AcForm,
+    saved_ac_form: AcForm,
 
     snapshots: Vec<Snapshot>,
     /// The Assetto Corsa root the snapshot list was requested for.
@@ -369,6 +374,7 @@ impl GameSettings {
                     match result {
                         Ok(settings) => {
                             self.form = VideoForm::from_settings(&settings);
+                            self.saved_form = self.form.clone();
                             self.video_loaded = true;
                             self.video_file_present = present;
                             if !present {
@@ -397,6 +403,7 @@ impl GameSettings {
                     match result {
                         Ok(settings) => {
                             self.ac_form = AcForm::from_settings(&settings);
+                            self.saved_ac_form = self.ac_form.clone();
                             self.ac_loaded = true;
                             self.ac_file_present = present;
                             if !present {
@@ -466,6 +473,7 @@ impl GameSettings {
 
     fn video_section(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let idle = self.video_pending == 0;
+        let base = self.saved_form.clone();
         theme::card().show(ui, |ui| {
             ui.label(RichText::new("Folder with video.ini (Documents/Assetto Corsa/cfg by default)").color(MUTED));
             ui.horizontal(|ui| {
@@ -487,7 +495,7 @@ impl GameSettings {
                 .num_columns(2)
                 .spacing([16.0, 8.0])
                 .show(ui, |ui| {
-                    ui.label("Resolution");
+                    row_label(ui, "Resolution", base.width != self.form.width || base.height != self.form.height);
                     ui.horizontal(|ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.form.width)
@@ -504,15 +512,15 @@ impl GameSettings {
                     });
                     ui.end_row();
 
-                    ui.label("Fullscreen");
-                    ui.checkbox(&mut self.form.fullscreen, "On");
+                    row_label(ui, "Fullscreen", base.fullscreen != self.form.fullscreen);
+                    widgets::toggle(ui, &mut self.form.fullscreen);
                     ui.end_row();
 
-                    ui.label("VSync");
-                    ui.checkbox(&mut self.form.vsync, "On");
+                    row_label(ui, "VSync", base.vsync != self.form.vsync);
+                    widgets::toggle(ui, &mut self.form.vsync);
                     ui.end_row();
 
-                    ui.label("FPS cap");
+                    row_label(ui, "FPS cap", base.fps_cap != self.form.fps_cap);
                     ui.horizontal(|ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.form.fps_cap)
@@ -523,13 +531,13 @@ impl GameSettings {
                     });
                     ui.end_row();
 
-                    ui.label("Anti-aliasing");
+                    row_label(ui, "Anti-aliasing", base.aa_samples != self.form.aa_samples);
                     choice(ui, "game_settings_aa", &mut self.form.aa_samples, AA_CHOICES, |n: u32| {
                         if n == 1 { "Off".to_string() } else { format!("{n}x") }
                     });
                     ui.end_row();
 
-                    ui.label("Anisotropic filtering");
+                    row_label(ui, "Anisotropic filtering", base.anisotropic != self.form.anisotropic);
                     choice(
                         ui,
                         "game_settings_aniso",
@@ -539,7 +547,7 @@ impl GameSettings {
                     );
                     ui.end_row();
 
-                    ui.label("Shadow map size");
+                    row_label(ui, "Shadow map size", base.shadow_map_size != self.form.shadow_map_size);
                     choice(
                         ui,
                         "game_settings_shadow",
@@ -549,7 +557,7 @@ impl GameSettings {
                     );
                     ui.end_row();
 
-                    ui.label("World detail");
+                    row_label(ui, "World detail", base.world_detail != self.form.world_detail);
                     choice(
                         ui,
                         "game_settings_detail",
@@ -559,11 +567,44 @@ impl GameSettings {
                     );
                     ui.end_row();
 
-                    ui.label("Post-processing");
-                    ui.checkbox(&mut self.form.post_processing, "On");
+                    row_label(ui, "Post-processing", base.post_processing != self.form.post_processing);
+                    widgets::toggle(ui, &mut self.form.post_processing);
                     ui.end_row();
                 });
 
+            let changes = video_changes(&base, &self.form);
+            let (quality_was, cost_was) = impact(&base);
+            let (quality_now, cost_now) = impact(&self.form);
+            let mut revert = false;
+            ui.add_space(8.0);
+            theme::card_flat().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new("What this changes").font(theme::bold(13.5)));
+                ui.add_space(4.0);
+                meter(ui, "Visual quality", quality_was, quality_now, true);
+                meter(ui, "Performance cost", cost_was, cost_now, false);
+                ui.label(RichText::new("The white tick is what the file holds now. A guide, not a benchmark.").size(11.5).color(theme::FAINT));
+                ui.add_space(6.0);
+                if changes.is_empty() {
+                    ui.label(RichText::new("Nothing changed yet.").color(MUTED));
+                } else {
+                    for (name, was, now) in &changes {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(*name).color(MUTED));
+                            ui.label(RichText::new(was).color(theme::FAINT).strikethrough());
+                            ui.label(RichText::new("→").color(MUTED));
+                            ui.label(RichText::new(now).font(theme::bold(13.5)).color(theme::ACCENT));
+                        });
+                    }
+                    ui.add_space(4.0);
+                    if ui.button("Revert all changes").clicked() {
+                        revert = true;
+                    }
+                }
+            });
+            if revert {
+                self.form = base.clone();
+            }
             ui.add_space(6.0);
             let parsed = self.form.to_settings();
             let problems = match &parsed {
@@ -589,6 +630,7 @@ impl GameSettings {
 
     fn ac_section(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let idle = self.ac_pending == 0;
+        let base = self.saved_ac_form.clone();
         theme::card().show(ui, |ui| {
             ui.label(
                 RichText::new(format!(
@@ -606,7 +648,7 @@ impl GameSettings {
             });
             if self.ac_dir.trim().is_empty() {
                 ui.label(
-                    RichText::new("Set the Assetto Corsa folder on the Home page, or type a folder above.").color(WARN),
+                    RichText::new("Set the Assetto Corsa folder in Settings, or type a folder above.").color(WARN),
                 );
             } else if !self.ac_loaded {
                 ui.label(RichText::new("Loading...").small().color(MUTED));
@@ -619,7 +661,7 @@ impl GameSettings {
                 .num_columns(2)
                 .spacing([16.0, 8.0])
                 .show(ui, |ui| {
-                    ui.label("Simulation value");
+                    row_label(ui, "Simulation value", base.simulation_value != self.ac_form.simulation_value);
                     ui.horizontal(|ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.ac_form.simulation_value)
@@ -630,23 +672,23 @@ impl GameSettings {
                     });
                     ui.end_row();
 
-                    ui.label("Logging");
-                    ui.checkbox(&mut self.ac_form.logging, "On");
+                    row_label(ui, "Logging", base.logging != self.ac_form.logging);
+                    widgets::toggle(ui, &mut self.ac_form.logging);
                     ui.end_row();
 
-                    ui.label("Developer apps");
-                    ui.checkbox(&mut self.ac_form.developer_apps, "On");
+                    row_label(ui, "Developer apps", base.developer_apps != self.ac_form.developer_apps);
+                    widgets::toggle(ui, &mut self.ac_form.developer_apps);
                     ui.end_row();
 
-                    ui.label("Free camera");
-                    ui.checkbox(&mut self.ac_form.allow_free_camera, "Allowed");
+                    row_label(ui, "Free camera", base.allow_free_camera != self.ac_form.allow_free_camera);
+                    widgets::toggle(ui, &mut self.ac_form.allow_free_camera);
                     ui.end_row();
 
-                    ui.label("Hide driver");
-                    ui.checkbox(&mut self.ac_form.hide_driver, "On");
+                    row_label(ui, "Hide driver", base.hide_driver != self.ac_form.hide_driver);
+                    widgets::toggle(ui, &mut self.ac_form.hide_driver);
                     ui.end_row();
 
-                    ui.label("Screenshot format");
+                    row_label(ui, "Screenshot format", base.screenshot_format != self.ac_form.screenshot_format);
                     egui::ComboBox::from_id_salt("game_settings_ac_screenshot")
                         .selected_text(self.ac_form.screenshot_format.clone())
                         .show_ui(ui, |ui| {
@@ -660,7 +702,7 @@ impl GameSettings {
                         });
                     ui.end_row();
 
-                    ui.label("Mirror field of view");
+                    row_label(ui, "Mirror field of view", base.mirrors_fov != self.ac_form.mirrors_fov);
                     ui.horizontal(|ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.ac_form.mirrors_fov)
@@ -670,7 +712,7 @@ impl GameSettings {
                     });
                     ui.end_row();
 
-                    ui.label("Mirror far plane");
+                    row_label(ui, "Mirror far plane", base.mirrors_far_plane != self.ac_form.mirrors_far_plane);
                     ui.horizontal(|ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.ac_form.mirrors_far_plane)
@@ -681,6 +723,18 @@ impl GameSettings {
                     ui.end_row();
                 });
 
+            let changes = ac_changes(&base, &self.ac_form);
+            let mut revert = false;
+            ui.add_space(8.0);
+            theme::card_flat().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new("What this changes").font(theme::bold(13.5)));
+                ui.add_space(4.0);
+                revert = changes_list(ui, &changes);
+            });
+            if revert {
+                self.ac_form = base.clone();
+            }
             ui.add_space(6.0);
             let parsed = self.ac_form.to_settings();
             let problems = match &parsed {
@@ -713,7 +767,7 @@ impl GameSettings {
     ) {
         theme::card().show(ui, |ui| {
             let Some(root) = root else {
-                ui.label(RichText::new("Set the Assetto Corsa folder on the Home page to make snapshots.").color(WARN));
+                ui.label(RichText::new("Set the Assetto Corsa folder in Settings to make snapshots.").color(WARN));
                 return;
             };
             ui.label(
@@ -869,4 +923,138 @@ impl Tool for GameSettings {
                 self.snapshot_section(ui, &egui_ctx, ctx.ac_root.clone(), ctx.game_running);
             });
     }
+}
+
+/// A grid label that is marked and tinted when its value differs from the saved one.
+fn row_label(ui: &mut egui::Ui, text: &str, changed: bool) {
+    if changed {
+        ui.label(RichText::new(format!("• {text}")).color(theme::ACCENT));
+    } else {
+        ui.label(text);
+    }
+}
+
+/// Rough (visual quality, performance cost) of a video setup, both 0..=100. A guide for
+/// comparing before and after, not a benchmark: it weighs each option by how much it usually
+/// changes the picture and the frame time.
+fn impact(form: &VideoForm) -> (f32, f32) {
+    let log2 = |n: f32| n.max(1.0).log2();
+    let pixels = form.width.parse::<f32>().unwrap_or(1920.0) * form.height.parse::<f32>().unwrap_or(1080.0);
+    let res = (pixels / (3840.0 * 2160.0)).clamp(0.0, 1.0);
+    let shadow = if form.shadow_map_size < 0 { 0.0 } else { ((log2(form.shadow_map_size as f32) - 5.0) / 8.0).clamp(0.0, 1.0) };
+    let aa = log2(form.aa_samples as f32) / 3.0;
+    let aniso = log2(form.anisotropic as f32) / 4.0;
+    let detail = form.world_detail as f32 / 5.0;
+    let post = if form.post_processing { 1.0 } else { 0.0 };
+    let quality = 18.0 * aa + 10.0 * aniso + 24.0 * shadow + 20.0 * detail + 14.0 * post + 14.0 * res.sqrt();
+    let cost = 24.0 * aa + 5.0 * aniso + 18.0 * shadow + 10.0 * detail + 10.0 * post + 33.0 * res;
+    (quality.clamp(0.0, 100.0), cost.clamp(0.0, 100.0))
+}
+
+/// A bar with a marker at the saved value and the new value filled, plus the difference.
+fn meter(ui: &mut egui::Ui, label: &str, saved: f32, now: f32, higher_is_better: bool) {
+    ui.horizontal(|ui| {
+        ui.add_sized([130.0, 18.0], egui::Label::new(RichText::new(label).color(MUTED)));
+        let (rect, _) = ui.allocate_exact_size(egui::vec2((ui.available_width() - 70.0).max(120.0), 10.0), egui::Sense::hover());
+        let round = egui::CornerRadius::same(5);
+        ui.painter().rect_filled(rect, round, theme::INPUT);
+        let fill_to = |v: f32| egui::Rect::from_min_size(rect.min, egui::vec2(rect.width() * (v / 100.0).clamp(0.0, 1.0), rect.height()));
+        let delta = now - saved;
+        let good = if higher_is_better { delta >= 0.0 } else { delta <= 0.0 };
+        let color = if delta.abs() < 0.5 { theme::MUTED } else if good { OK } else { WARN };
+        ui.painter().rect_filled(fill_to(now), round, color.gamma_multiply(0.85));
+        // The saved value stays visible as a tick, so a change reads as a gap.
+        let x = rect.left() + rect.width() * (saved / 100.0).clamp(0.0, 1.0);
+        ui.painter().line_segment(
+            [egui::pos2(x, rect.top() - 3.0), egui::pos2(x, rect.bottom() + 3.0)],
+            egui::Stroke::new(2.0, egui::Color32::WHITE),
+        );
+        let text = if delta.abs() < 0.5 { "same".to_string() } else { format!("{delta:+.0}") };
+        ui.label(RichText::new(text).font(theme::bold(13.0)).color(color));
+    });
+}
+
+/// Everything that differs from the saved file, as (name, was, now).
+fn video_changes(saved: &VideoForm, now: &VideoForm) -> Vec<(&'static str, String, String)> {
+    let onoff = |b: bool| if b { "On" } else { "Off" }.to_string();
+    let res = |f: &VideoForm| format!("{}x{}", f.width, f.height);
+    let mut out = Vec::new();
+    if saved.width != now.width || saved.height != now.height {
+        out.push(("Resolution", res(saved), res(now)));
+    }
+    if saved.fullscreen != now.fullscreen {
+        out.push(("Fullscreen", onoff(saved.fullscreen), onoff(now.fullscreen)));
+    }
+    if saved.vsync != now.vsync {
+        out.push(("VSync", onoff(saved.vsync), onoff(now.vsync)));
+    }
+    if saved.fps_cap != now.fps_cap {
+        let cap = |f: &VideoForm| if f.fps_cap.is_empty() { "none".to_string() } else { f.fps_cap.clone() };
+        out.push(("FPS cap", cap(saved), cap(now)));
+    }
+    if saved.aa_samples != now.aa_samples {
+        out.push(("Anti-aliasing", format!("{}x", saved.aa_samples), format!("{}x", now.aa_samples)));
+    }
+    if saved.anisotropic != now.anisotropic {
+        out.push(("Anisotropic", format!("{}x", saved.anisotropic), format!("{}x", now.anisotropic)));
+    }
+    if saved.shadow_map_size != now.shadow_map_size {
+        out.push(("Shadow map", saved.shadow_map_size.to_string(), now.shadow_map_size.to_string()));
+    }
+    if saved.world_detail != now.world_detail {
+        out.push(("World detail", saved.world_detail.to_string(), now.world_detail.to_string()));
+    }
+    if saved.post_processing != now.post_processing {
+        out.push(("Post-processing", onoff(saved.post_processing), onoff(now.post_processing)));
+    }
+    out
+}
+
+/// Changes of the assetto_corsa.ini form as (name, was, now).
+fn ac_changes(saved: &AcForm, now: &AcForm) -> Vec<(&'static str, String, String)> {
+    let onoff = |b: bool| if b { "On" } else { "Off" }.to_string();
+    let mut out = Vec::new();
+    if saved.simulation_value != now.simulation_value {
+        out.push(("Simulation value", saved.simulation_value.clone(), now.simulation_value.clone()));
+    }
+    if saved.logging != now.logging {
+        out.push(("Logging", onoff(saved.logging), onoff(now.logging)));
+    }
+    if saved.developer_apps != now.developer_apps {
+        out.push(("Developer apps", onoff(saved.developer_apps), onoff(now.developer_apps)));
+    }
+    if saved.allow_free_camera != now.allow_free_camera {
+        out.push(("Free camera", onoff(saved.allow_free_camera), onoff(now.allow_free_camera)));
+    }
+    if saved.hide_driver != now.hide_driver {
+        out.push(("Hide driver", onoff(saved.hide_driver), onoff(now.hide_driver)));
+    }
+    if saved.screenshot_format != now.screenshot_format {
+        out.push(("Screenshot format", saved.screenshot_format.clone(), now.screenshot_format.clone()));
+    }
+    if saved.mirrors_fov != now.mirrors_fov {
+        out.push(("Mirror field of view", saved.mirrors_fov.clone(), now.mirrors_fov.clone()));
+    }
+    if saved.mirrors_far_plane != now.mirrors_far_plane {
+        out.push(("Mirror far plane", saved.mirrors_far_plane.clone(), now.mirrors_far_plane.clone()));
+    }
+    out
+}
+
+/// The "was → now" list with a revert button. Returns true when revert was clicked.
+fn changes_list(ui: &mut egui::Ui, changes: &[(&'static str, String, String)]) -> bool {
+    if changes.is_empty() {
+        ui.label(RichText::new("Nothing changed yet.").color(MUTED));
+        return false;
+    }
+    for (name, was, now) in changes {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(*name).color(MUTED));
+            ui.label(RichText::new(was).color(theme::FAINT).strikethrough());
+            ui.label(RichText::new("→").color(MUTED));
+            ui.label(RichText::new(now).font(theme::bold(13.5)).color(theme::ACCENT));
+        });
+    }
+    ui.add_space(4.0);
+    ui.button("Revert all changes").clicked()
 }

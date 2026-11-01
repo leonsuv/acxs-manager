@@ -7,6 +7,7 @@ use crate::ui::{theme, widgets, Notice};
 use acxs_manager::replay::{
     format_lap_time, read_replay_samples, ReplayInfo, ReplaySamples, Sample,
 };
+use acxs_manager::replay_analysis;
 use acxs_manager::replay_player::Player;
 use acxs_manager::telemetry::LapInfo;
 use acxs_manager::telemetry_csv::{laps_to_csv, replay_samples_to_csv, write_csv};
@@ -235,7 +236,7 @@ impl Tool for ReplayViewer {
                 Some(loaded) => {
                     playback(ui, loaded);
                     ui.add_space(12.0);
-                    summary(ui, &loaded.path, &loaded.info);
+                    summary(ui, &loaded.path, &loaded.info, loaded.player.samples());
                 }
             });
     }
@@ -341,7 +342,8 @@ fn lap_rows(info: &ReplayInfo) -> Vec<LapInfo> {
         .collect()
 }
 
-fn summary(ui: &mut egui::Ui, path: &Path, info: &ReplayInfo) {
+fn summary(ui: &mut egui::Ui, path: &Path, info: &ReplayInfo, samples: &[Sample]) {
+    let found = replay_analysis::analyze(samples);
     let track = match &info.config_track {
         Some(config) => format!("{} ({config})", info.track),
         None => info.track.clone(),
@@ -360,6 +362,11 @@ fn summary(ui: &mut egui::Ui, path: &Path, info: &ReplayInfo) {
         widgets::key_value(ui, "Samples", &info.sample_count.to_string());
         widgets::key_value(ui, "Weather", weather);
         widgets::key_value(ui, "Cars in replay", &info.num_cars.to_string());
+        widgets::key_value(ui, "Distance", &format!("{:.1} km", found.distance_km));
+        widgets::key_value(ui, "Top / average speed", &format!("{:.0} / {:.0} km/h", found.max_speed, found.average_speed));
+        widgets::key_value(ui, "Full throttle", &format!("{:.0}%", found.full_throttle_share * 100.0));
+        widgets::key_value(ui, "Hard braking", &format!("{:.0} s", found.hard_braking_s));
+        widgets::key_value(ui, "Impacts / drops", &format!("{} / {}", found.impacts, found.drops));
     });
     ui.add_space(12.0);
 

@@ -270,6 +270,9 @@ struct RaceRecord {
     ai_aggression: Option<u8>,
     player_name: String,
     grid_position: u32,
+    /// Added later; presets saved before it load with the defaults.
+    #[serde(default)]
+    extras: crate::race_options::RaceExtras,
 }
 
 impl From<&Preset> for PresetRecord {
@@ -296,6 +299,7 @@ impl From<&QuickRace> for RaceRecord {
             ai_aggression: race.ai_aggression,
             player_name: race.player_name.clone(),
             grid_position: race.grid_position,
+            extras: race.extras,
         }
     }
 }
@@ -315,6 +319,7 @@ impl From<RaceRecord> for QuickRace {
             ai_aggression: record.ai_aggression,
             player_name: record.player_name,
             grid_position: record.grid_position,
+            extras: record.extras,
         }
     }
 }

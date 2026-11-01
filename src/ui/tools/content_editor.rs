@@ -173,7 +173,7 @@ impl Tool for MetadataChecks {
             _ => {
                 widgets::empty_state(
                     ui,
-                    "No valid Assetto Corsa folder is set. Set it on the Home page to edit metadata and run checks.",
+                    "No valid Assetto Corsa folder is set. Set it in Settings to edit metadata and run checks.",
                 );
                 return;
             }

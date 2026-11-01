@@ -1,7 +1,7 @@
 //! Install Finder: finds Assetto Corsa installs through Steam, opens or copies
 //! their paths, and checks a folder the user picks by hand.
 //!
-//! This tool cannot change app settings. The Home page's Assetto Corsa folder
+//! This tool cannot change app settings. The Settings page's Assetto Corsa folder
 //! field is where a chosen path is saved.
 
 use super::{Tool, ToolContext};
@@ -59,7 +59,7 @@ impl Tool for InstallFinder {
             theme::card().show(ui, |ui| {
                 ui.label(
                     RichText::new(
-                        "The Home page's Assetto Corsa folder field is where a chosen path is saved. \
+                        "The Settings page's Assetto Corsa folder field is where a chosen path is saved. \
                          This tool cannot change app settings: copy the path, paste it into that field, \
                          then press Save folders.",
                     )
@@ -259,7 +259,7 @@ fn path_actions(ui: &mut egui::Ui, notices: &mut Vec<Notice>, path: &Path) {
             ui.ctx().copy_text(path.display().to_string());
             notices.push(Notice {
                 text: format!(
-                    "Copied path: {}. Paste it into the Assetto Corsa folder field on the Home page, then press Save folders.",
+                    "Copied path: {}. Paste it into the Assetto Corsa folder field in Settings, then press Save folders.",
                     path.display()
                 ),
                 ok: true,

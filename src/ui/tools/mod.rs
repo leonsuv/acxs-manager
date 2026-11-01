@@ -26,6 +26,7 @@ mod setups;
 mod server;
 mod replay;
 mod laptimes;
+mod sessions;
 mod live_telemetry;
 mod csp_config;
 mod game_settings;
@@ -34,6 +35,7 @@ mod collections;
 mod install;
 mod model_tools;
 mod logs;
+#[allow(dead_code)]
 mod rtx;
 mod packages;
 mod setup_advice;
@@ -49,6 +51,13 @@ mod car_tuning;
 mod strategy;
 mod lights_profile;
 
+/// What a tool asks the user to choose on the Cars or Tracks page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickKind {
+    Car,
+    Track,
+}
+
 pub trait Tool {
     /// Label in the tool list.
     fn name(&self) -> &'static str;
@@ -59,6 +68,20 @@ pub trait Tool {
     /// Called every frame for every tool, also while another page is shown, so
     /// background work (live telemetry, the web dashboard) keeps flowing.
     fn tick(&mut self) {}
+    /// Fill in a race: other pages offer "Race this car / on this track" and hand the choice here.
+    fn set_race(&mut self, _track: Option<&str>, _layout: Option<&str>, _car: Option<&str>, _skin: Option<&str>) {}
+    /// The tool wants the user to pick a car or track on its page; taken once by the app.
+    fn take_pick(&mut self) -> Option<PickKind> {
+        None
+    }
+    /// The tool wants to open another tool page, by name; taken once by the app.
+    fn take_goto(&mut self) -> Option<&'static str> {
+        None
+    }
+    /// Files dropped onto the window. Return true when this tool took them.
+    fn on_drop(&mut self, _ctx: &egui::Context, _paths: &[PathBuf]) -> bool {
+        false
+    }
 }
 
 /// Every tool page, in display order.
@@ -73,6 +96,7 @@ pub fn registry() -> Vec<Box<dyn Tool>> {
         server::tool(),
         replay::tool(),
         laptimes::tool(),
+        sessions::tool(),
         live_telemetry::tool(),
         csp_config::tool(),
         game_settings::tool(),
@@ -81,7 +105,8 @@ pub fn registry() -> Vec<Box<dyn Tool>> {
         install::tool(),
         model_tools::tool(),
         logs::tool(),
-        rtx::tool(),
+        // RTX & ReShade is switched off for now: it does not work yet.
+        // rtx::tool(),
         packages::tool(),
         setup_advice::tool(),
         plate::tool(),

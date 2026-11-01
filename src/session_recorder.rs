@@ -1,0 +1,872 @@
+//! Records the player's own driving from the game's shared memory.
+//!
+//! [`SessionAggregator`] is pure: it is fed snapshots with the elapsed time and keeps running
+//! sums, maxima and event counts, no per-sample storage. [`spawn`] runs it on a background
+//! thread and writes one JSON file per session to `%APPDATA%\ACXS\sessions\`.
+
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use serde::{Deserialize, Serialize};
+
+use crate::driving_stats::DrivenSession;
+use crate::sharedmem::{self, AcStatus, Snapshot};
+
+/// Sessions shorter than this many seconds of live driving are not saved.
+const MIN_SESSION_SECONDS: f64 = 30.0;
+/// Sample period while the game is live (about 30 Hz).
+const SAMPLE_PERIOD: Duration = Duration::from_millis(33);
+/// Poll period while no game is running.
+const IDLE_PERIOD: Duration = Duration::from_secs(2);
+/// Seconds without readable shared memory before a session is closed.
+const GONE_AFTER: f64 = 5.0;
+/// Largest step one sample may add, so a stalled thread cannot invent drive time.
+const MAX_STEP: f64 = 0.2;
+/// Wheel load in newtons below which a wheel counts as off the ground.
+const AIRBORNE_LOAD: f32 = 1.0;
+/// All four wheels must stay light this long before a jump counts.
+const MIN_AIRBORNE: f64 = 0.25;
+/// Peak g and speed loss that together make a crash.
+const CRASH_G: f32 = 4.5;
+const CRASH_SPEED_LOSS: f32 = 25.0;
+const CRASH_WINDOW: usize = 10;
+/// Seconds between two crashes of the same kind that count separately.
+const EVENT_GAP: f64 = 3.0;
+
+/// One lap as the game timed it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecordedLap {
+    pub number: i32,
+    pub time_ms: i32,
+}
+
+/// Kinds counted by occurrence, in the order of `SessionAggregator::event_counts`.
+const COUNTED: [EventKind; 6] = [
+    EventKind::Crash,
+    EventKind::OffTrack,
+    EventKind::FrontLockup,
+    EventKind::RearLockup,
+    EventKind::Wheelspin,
+    EventKind::Jump,
+];
+
+/// Number of equal slices of the lap used to place events.
+pub const SEGMENTS: usize = 100;
+
+/// What happened at a spot on the track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventKind {
+    Crash,
+    OffTrack,
+    FrontLockup,
+    RearLockup,
+    Wheelspin,
+    Jump,
+    Understeer,
+    Oversteer,
+}
+
+impl EventKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            EventKind::Crash => "crashes",
+            EventKind::OffTrack => "off track",
+            EventKind::FrontLockup => "front lock-ups",
+            EventKind::RearLockup => "rear lock-ups",
+            EventKind::Wheelspin => "wheelspins",
+            EventKind::Jump => "jumps",
+            EventKind::Understeer => "understeer",
+            EventKind::Oversteer => "oversteer",
+        }
+    }
+}
+
+/// Events of one kind in one slice of the lap. Understeer and oversteer count samples-worth
+/// of time in tenths of a second, the rest count occurrences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hotspot {
+    /// Slice 0..[`SEGMENTS`] of the normalized track position.
+    pub segment: u8,
+    pub kind: EventKind,
+    pub count: u32,
+}
+
+/// What was recorded for one session. This is the file format.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct RecordedSession {
+    pub car_id: String,
+    pub skin: String,
+    pub track_id: String,
+    pub track_layout: String,
+    /// Local start, `YYYY-MM-DDTHH:MM:SS`.
+    pub started_at: String,
+    pub seconds: f64,
+    pub distance_m: f64,
+    pub max_speed: f64,
+    pub crashes: u32,
+    pub offroad: u32,
+    pub jumps: u32,
+    pub longest_airborne: f64,
+    pub total_airborne: f64,
+    pub front_lockups: u32,
+    pub rear_lockups: u32,
+    pub wheelspins: u32,
+    /// Seconds of hard cornering that were judged, and how long of it was under- or oversteer.
+    #[serde(default)]
+    pub cornering_seconds: f64,
+    #[serde(default)]
+    pub understeer_seconds: f64,
+    #[serde(default)]
+    pub oversteer_seconds: f64,
+    pub laps: Vec<RecordedLap>,
+    pub best_lap_ms: Option<i32>,
+    #[serde(default)]
+    pub hotspots: Vec<Hotspot>,
+    /// Average world position per slice of the lap as `(slice, x, z)`, enough to draw the track.
+    #[serde(default)]
+    pub path: Vec<(u8, f32, f32)>,
+}
+
+impl RecordedSession {
+    /// Track id in the Content Manager style, `track/layout`.
+    pub fn full_track_id(&self) -> String {
+        if self.track_layout.is_empty() { self.track_id.clone() } else { format!("{}/{}", self.track_id, self.track_layout) }
+    }
+
+    /// The shape the Home statistics use.
+    pub fn to_driven(&self) -> DrivenSession {
+        DrivenSession {
+            car_id: self.car_id.clone(),
+            track_id: self.full_track_id(),
+            date: self.started_at.get(..10).unwrap_or_default().to_string(),
+            seconds: self.seconds,
+            crashes: self.crashes,
+            offroad: self.offroad,
+            max_speed: self.max_speed,
+            distance_m: self.distance_m,
+            longest_airborne: self.longest_airborne,
+            best_lap_ms: self.best_lap_ms.filter(|ms| *ms > 0).map(|ms| ms as u32),
+            lockups: self.front_lockups + self.rear_lockups,
+            wheelspins: self.wheelspins,
+            cornering_seconds: self.cornering_seconds,
+            understeer_seconds: self.understeer_seconds,
+            oversteer_seconds: self.oversteer_seconds,
+        }
+    }
+}
+
+/// Lateral g above which a corner is judged for balance.
+const BALANCE_MIN_G: f32 = 0.7;
+/// Speed band, km/h, for learning the steering-to-yaw gain at low load.
+const CAL_SPEED: (f32, f32) = (20.0, 80.0);
+/// Lateral g below which the car is assumed to steer neutrally while calibrating.
+const CAL_MAX_G: f32 = 0.2;
+/// Samples needed before the gain is trusted.
+const CAL_SAMPLES: u32 = 200;
+/// Yaw ratio below this is understeer, above [`OVERSTEER_RATIO`] is oversteer.
+const UNDERSTEER_RATIO: f64 = 0.8;
+const OVERSTEER_RATIO: f64 = 1.25;
+
+/// Judges understeer and oversteer without any car data.
+///
+/// At low speed and low lateral load a car follows the steering geometry, so
+/// `yaw_rate / speed = gain * steer_angle` holds whatever the wheelbase and steering ratio are.
+/// The gain is fitted by least squares from such samples. In a hard corner the measured yaw
+/// rate is compared with what that gain predicts: well below means the front gave up
+/// (understeer), well above means the rear rotated (oversteer).
+#[derive(Debug, Default)]
+pub struct Balance {
+    sum_xy: f64,
+    sum_xx: f64,
+    samples: u32,
+}
+
+/// Verdict for one sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Handling {
+    Neutral,
+    Understeer,
+    Oversteer,
+}
+
+impl Balance {
+    /// Feeds one sample. Returns a verdict only for hard cornering once the gain is known.
+    pub fn sample(&mut self, speed_kmh: f32, steer: f32, yaw_rate: f32, lateral_g: f32) -> Option<Handling> {
+        let v = f64::from(speed_kmh) / 3.6;
+        if v < 1.0 || steer.abs() < 1e-3 {
+            return None;
+        }
+        let (x, y) = (f64::from(steer), f64::from(yaw_rate) / v);
+        if (CAL_SPEED.0..=CAL_SPEED.1).contains(&speed_kmh) && lateral_g.abs() < CAL_MAX_G && steer.abs() > 0.02 {
+            self.sum_xy += x * y;
+            self.sum_xx += x * x;
+            self.samples = self.samples.saturating_add(1);
+        }
+        if self.samples < CAL_SAMPLES || self.sum_xx <= 0.0 || speed_kmh < 60.0 || lateral_g.abs() < BALANCE_MIN_G {
+            return None;
+        }
+        let gain = self.sum_xy / self.sum_xx;
+        if gain.abs() < 1e-6 {
+            return None;
+        }
+        let ratio = y / (gain * x);
+        Some(if ratio < UNDERSTEER_RATIO {
+            Handling::Understeer
+        } else if ratio > OVERSTEER_RATIO {
+            Handling::Oversteer
+        } else {
+            Handling::Neutral
+        })
+    }
+}
+
+/// A rising-edge detector that ignores repeats within [`EVENT_GAP`] seconds.
+#[derive(Debug, Default)]
+struct Debounce {
+    last: Option<f64>,
+}
+
+impl Debounce {
+    fn fire(&mut self, now: f64) -> bool {
+        if self.last.is_some_and(|t| now - t < EVENT_GAP) {
+            self.last = Some(now);
+            return false;
+        }
+        self.last = Some(now);
+        true
+    }
+}
+
+/// Folds snapshots into a [`RecordedSession`].
+#[derive(Debug, Default)]
+pub struct SessionAggregator {
+    session: RecordedSession,
+    clock: f64,
+    speeds: VecDeque<f32>,
+    crash: Debounce,
+    front_lock: Debounce,
+    rear_lock: Debounce,
+    spin: Debounce,
+    air_for: f64,
+    air_counted: bool,
+    tyres_out: bool,
+    last_completed: Option<i32>,
+    balance: Balance,
+    hot: std::collections::BTreeMap<(u8, EventKind), f64>,
+    path_sum: Vec<[f64; 3]>,
+    started: bool,
+}
+
+impl SessionAggregator {
+    pub fn new(started_at: String) -> Self {
+        Self { session: RecordedSession { started_at, ..RecordedSession::default() }, ..Self::default() }
+    }
+
+    /// Car and track this aggregator was opened for, `None` until the first live sample.
+    pub fn identity(&self) -> Option<(&str, &str)> {
+        self.started.then_some((self.session.car_id.as_str(), self.session.track_id.as_str()))
+    }
+
+    pub fn seconds(&self) -> f64 {
+        self.session.seconds
+    }
+
+    /// Adds one sample. `dt` is the time since the previous sample in seconds.
+    pub fn feed(&mut self, snap: &Snapshot, dt: f64) {
+        if snap.graphics.status != AcStatus::Live || snap.physics.is_ai_controlled != 0 {
+            return;
+        }
+        let dt = dt.clamp(0.0, MAX_STEP);
+        let (p, g, s) = (&snap.physics, &snap.graphics, &snap.static_page);
+        if !self.started {
+            self.started = true;
+            self.session.car_id = s.car_model.clone();
+            self.session.skin = s.car_skin.clone();
+            self.session.track_id = s.track.clone();
+            self.session.track_layout = s.track_configuration.clone();
+        }
+        self.clock += dt;
+        let speed = f64::from(p.speed_kmh.max(0.0));
+        self.session.seconds += dt;
+        self.session.distance_m += speed / 3.6 * dt;
+        self.session.max_speed = self.session.max_speed.max(speed);
+
+        let before = self.event_counts();
+        self.track_laps(g.completed_laps, g.last_lap_ms, g.best_lap_ms);
+        self.track_tyres_out(p.number_of_tyres_out);
+        self.track_airborne(&p.wheel_load, dt);
+        self.track_crash(p.speed_kmh, &p.g_forces);
+        self.track_slip(p, s.tyre_radius, speed);
+        let handling = self.balance.sample(p.speed_kmh, p.steer_angle, p.local_angular_velocity[1], p.g_forces[0]);
+        let segment = (g.normalized_car_position.clamp(0.0, 0.9999) * SEGMENTS as f32) as u8;
+        if self.path_sum.is_empty() {
+            self.path_sum = vec![[0.0; 3]; SEGMENTS];
+        }
+        let cell = &mut self.path_sum[usize::from(segment)];
+        cell[0] += f64::from(g.car_coordinates[0]);
+        cell[1] += f64::from(g.car_coordinates[2]);
+        cell[2] += 1.0;
+        let after = self.event_counts();
+        for (i, kind) in COUNTED.iter().enumerate() {
+            if after[i] > before[i] {
+                *self.hot.entry((segment, *kind)).or_default() += f64::from(after[i] - before[i]);
+            }
+        }
+        if let Some(h) = handling {
+            self.session.cornering_seconds += dt;
+            match h {
+                Handling::Understeer => {
+                    self.session.understeer_seconds += dt;
+                    *self.hot.entry((segment, EventKind::Understeer)).or_default() += dt * 10.0;
+                }
+                Handling::Oversteer => {
+                    self.session.oversteer_seconds += dt;
+                    *self.hot.entry((segment, EventKind::Oversteer)).or_default() += dt * 10.0;
+                }
+                Handling::Neutral => {}
+            }
+        }
+    }
+
+    fn event_counts(&self) -> [u32; 6] {
+        let s = &self.session;
+        [s.crashes, s.offroad, s.front_lockups, s.rear_lockups, s.wheelspins, s.jumps]
+    }
+
+    fn track_laps(&mut self, completed: i32, last_ms: i32, best_ms: i32) {
+        if self.last_completed.is_some_and(|prev| completed > prev) && last_ms > 0 {
+            self.session.laps.push(RecordedLap { number: completed, time_ms: last_ms });
+        }
+        self.last_completed = Some(completed);
+        if best_ms > 0 {
+            self.session.best_lap_ms = Some(self.session.best_lap_ms.map_or(best_ms, |b| b.min(best_ms)));
+        }
+    }
+
+    fn track_tyres_out(&mut self, out: i32) {
+        let off = out >= 3;
+        if off && !self.tyres_out {
+            self.session.offroad += 1;
+        }
+        self.tyres_out = off;
+    }
+
+    fn track_airborne(&mut self, load: &[f32; 4], dt: f64) {
+        if load.iter().all(|l| *l < AIRBORNE_LOAD) {
+            self.air_for += dt;
+            if self.air_for >= MIN_AIRBORNE {
+                if !self.air_counted {
+                    self.air_counted = true;
+                    self.session.jumps += 1;
+                    // Credit the time spent before the threshold was reached.
+                    self.session.total_airborne += self.air_for - dt;
+                }
+                self.session.total_airborne += dt;
+                self.session.longest_airborne = self.session.longest_airborne.max(self.air_for);
+            }
+        } else {
+            self.air_for = 0.0;
+            self.air_counted = false;
+        }
+    }
+
+    fn track_crash(&mut self, speed: f32, g_forces: &[f32; 3]) {
+        if self.speeds.len() == CRASH_WINDOW {
+            self.speeds.pop_front();
+        }
+        self.speeds.push_back(speed);
+        let peak_g = g_forces.iter().fold(0.0_f32, |m, g| m.max(g.abs()));
+        let top = self.speeds.iter().copied().fold(0.0_f32, f32::max);
+        if peak_g >= CRASH_G && top - speed >= CRASH_SPEED_LOSS && self.crash.fire(self.clock) {
+            self.session.crashes += 1;
+        }
+    }
+
+    fn track_slip(&mut self, p: &sharedmem::PhysicsPage, radius: [f32; 4], speed_kmh: f64) {
+        let v = (speed_kmh / 3.6) as f32;
+        if v * 3.6 < 40.0 {
+            return;
+        }
+        // Rolling speed of each wheel in m/s from its angular speed.
+        let roll: Vec<f32> = (0..4).map(|i| (p.wheel_angular_speed[i] * radius[i]).abs()).collect();
+        if p.brake > 0.6 {
+            if roll[..2].iter().any(|r| *r < 0.7 * v) && self.front_lock.fire(self.clock) {
+                self.session.front_lockups += 1;
+            }
+            if roll[2..].iter().any(|r| *r < 0.7 * v) && self.rear_lock.fire(self.clock) {
+                self.session.rear_lockups += 1;
+            }
+        } else if p.throttle > 0.6 && roll[2..].iter().any(|r| *r > 1.3 * v) && self.spin.fire(self.clock) {
+            self.session.wheelspins += 1;
+        }
+    }
+
+    /// The session so far, or `None` when it was too short to keep.
+    pub fn finish(mut self) -> Option<RecordedSession> {
+        if !self.started || self.session.seconds < MIN_SESSION_SECONDS {
+            return None;
+        }
+        self.session.path = self
+            .path_sum
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c[2] > 0.0)
+            .map(|(i, c)| (i as u8, (c[0] / c[2]) as f32, (c[1] / c[2]) as f32))
+            .collect();
+        self.session.hotspots = self
+            .hot
+            .iter()
+            .map(|(&(segment, kind), &value)| Hotspot { segment, kind, count: value.round() as u32 })
+            .filter(|h| h.count > 0)
+            .collect();
+        Some(self.session)
+    }
+}
+
+/// `%APPDATA%\ACXS\sessions`.
+pub fn sessions_dir() -> PathBuf {
+    crate::settings::settings_path().parent().map_or_else(|| PathBuf::from("sessions"), |dir| dir.join("sessions"))
+}
+
+/// Writes the session as `<started_at>-<car>.json` and returns the path.
+pub fn save(dir: &Path, session: &RecordedSession) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let stamp: String = session.started_at.chars().filter(char::is_ascii_digit).collect();
+    let car: String = session.car_id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+    let path = dir.join(format!("{stamp}-{car}.json"));
+    let json = serde_json::to_string_pretty(session).map_err(std::io::Error::other)?;
+    std::fs::write(&path, json)?;
+    Ok(path)
+}
+
+/// Loads every readable session file in `dir`, oldest first. Unreadable files are skipped.
+pub fn load_all(dir: &Path) -> Vec<RecordedSession> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut sessions: Vec<RecordedSession> = entries
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .filter_map(|text| serde_json::from_str(&text).ok())
+        .collect();
+    sessions.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+    sessions
+}
+
+/// Shared switches for the recorder thread.
+#[derive(Debug, Default)]
+pub struct RecorderControl {
+    /// True while a session is being recorded.
+    pub recording: AtomicBool,
+    /// Set to stop recording new sessions.
+    pub paused: AtomicBool,
+    /// Sessions saved since the app started.
+    pub saved: std::sync::atomic::AtomicUsize,
+}
+
+/// Starts the recorder thread. It lives for the rest of the process.
+pub fn spawn(control: Arc<RecorderControl>, on_saved: impl Fn() + Send + 'static) {
+    std::thread::Builder::new()
+        .name("session-recorder".into())
+        .spawn(move || {
+            let counter = Arc::clone(&control);
+            run(&control, &|| {
+                counter.saved.fetch_add(1, Ordering::Relaxed);
+                on_saved();
+            });
+        })
+        .ok();
+}
+
+fn now_stamp() -> String {
+    chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
+}
+
+fn run(control: &RecorderControl, on_saved: &dyn Fn()) {
+    let dir = sessions_dir();
+    let mut agg: Option<SessionAggregator> = None;
+    let mut last = Instant::now();
+    let mut gone = 0.0_f64;
+    loop {
+        let snap = if control.paused.load(Ordering::Relaxed) { None } else { sharedmem::read_snapshot().ok() };
+        let now = Instant::now();
+        let dt = now.duration_since(last).as_secs_f64();
+        last = now;
+        match snap {
+            Some(snap) => {
+                gone = 0.0;
+                let changed = agg.as_ref().and_then(SessionAggregator::identity).is_some_and(|(car, track)| {
+                    car != snap.static_page.car_model || track != snap.static_page.track
+                });
+                if changed {
+                    close(agg.take(), &dir, on_saved);
+                }
+                if snap.graphics.status == AcStatus::Live && agg.is_none() {
+                    agg = Some(SessionAggregator::new(now_stamp()));
+                }
+                if let Some(a) = agg.as_mut() {
+                    a.feed(&snap, dt);
+                }
+            }
+            None => gone += dt,
+        }
+        if gone >= GONE_AFTER {
+            close(agg.take(), &dir, on_saved);
+        }
+        control.recording.store(agg.is_some(), Ordering::Relaxed);
+        std::thread::sleep(if agg.is_some() { SAMPLE_PERIOD } else { IDLE_PERIOD });
+    }
+}
+
+/// Archived replays kept; older ones are deleted from the ACXS archive (never from the game's folder).
+const KEEP_REPLAYS: usize = 20;
+
+/// `%APPDATA%\ACXS\replays`.
+pub fn replay_archive_dir() -> PathBuf {
+    sessions_dir().parent().map_or_else(|| PathBuf::from("replays"), |dir| dir.join("replays"))
+}
+
+/// Copies replays from `source` that were written at or after `since` into `archive`, skipping
+/// ones already there, then trims the archive to [`KEEP_REPLAYS`]. Returns the number copied.
+pub fn archive_replays(source: &Path, archive: &Path, since: std::time::SystemTime) -> std::io::Result<usize> {
+    let mut copied = 0;
+    for entry in std::fs::read_dir(source)?.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.extension().is_none_or(|x| !x.eq_ignore_ascii_case("acreplay")) {
+            continue;
+        }
+        let modified = entry.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+        let Some(name) = path.file_name() else { continue };
+        if modified < since || archive.join(name).exists() {
+            continue;
+        }
+        std::fs::create_dir_all(archive)?;
+        std::fs::copy(&path, archive.join(name))?;
+        copied += 1;
+    }
+    if let Ok(read) = std::fs::read_dir(archive) {
+        let mut files: Vec<_> = read
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("acreplay")))
+            .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+            .collect();
+        files.sort();
+        let excess = files.len().saturating_sub(KEEP_REPLAYS);
+        for (_, path) in files.into_iter().take(excess) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    Ok(copied)
+}
+
+fn close(agg: Option<SessionAggregator>, dir: &Path, on_saved: &dyn Fn()) {
+    if let Some(session) = agg.and_then(SessionAggregator::finish) {
+        if save(dir, &session).is_ok() {
+            if let Some(docs) = crate::settings::ac_documents_dir() {
+                // The game finishes writing the replay when the session ends; a start window of
+                // the session length plus a minute catches it and nothing older.
+                let since = std::time::SystemTime::now() - Duration::from_secs_f64(session.seconds + 60.0);
+                let _ = archive_replays(&docs.join("replay").join("temp"), &replay_archive_dir(), since);
+            }
+            on_saved();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+
+    fn snap() -> Snapshot {
+        let mut physics = sharedmem::parse_physics(&[0u8; sharedmem::PHYSICS_PAGE_LEN]).unwrap();
+        physics.wheel_load = [3000.0; 4];
+        physics.wheel_angular_speed = [100.0; 4];
+        let mut graphics = sharedmem::parse_graphics(&[0u8; sharedmem::GRAPHICS_PAGE_LEN]).unwrap();
+        graphics.status = AcStatus::Live;
+        let mut static_page = sharedmem::parse_static(&[0u8; sharedmem::STATIC_PAGE_LEN]).unwrap();
+        static_page.car_model = "bmw_m3_e92".into();
+        static_page.track = "ks_nordschleife".into();
+        static_page.tyre_radius = [0.3; 4];
+        Snapshot { physics, graphics, static_page }
+    }
+
+
+    #[test]
+    fn accumulates_time_distance_and_top_speed() {
+        let mut agg = SessionAggregator::new("2026-11-01T10:00:00".into());
+        let mut s = snap();
+        s.physics.speed_kmh = 100.0;
+        s.physics.wheel_angular_speed = [92.6; 4];
+        for _ in 0..600 {
+            agg.feed(&s, 0.05);
+        }
+        s.physics.speed_kmh = 180.0;
+        s.physics.wheel_angular_speed = [166.6; 4];
+        agg.feed(&s, 0.05);
+        let done = agg.finish().expect("long enough");
+        assert!((done.seconds - 30.05).abs() < 1e-6);
+        assert_eq!(done.max_speed, 180.0);
+        assert!((done.distance_m - (100.0 / 3.6 * 30.0 + 180.0 / 3.6 * 0.05)).abs() < 1e-3);
+        assert_eq!(done.car_id, "bmw_m3_e92");
+    }
+
+    #[test]
+    fn short_or_paused_sessions_are_dropped() {
+        let mut agg = SessionAggregator::new(String::new());
+        let mut s = snap();
+        s.physics.speed_kmh = 50.0;
+        agg.feed(&s, 0.1);
+        s.graphics.status = AcStatus::Pause;
+        for _ in 0..1000 {
+            agg.feed(&s, 0.1);
+        }
+        assert!(agg.finish().is_none());
+    }
+
+    #[test]
+    fn counts_a_jump_once_and_measures_it() {
+        let mut agg = SessionAggregator::new(String::new());
+        let mut s = snap();
+        s.physics.speed_kmh = 200.0;
+        s.physics.wheel_angular_speed = [185.0; 4];
+        for _ in 0..400 {
+            agg.feed(&s, 0.1);
+        }
+        s.physics.wheel_load = [0.0; 4];
+        for _ in 0..20 {
+            agg.feed(&s, 0.1);
+        }
+        s.physics.wheel_load = [3000.0; 4];
+        agg.feed(&s, 0.1);
+        s.physics.wheel_load = [0.0, 3000.0, 0.0, 0.0];
+        for _ in 0..20 {
+            agg.feed(&s, 0.1);
+        }
+        let done = agg.finish().unwrap();
+        assert_eq!(done.jumps, 1);
+        assert!((done.longest_airborne - 2.0).abs() < 1e-6);
+        assert!((done.total_airborne - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn crash_needs_both_g_and_speed_loss_and_is_debounced() {
+        let mut agg = SessionAggregator::new(String::new());
+        let mut s = snap();
+        s.physics.speed_kmh = 150.0;
+        s.physics.wheel_angular_speed = [138.0; 4];
+        for _ in 0..400 {
+            agg.feed(&s, 0.1);
+        }
+        // Hard braking alone: speed loss without a spike.
+        s.physics.speed_kmh = 100.0;
+        s.physics.g_forces = [0.0, 0.0, 2.0];
+        agg.feed(&s, 0.1);
+        assert_eq!(agg.session.crashes, 0);
+        // Wall: a g spike with the speed collapsing, twice within the gap.
+        s.physics.speed_kmh = 20.0;
+        s.physics.g_forces = [6.0, 0.0, 0.0];
+        agg.feed(&s, 0.1);
+        agg.feed(&s, 0.1);
+        assert_eq!(agg.session.crashes, 1);
+    }
+
+    #[test]
+    fn detects_front_lockup_and_offroad_edges() {
+        let mut agg = SessionAggregator::new(String::new());
+        let mut s = snap();
+        s.physics.speed_kmh = 120.0;
+        s.physics.brake = 1.0;
+        s.physics.wheel_angular_speed = [30.0, 30.0, 110.0, 110.0];
+        agg.feed(&s, 0.1);
+        assert_eq!(agg.session.front_lockups, 1);
+        assert_eq!(agg.session.rear_lockups, 0);
+        s.physics.number_of_tyres_out = 4;
+        agg.feed(&s, 0.1);
+        agg.feed(&s, 0.1);
+        s.physics.number_of_tyres_out = 0;
+        agg.feed(&s, 0.1);
+        s.physics.number_of_tyres_out = 3;
+        agg.feed(&s, 0.1);
+        assert_eq!(agg.session.offroad, 2);
+    }
+
+    #[test]
+    fn laps_are_recorded_when_the_counter_advances() {
+        let mut agg = SessionAggregator::new(String::new());
+        let mut s = snap();
+        s.graphics.completed_laps = 0;
+        agg.feed(&s, 0.1);
+        s.graphics.completed_laps = 1;
+        s.graphics.last_lap_ms = 95_000;
+        s.graphics.best_lap_ms = 95_000;
+        agg.feed(&s, 0.1);
+        assert_eq!(agg.session.laps, vec![RecordedLap { number: 1, time_ms: 95_000 }]);
+        assert_eq!(agg.session.best_lap_ms, Some(95_000));
+    }
+
+    #[test]
+    fn save_and_load_round_trip() {
+        let dir = std::env::temp_dir().join(format!("acxs-rec-test-{}", std::process::id()));
+        let session = RecordedSession {
+            car_id: "a_car".into(),
+            track_id: "a_track".into(),
+            track_layout: "gp".into(),
+            started_at: "2026-11-01T10:00:00".into(),
+            seconds: 61.0,
+            ..RecordedSession::default()
+        };
+        save(&dir, &session).unwrap();
+        let loaded = load_all(&dir);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(loaded, vec![session.clone()]);
+        assert_eq!(session.to_driven().track_id, "a_track/gp");
+        assert_eq!(session.to_driven().date, "2026-11-01");
+    }
+
+    #[test]
+    fn balance_learns_gain_then_flags_understeer_and_oversteer() {
+        let mut b = Balance::default();
+        // Low speed, gain 0.1 (yaw/v per unit steer).
+        for i in 0..300 {
+            let steer = 0.1 + (i % 5) as f32 * 0.05;
+            let v_kmh = 50.0;
+            let yaw = 0.1 * steer * (v_kmh / 3.6);
+            assert_eq!(b.sample(v_kmh, steer, yaw, 0.1), None);
+        }
+        let v = 100.0_f32;
+        let ideal = 0.1 * 0.3 * (v / 3.6);
+        assert_eq!(b.sample(v, 0.3, ideal, 1.2), Some(Handling::Neutral));
+        assert_eq!(b.sample(v, 0.3, ideal * 0.6, 1.2), Some(Handling::Understeer));
+        assert_eq!(b.sample(v, 0.3, ideal * 1.5, 1.2), Some(Handling::Oversteer));
+        // Too gentle a corner is not judged.
+        assert_eq!(b.sample(v, 0.3, ideal * 0.6, 0.3), None);
+    }
+}
+
+impl RecordedSession {
+    /// The `limit` worst spots, most events first. Each is `(position 0..1, kind, count)`.
+    /// Understeer and oversteer are in tenths of a second.
+    pub fn worst_spots(&self, limit: usize) -> Vec<(f32, EventKind, u32)> {
+        let mut spots: Vec<(f32, EventKind, u32)> = self
+            .hotspots
+            .iter()
+            .map(|h| ((f32::from(h.segment) + 0.5) / SEGMENTS as f32, h.kind, h.count))
+            .collect();
+        spots.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.total_cmp(&b.0)));
+        spots.truncate(limit);
+        spots
+    }
+}
+
+#[cfg(test)]
+mod hotspot_tests {
+    use super::*;
+
+    #[test]
+    fn events_are_placed_by_track_position() {
+        let mut agg = SessionAggregator::new(String::new());
+        let mut s = {
+            let mut physics = sharedmem::parse_physics(&[0u8; sharedmem::PHYSICS_PAGE_LEN]).unwrap();
+            physics.speed_kmh = 120.0;
+            physics.brake = 1.0;
+            physics.wheel_angular_speed = [30.0, 30.0, 110.0, 110.0];
+            physics.wheel_load = [3000.0; 4];
+            let mut graphics = sharedmem::parse_graphics(&[0u8; sharedmem::GRAPHICS_PAGE_LEN]).unwrap();
+            graphics.status = AcStatus::Live;
+            let mut static_page = sharedmem::parse_static(&[0u8; sharedmem::STATIC_PAGE_LEN]).unwrap();
+            static_page.tyre_radius = [0.3; 4];
+            Snapshot { physics, graphics, static_page }
+        };
+        s.graphics.car_coordinates = [10.0, 0.0, -4.0];
+        s.graphics.normalized_car_position = 0.425;
+        agg.feed(&s, 0.1);
+        for _ in 0..400 {
+            s.physics.brake = 0.0;
+            s.physics.wheel_angular_speed = [100.0; 4];
+            s.graphics.normalized_car_position = 0.9;
+            agg.feed(&s, 0.1);
+        }
+        let done = agg.finish().unwrap();
+        assert_eq!(done.hotspots, vec![Hotspot { segment: 42, kind: EventKind::FrontLockup, count: 1 }]);
+        assert!(done.path.contains(&(42, 10.0, -4.0)));
+        let worst = done.worst_spots(3);
+        assert_eq!(worst.len(), 1);
+        assert!((worst[0].0 - 0.425).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+
+    #[test]
+    fn copies_new_replays_once_and_trims_the_archive() {
+        let base = std::env::temp_dir().join(format!("acxs-arch-test-{}", std::process::id()));
+        let (src, dst) = (base.join("src"), base.join("dst"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("a.acreplay"), b"1").unwrap();
+        std::fs::write(src.join("notes.txt"), b"x").unwrap();
+        let long_ago = std::time::UNIX_EPOCH;
+        assert_eq!(archive_replays(&src, &dst, long_ago).unwrap(), 1);
+        assert_eq!(archive_replays(&src, &dst, long_ago).unwrap(), 0);
+        assert!(dst.join("a.acreplay").exists() && !dst.join("notes.txt").exists());
+        // Nothing older than `since` is taken.
+        let future = std::time::SystemTime::now() + Duration::from_secs(3600);
+        std::fs::write(src.join("b.acreplay"), b"2").unwrap();
+        assert_eq!(archive_replays(&src, &dst, future).unwrap(), 0);
+        for i in 0..25 {
+            std::fs::write(dst.join(format!("old{i}.acreplay")), b"z").unwrap();
+        }
+        archive_replays(&src, &dst, future).unwrap();
+        let left = std::fs::read_dir(&dst).unwrap().count();
+        std::fs::remove_dir_all(&base).ok();
+        assert_eq!(left, KEEP_REPLAYS);
+    }
+}
+
+/// Replays the game keeps per session type after [`keep_more_replays`].
+pub const RACE_KEEP: i64 = 10;
+pub const QUALIFY_KEEP: i64 = 5;
+pub const OTHERS_KEEP: i64 = 10;
+
+/// Raises the game's autosave limits in `cfg\replay.ini` so replays are not thrown away so soon.
+/// The old file is kept as a backup. Returns the file written.
+pub fn keep_more_replays() -> std::io::Result<PathBuf> {
+    let cfg = crate::settings::ac_documents_dir()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Documents folder not found"))?
+        .join("cfg")
+        .join("replay.ini");
+    let mut ini = crate::ini::Ini::load(&cfg)?;
+    raise_replay_limits(&mut ini);
+    ini.save_with_backup(&cfg)?;
+    Ok(cfg)
+}
+
+/// Sets the autosave counts to at least the `*_KEEP` values; larger values and `-1` stay.
+pub fn raise_replay_limits(ini: &mut crate::ini::Ini) {
+    ini.set("AUTOSAVE", "ENABLED", 1);
+    for (key, keep) in [("RACE", RACE_KEEP), ("QUALIFY", QUALIFY_KEEP), ("OTHERS", OTHERS_KEEP)] {
+        let current = ini.get_i64("AUTOSAVE", key).unwrap_or(0);
+        if current != -1 && current < keep {
+            ini.set("AUTOSAVE", key, keep);
+        }
+    }
+}
+
+#[cfg(test)]
+mod replay_cfg_tests {
+    use super::*;
+
+    #[test]
+    fn limits_are_raised_but_never_lowered() {
+        let mut ini = crate::ini::Ini::parse("[AUTOSAVE]\nENABLED=1 ;x\nRACE=2 ;max\nQUALIFY=-1\nOTHERS=40\n");
+        raise_replay_limits(&mut ini);
+        assert_eq!(ini.get_i64("AUTOSAVE", "RACE"), Some(RACE_KEEP));
+        assert_eq!(ini.get_i64("AUTOSAVE", "QUALIFY"), Some(-1));
+        assert_eq!(ini.get_i64("AUTOSAVE", "OTHERS"), Some(40));
+    }
+}

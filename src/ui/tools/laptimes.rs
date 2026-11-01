@@ -136,7 +136,7 @@ impl Tool for LapTimes {
 
         widgets::heading(ui, "Lap Times", "Best laps per car, manual lap entry and lap delta comparison.");
         if self.root.is_none() {
-            widgets::empty_state(ui, "Set your Assetto Corsa folder on the Home page to use lap times.");
+            widgets::empty_state(ui, "Set your Assetto Corsa folder in Settings to use lap times.");
             return;
         }
 

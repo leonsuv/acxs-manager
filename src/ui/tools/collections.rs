@@ -299,7 +299,7 @@ impl Tool for CollectionsPage {
         self.poll(notices);
 
         if self.root.is_none() {
-            widgets::empty_state(ui, "Set your Assetto Corsa folder on the Home page to use collections.");
+            widgets::empty_state(ui, "Set your Assetto Corsa folder in Settings to use collections.");
             return;
         }
         if !self.busy && self.loaded_root != self.root

@@ -3,7 +3,7 @@
 //! Panics are always stored locally: [`install_panic_hook`] writes one JSON file
 //! per panic into `<settings folder>/crash-reports/`. Nothing leaves the computer
 //! at that point. Sending happens only when the user has ticked "Send crash
-//! reports" on the Home page; then [`send_pending`] posts each stored report to
+//! reports" in Settings; then [`send_pending`] posts each stored report to
 //! the GlitchTip "store" API (Sentry-compatible) and deletes the file after the
 //! server answers with a 2xx status.
 //!

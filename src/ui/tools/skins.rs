@@ -12,8 +12,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use super::{Tool, ToolContext};
-use crate::ui::theme::{self, BORDER, CARD, CARD_SELECTED, DANGER, INFO, MUTED, OK, TEXT, WARN};
-use crate::ui::widgets;
+use crate::ui::theme::{self, BORDER, CARD, CARD_SELECTED, DANGER, INFO, MUTED, OK, WARN};
+use crate::ui::{media, widgets};
 use crate::ui::Notice;
 use acxs_manager::content::{self, CarEntry};
 use acxs_manager::livery;
@@ -22,7 +22,7 @@ use acxs_manager::skins::{self, SkinEntry};
 use eframe::egui::{self, CornerRadius, Margin, RichText, Sense, Stroke};
 
 /// Row height for the car list (two lines, matches the other list pages).
-const CAR_ROW_HEIGHT: f32 = 60.0;
+const CAR_ROW_HEIGHT: f32 = 66.0;
 /// Inner width of a skin card.
 const CARD_WIDTH: f32 = 210.0;
 /// Target colour the recolour section starts with (a blue).
@@ -328,14 +328,22 @@ impl SkinsPage {
                     let count = counts.get(&car.id).copied().unwrap_or(0);
                     let picked = widgets::list_row(ui, selected, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(car_title(car)).strong());
-                            widgets::pill(
-                                ui,
-                                &format!("{count} skins"),
-                                if count > 0 { INFO } else { MUTED },
-                            );
+                            let (rect, _) = ui.allocate_exact_size(egui::vec2(64.0, 36.0), Sense::hover());
+                            let thumb = media::car_preview(&car.path, None);
+                            media::paint_image(ui, rect, thumb.as_deref(), &car.name, INFO, CornerRadius::same(6));
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(car_title(car)).strong());
+                                    widgets::pill(
+                                        ui,
+                                        &format!("{count} skins"),
+                                        if count > 0 { INFO } else { MUTED },
+                                    );
+                                });
+                                ui.label(RichText::new(car_subtitle(car)).small().color(MUTED));
+                            });
                         });
-                        ui.label(RichText::new(car_subtitle(car)).small().color(MUTED));
                     });
                     if picked {
                         clicked = Some(car.id.clone());
@@ -373,11 +381,9 @@ impl SkinsPage {
         widgets::section_title(ui, "Preview");
         match skins::preview_for(&skin.path) {
             Some(path) => {
-                ui.label(
-                    RichText::new("Image previews are not available in this build. File:")
-                        .color(MUTED),
-                );
-                ui.label(RichText::new(path.display().to_string()).color(TEXT));
+                let width = ui.available_width();
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(width, (width * 9.0 / 16.0).round()), Sense::hover());
+                media::paint_image(ui, rect, Some(&path), &skin.name, INFO, CornerRadius::same(10));
             }
             None => {
                 ui.label(RichText::new("No preview image.").color(MUTED));
@@ -604,7 +610,7 @@ impl Tool for SkinsPage {
         let root = match (ctx.ac_valid, &ctx.ac_root) {
             (true, Some(root)) => root.clone(),
             _ => {
-                widgets::empty_state(ui, "Set your Assetto Corsa folder on the Home page to see skins.");
+                widgets::empty_state(ui, "Set your Assetto Corsa folder in Settings to see skins.");
                 return;
             }
         };
@@ -716,6 +722,16 @@ fn skin_card(ui: &mut egui::Ui, skin: &SkinEntry, selected: bool) -> bool {
         .inner_margin(Margin::same(12))
         .show(ui, |ui| {
             ui.set_width(CARD_WIDTH);
+            // Thumbnail from the cached per-car skin list, so drawing a card does no file IO.
+            let preview = skin
+                .path
+                .parent()
+                .and_then(|skins_dir| skins_dir.parent())
+                .map(media::car_skins)
+                .and_then(|list| list.iter().find(|(name, _)| *name == skin.skin_id).map(|(_, p)| p.clone()));
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(CARD_WIDTH, CARD_WIDTH * 9.0 / 16.0), Sense::hover());
+            media::paint_image(ui, rect, preview.as_deref(), &skin.name, INFO, CornerRadius::same(8));
+            ui.add_space(4.0);
             ui.label(RichText::new(skin.name.as_str()).strong());
             ui.label(RichText::new(skin.skin_id.as_str()).small().color(MUTED));
             ui.add_space(4.0);

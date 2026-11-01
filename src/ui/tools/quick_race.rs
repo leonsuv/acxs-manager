@@ -5,10 +5,10 @@
 //! launch all run on background threads. Results come back through a channel
 //! and are applied in [`QuickRacePage::poll`] on each frame.
 
-use super::{Tool, ToolContext};
+use super::{PickKind, Tool, ToolContext};
 use crate::ui::theme::{self, DANGER, MUTED, OK, WARN};
 use crate::ui::{widgets, Notice};
-use acxs_manager::content::{self, scan_cars, scan_tracks, CarEntry, TrackEntry};
+use acxs_manager::content::{scan_cars, scan_tracks, CarEntry, TrackEntry};
 use acxs_manager::game;
 use acxs_manager::presets::{self, PresetStore};
 use acxs_manager::race::{self, QuickRace};
@@ -25,12 +25,12 @@ pub fn tool() -> Box<dyn Tool> {
     Box::new(QuickRacePage {
         form: QuickRace::default(),
         check_requested: false,
-        track_query: String::new(),
-        car_query: String::new(),
         loaded_root: None,
         cars: Vec::new(),
         tracks: Vec::new(),
         scanned: false,
+        weathers: Vec::new(),
+        pick: None,
         presets: None,
         presets_error: None,
         preset_name: String::new(),
@@ -46,14 +46,16 @@ struct QuickRacePage {
     form: QuickRace,
     /// Set once Validate (or a launch attempt) was pressed; problems are shown from then on.
     check_requested: bool,
-    track_query: String,
-    car_query: String,
     /// The AC root this page currently reflects. `None` when there is no valid install.
     loaded_root: Option<PathBuf>,
     cars: Vec<CarEntry>,
     tracks: Vec<TrackEntry>,
     /// True once the installed content for `loaded_root` has been scanned.
     scanned: bool,
+    /// Weather types installed in `content/weather`.
+    weathers: Vec<String>,
+    /// Set when the user pressed "Choose track" or "Choose car"; taken by the app.
+    pick: Option<super::PickKind>,
     /// Presets as last saved or loaded. `None` until loaded, or when the file could not be read.
     presets: Option<PresetStore>,
     presets_error: Option<String>,
@@ -95,6 +97,21 @@ enum Action {
 }
 
 impl Tool for QuickRacePage {
+    fn take_pick(&mut self) -> Option<PickKind> {
+        self.pick.take()
+    }
+
+    fn set_race(&mut self, track: Option<&str>, layout: Option<&str>, car: Option<&str>, skin: Option<&str>) {
+        if let Some(track) = track {
+            self.form.track = track.to_string();
+            self.form.track_layout = layout.map(str::to_string);
+        }
+        if let Some(car) = car {
+            self.form.car = car.to_string();
+            self.form.skin = skin.unwrap_or("").to_string();
+        }
+    }
+
     fn name(&self) -> &'static str {
         "Quick Race"
     }
@@ -111,27 +128,30 @@ impl Tool for QuickRacePage {
         widgets::heading(
             ui,
             "Quick Race",
-            "Pick a track and car, set the rules, then write race.ini and launch.",
+            "Choose a track and car, set up the weekend and your aids, then start.",
         );
 
         let Some(root) = self.loaded_root.clone() else {
-            widgets::empty_state(ui, "Set your Assetto Corsa folder on the Home page to use Quick Race.");
+            widgets::empty_state(ui, "Set your Assetto Corsa folder in Settings to use Quick Race.");
             return;
         };
 
         let busy = self.jobs > 0;
-        let mut action = None;
+        let mut from_presets = None;
+        egui::Panel::right("quick_race_presets")
+            .exact_size(340.0)
+            .resizable(false)
+            .frame(egui::Frame::new().inner_margin(egui::Margin { left: 16, right: 0, top: 0, bottom: 0 }))
+            .show(ui, |ui| {
+                from_presets = presets_card(ui, self, busy);
+            });
+        let mut from_form = None;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.columns(2, |cols| {
-                    if let [left, right] = cols {
-                        let from_form = form_card(left, self, busy);
-                        let from_presets = presets_card(right, self, busy);
-                        action = from_form.or(from_presets);
-                    }
-                });
+                from_form = form_card(ui, self, busy);
             });
+        let action = from_form.or(from_presets);
 
         if let Some(action) = action {
             self.apply(action, &root, notices, &egui_ctx);
@@ -147,6 +167,7 @@ impl QuickRacePage {
             return;
         }
         self.loaded_root = root.clone();
+        self.weathers = root.as_deref().map(list_weather).unwrap_or_default();
         self.cars.clear();
         self.tracks.clear();
         self.scanned = false;
@@ -233,7 +254,13 @@ impl QuickRacePage {
                     .ok_or_else(|| {
                         std::io::Error::new(std::io::ErrorKind::NotFound, "the Documents folder was not found")
                     })
-                    .and_then(|cfg| race::write_race_ini(&cfg, &form));
+                    .and_then(|cfg| {
+                        let path = race::write_race_ini(&cfg, &form)?;
+                        if form.extras.write_assists {
+                            race::write_assists_ini(&cfg, &form.extras.assists)?;
+                        }
+                        Ok(path)
+                    });
                 match written {
                     Err(err) => Notice {
                         text: format!("Could not write race.ini. {err}"),
@@ -379,199 +406,375 @@ impl QuickRacePage {
 }
 
 /// The race settings and the Validate / launch buttons.
+/// A titled card with the page's usual spacing.
+fn card(ui: &mut egui::Ui, title: &str, hint: &str, add: impl FnOnce(&mut egui::Ui)) {
+    theme::card().inner_margin(egui::Margin::symmetric(18, 14)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new(title).font(theme::bold(16.0)));
+        if !hint.is_empty() {
+            ui.label(RichText::new(hint).size(12.5).color(MUTED));
+        }
+        ui.add_space(8.0);
+        add(ui);
+    });
+    ui.add_space(12.0);
+}
+
+/// One labelled setting: a fixed-width label, then the control.
+fn setting(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(egui::vec2(160.0, 24.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.label(RichText::new(label).color(MUTED));
+        });
+        add(ui);
+    });
+}
+
+/// A drop-down over `(value, label)` pairs.
+fn pick_value<T: Copy + PartialEq>(ui: &mut egui::Ui, id: &str, value: &mut T, options: &[(T, &str)]) {
+    let current = options.iter().find(|(v, _)| v == value).map_or("Custom", |(_, label)| *label);
+    egui::ComboBox::from_id_salt(id).selected_text(current).show_ui(ui, |ui| {
+        for (option, label) in options {
+            ui.selectable_value(value, *option, *label);
+        }
+    });
+}
+
+/// A picture card for the track or the car with its "Choose" button. True when the button was pressed.
+fn pick_card(ui: &mut egui::Ui, width: f32, kind: &str, title: &str, subtitle: &str, image: Option<PathBuf>, button: &str) -> bool {
+    use crate::ui::media;
+    let mut pressed = false;
+    ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+        ui.set_width(width);
+        let height = (width * 9.0 / 16.0).min(200.0).round();
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+        media::paint_image(ui, rect, image.as_deref(), title, theme::INFO, egui::CornerRadius::same(12));
+        ui.painter().rect_stroke(
+            rect,
+            egui::CornerRadius::same(12),
+            egui::Stroke::new(1.0, theme::BORDER),
+            egui::StrokeKind::Inside,
+        );
+        media::chip(ui, rect.left_top() + egui::vec2(10.0, 10.0), egui::Align2::LEFT_TOP, kind, theme::TEXT);
+        ui.add_space(6.0);
+        ui.add(egui::Label::new(RichText::new(title).font(theme::bold(16.0))).truncate());
+        ui.add(egui::Label::new(RichText::new(subtitle).size(12.5).color(MUTED)).truncate());
+        ui.add_space(4.0);
+        if ui.add(widgets::primary_button(button).min_size(egui::vec2(width, 34.0))).clicked() {
+            pressed = true;
+        }
+    });
+    pressed
+}
+
+fn humanize_weather(id: &str) -> String {
+    // "3_clear" becomes "Clear", "7_heavy_clouds" "Heavy clouds".
+    let name = id.split_once('_').map_or(id, |(_, rest)| rest).replace('_', " ");
+    let mut chars = name.chars();
+    chars.next().map_or(String::new(), |first| first.to_uppercase().collect::<String>() + chars.as_str())
+}
+
 fn form_card(ui: &mut egui::Ui, page: &mut QuickRacePage, busy: bool) -> Option<Action> {
     let problems = if page.check_requested { page.problems() } else { Vec::new() };
-    let QuickRacePage {
-        form,
-        check_requested,
-        track_query,
-        car_query,
-        tracks,
-        cars,
-        scanned,
-        ..
-    } = page;
+    let QuickRacePage { form, check_requested, tracks, cars, scanned, weathers, pick, .. } = page;
     let mut action = None;
+    ui.spacing_mut().slider_width = 220.0;
 
-    theme::card().show(ui, |ui| {
-        ui.spacing_mut().slider_width = 200.0;
-
-        widgets::section_title(ui, "Track");
-        ui.add(
-            egui::TextEdit::singleline(&mut *track_query)
-                .hint_text("Filter tracks")
-                .desired_width(f32::INFINITY),
-        );
-        let shown_tracks = content::filter_tracks(tracks, track_query.as_str());
-        let current_track = tracks.iter().find(|t| t.id == form.track);
-        let track_label = match current_track {
-            Some(track) => track.name.clone(),
-            None if form.track.trim().is_empty() => "Choose a track".to_string(),
+    // Track and car: pictures, and a button that opens the Tracks or Cars page to choose.
+    {
+        use crate::ui::media;
+        let track = tracks.iter().find(|t| t.id == form.track);
+        let track_title = match track {
+            Some(t) => t.name.clone(),
+            None if form.track.trim().is_empty() => "No track chosen".to_string(),
             None if *scanned => format!("{} (not installed)", form.track),
             None => form.track.clone(),
         };
-        let mut picked_track = None;
-        egui::ComboBox::from_id_salt("quick_race_track")
-            .width(ui.available_width())
-            .height(320.0)
-            .selected_text(track_label)
-            .show_ui(ui, |ui| {
-                for track in &shown_tracks {
-                    if ui.selectable_label(form.track == track.id, &track.name).clicked() {
-                        picked_track = Some(track.id.clone());
-                    }
-                }
-            });
-        if let Some(id) = picked_track
-            && id != form.track
-        {
-            form.track = id;
-            form.track_layout = None;
-        }
+        let layout = form.track_layout.as_deref().map(|l| l.strip_prefix("layout_").unwrap_or(l).to_string());
+        let track_sub = match (&layout, track) {
+            (Some(l), _) => format!("Layout: {l}"),
+            (None, Some(t)) => crate::ui::pages::join_parts(&[t.country.as_str(), t.city.as_str()]),
+            _ => String::new(),
+        };
+        let track_img = track.and_then(|t| media::track_preview(t, form.track_layout.as_deref()));
 
-        if let Some(track) = current_track
-            && !track.layouts.is_empty()
-        {
-            ui.add_space(4.0);
-            ui.label(RichText::new("Layout").color(MUTED));
-            let layout_label = form
-                .track_layout
-                .clone()
-                .unwrap_or_else(|| "Default layout".to_string());
-            egui::ComboBox::from_id_salt("quick_race_layout")
-                .selected_text(layout_label)
-                .show_ui(ui, |ui| {
-                    if ui.selectable_label(form.track_layout.is_none(), "Default layout").clicked() {
-                        form.track_layout = None;
-                    }
-                    for layout in &track.layouts {
-                        let selected = form.track_layout.as_deref() == Some(layout.as_str());
-                        if ui.selectable_label(selected, layout).clicked() {
-                            form.track_layout = Some(layout.clone());
-                        }
-                    }
-                });
-        }
-        ui.add_space(10.0);
-
-        widgets::section_title(ui, "Car");
-        ui.add(
-            egui::TextEdit::singleline(&mut *car_query)
-                .hint_text("Filter cars")
-                .desired_width(f32::INFINITY),
-        );
-        let shown_cars = content::filter_cars(cars, car_query.as_str());
-        let car_label = match cars.iter().find(|c| c.id == form.car) {
-            Some(car) => car.name.clone(),
-            None if form.car.trim().is_empty() => "Choose a car".to_string(),
+        let car = cars.iter().find(|c| c.id == form.car);
+        let car_title = match car {
+            Some(c) => c.name.clone(),
+            None if form.car.trim().is_empty() => "No car chosen".to_string(),
             None if *scanned => format!("{} (not installed)", form.car),
             None => form.car.clone(),
         };
-        let mut picked_car = None;
-        egui::ComboBox::from_id_salt("quick_race_car")
-            .width(ui.available_width())
-            .height(320.0)
-            .selected_text(car_label)
-            .show_ui(ui, |ui| {
-                for car in &shown_cars {
-                    if ui.selectable_label(form.car == car.id, &car.name).clicked() {
-                        picked_car = Some(car.id.clone());
-                    }
-                }
-            });
-        if let Some(id) = picked_car {
-            form.car = id;
-        }
-        ui.add_space(12.0);
+        let skin = Some(form.skin.trim()).filter(|s| !s.is_empty());
+        let car_sub = match (car, skin) {
+            (Some(c), Some(s)) => format!("{}  ·  skin {s}", c.brand),
+            (Some(c), None) => format!("{}  ·  default skin", c.brand),
+            _ => String::new(),
+        };
+        let car_img = car.and_then(|c| media::car_preview(&c.path, skin));
 
-        widgets::section_title(ui, "Rules");
-        let max_grid = form.ai_count.min(MAX_AI_COUNT);
-        form.grid_position = form.grid_position.min(form.ai_count);
-        egui::Grid::new("quick_race_fields")
-            .num_columns(2)
-            .spacing([14.0, 10.0])
-            .show(ui, |ui| {
-                ui.label("Player name");
-                ui.add(egui::TextEdit::singleline(&mut form.player_name).desired_width(220.0));
-                ui.end_row();
-
-                ui.label("Skin");
-                ui.add(
-                    egui::TextEdit::singleline(&mut form.skin)
-                        .hint_text("Empty for the game default")
-                        .desired_width(220.0),
-                );
-                ui.end_row();
-
-                ui.label("AI cars");
-                ui.add(egui::Slider::new(&mut form.ai_count, 0..=MAX_AI_COUNT));
-                ui.end_row();
-
-                ui.label("Grid position");
-                ui.add(egui::Slider::new(&mut form.grid_position, 0..=max_grid));
-                ui.end_row();
-
-                ui.label("Laps");
-                ui.add(egui::DragValue::new(&mut form.laps).range(0_u32..=999));
-                ui.end_row();
-
-                ui.label("Weather");
-                ui.add(egui::TextEdit::singleline(&mut form.weather).desired_width(220.0));
-                ui.end_row();
-
-                ui.label("Time of day");
-                ui.add(egui::Slider::new(&mut form.time_of_day_hour, 0..=23).suffix(":00"));
-                ui.end_row();
-
-                ui.label("AI level");
-                ui.add(egui::Slider::new(&mut form.ai_level, 0..=100));
-                ui.end_row();
-
-                ui.label("AI aggression");
-                ui.horizontal(|ui| {
-                    let mut on = form.ai_aggression.is_some();
-                    if ui.checkbox(&mut on, "").changed() {
-                        form.ai_aggression = on.then_some(50);
-                    }
-                    match form.ai_aggression.as_mut() {
-                        Some(value) => {
-                            ui.add(egui::Slider::new(value, 0..=100));
-                        }
-                        None => {
-                            ui.label(RichText::new("Game default").color(MUTED));
-                        }
-                    }
-                });
-                ui.end_row();
-            });
-        ui.add_space(12.0);
-
-        if *check_requested {
-            if problems.is_empty() {
-                ui.label(RichText::new("Race settings are valid.").color(OK));
-            } else {
-                for problem in &problems {
-                    ui.label(RichText::new(problem).color(WARN));
-                }
+        let width = ((ui.available_width() - 14.0) / 2.0).floor();
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 14.0;
+            if pick_card(ui, width, "Track", &track_title, &track_sub, track_img, "Choose track") {
+                *pick = Some(PickKind::Track);
             }
-            ui.add_space(6.0);
-        }
-
-        ui.horizontal(|ui| {
-            if ui.add_enabled(!busy, egui::Button::new("Validate")).clicked() {
-                action = Some(Action::Validate);
-            }
-            if ui.add_enabled(!busy, egui::Button::new("Rescan content")).clicked() {
-                action = Some(Action::Rescan);
-            }
-            let launch = widgets::primary_button("Write race.ini and launch");
-            if ui.add_enabled(!busy && *scanned, launch).clicked() {
-                action = Some(Action::Launch);
-            }
-            if busy {
-                ui.spinner();
+            if pick_card(ui, width, "Car", &car_title, &car_sub, car_img, "Choose car and skin") {
+                *pick = Some(PickKind::Car);
             }
         });
+        ui.add_space(14.0);
+    }
+
+    let x = &mut form.extras;
+
+    card(ui, "Sessions", "Played in this order. Switch off what you do not want.", |ui| {
+        let mut practice_on = x.practice_minutes > 0;
+        setting(ui, "Practice", |ui| {
+            if widgets::toggle(ui, &mut practice_on).changed() {
+                x.practice_minutes = if practice_on { 20 } else { 0 };
+            }
+            if practice_on {
+                ui.add(egui::DragValue::new(&mut x.practice_minutes).range(1_u32..=600).suffix(" min"));
+            }
+        });
+        let mut qualify_on = x.qualify_minutes > 0;
+        setting(ui, "Qualifying", |ui| {
+            if widgets::toggle(ui, &mut qualify_on).changed() {
+                x.qualify_minutes = if qualify_on { 10 } else { 0 };
+            }
+            if qualify_on {
+                ui.add(egui::DragValue::new(&mut x.qualify_minutes).range(1_u32..=600).suffix(" min"));
+            }
+        });
+        setting(ui, "Race", |ui| {
+            widgets::toggle(ui, &mut x.race_enabled);
+            if x.race_enabled {
+                let mut timed = x.race_minutes > 0;
+                if ui.selectable_label(!timed, "Laps").clicked() {
+                    timed = false;
+                    x.race_minutes = 0;
+                }
+                if ui.selectable_label(timed, "Minutes").clicked() && !timed {
+                    x.race_minutes = 30;
+                }
+                if x.race_minutes > 0 {
+                    ui.add(egui::DragValue::new(&mut x.race_minutes).range(1_u32..=1440).suffix(" min"));
+                } else {
+                    ui.add(egui::DragValue::new(&mut form.laps).range(1_u32..=999).suffix(" laps"));
+                }
+            }
+        });
+        if x.race_enabled {
+            setting(ui, "Start from the pits", |ui| {
+                widgets::toggle(ui, &mut x.pit_start);
+            });
+        }
+        let mut parts = Vec::new();
+        if x.practice_minutes > 0 {
+            parts.push(format!("Practice {} min", x.practice_minutes));
+        }
+        if x.qualify_minutes > 0 {
+            parts.push(format!("Qualifying {} min", x.qualify_minutes));
+        }
+        if x.race_enabled {
+            parts.push(if x.race_minutes > 0 { format!("Race {} min", x.race_minutes) } else { format!("Race {} laps", form.laps) });
+        }
+        ui.add_space(4.0);
+        ui.label(RichText::new(parts.join("   →   ")).size(12.5).color(theme::ACCENT));
+    });
+
+    card(ui, "Conditions", "Weather, light and the track surface.", |ui| {
+        setting(ui, "Weather", |ui| {
+            if weathers.is_empty() {
+                ui.add(egui::TextEdit::singleline(&mut form.weather).desired_width(200.0));
+            } else {
+                let current = humanize_weather(&form.weather);
+                egui::ComboBox::from_id_salt("quick_race_weather").selected_text(current).height(320.0).show_ui(ui, |ui| {
+                    for id in weathers.iter() {
+                        ui.selectable_value(&mut form.weather, id.clone(), humanize_weather(id));
+                    }
+                });
+            }
+        });
+        setting(ui, "Time of day", |ui| {
+            ui.add(egui::Slider::new(&mut form.time_of_day_hour, 0..=23).suffix(":00"));
+        });
+        setting(ui, "Time speed", |ui| {
+            ui.add(egui::DragValue::new(&mut x.time_multiplier).range(1_u32..=60).prefix("x"));
+            ui.label(RichText::new("1 is real time").size(12.0).color(theme::FAINT));
+        });
+        setting(ui, "Air temperature", |ui| {
+            ui.add(egui::Slider::new(&mut x.ambient_temp, -10..=45).suffix(" °C"));
+        });
+        setting(ui, "Road temperature", |ui| {
+            ui.add(egui::Slider::new(&mut x.road_temp, -10..=70).suffix(" °C"));
+            if ui.small_button("Match air").clicked() {
+                x.road_temp = x.ambient_temp + 6;
+            }
+        });
+        setting(ui, "Wind speed", |ui| {
+            ui.add(egui::Slider::new(&mut x.wind_min_kmh, 0..=60).suffix(" min"));
+            ui.add(egui::Slider::new(&mut x.wind_max_kmh, 0..=60).suffix(" max"));
+            if x.wind_min_kmh > x.wind_max_kmh {
+                x.wind_max_kmh = x.wind_min_kmh;
+            }
+        });
+        setting(ui, "Wind direction", |ui| {
+            ui.add(egui::Slider::new(&mut x.wind_direction, 0..=359).suffix("°"));
+        });
+        setting(ui, "Track grip at the start", |ui| {
+            ui.add(egui::Slider::new(&mut x.track_grip, 70..=100).suffix(" %"));
+        });
+    });
+
+    card(ui, "Opponents", "AI drivers on the grid.", |ui| {
+        let max_grid = form.ai_count.min(MAX_AI_COUNT);
+        form.grid_position = form.grid_position.min(form.ai_count);
+        setting(ui, "AI cars", |ui| {
+            ui.add(egui::Slider::new(&mut form.ai_count, 0..=MAX_AI_COUNT));
+        });
+        setting(ui, "Your grid position", |ui| {
+            ui.add(egui::Slider::new(&mut form.grid_position, 0..=max_grid));
+        });
+        setting(ui, "AI strength", |ui| {
+            ui.add(egui::Slider::new(&mut form.ai_level, 0..=100).suffix(" %"));
+        });
+        setting(ui, "AI aggression", |ui| {
+            let mut on = form.ai_aggression.is_some();
+            if widgets::toggle(ui, &mut on).changed() {
+                form.ai_aggression = on.then_some(50);
+            }
+            match form.ai_aggression.as_mut() {
+                Some(value) => {
+                    ui.add(egui::Slider::new(value, 0..=100).suffix(" %"));
+                }
+                None => {
+                    ui.label(RichText::new("Game default").color(MUTED));
+                }
+            }
+        });
+    });
+
+    card(ui, "Rules", "", |ui| {
+        setting(ui, "Driver name", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut form.player_name).desired_width(220.0));
+        });
+        setting(ui, "Penalties", |ui| {
+            widgets::toggle(ui, &mut x.penalties);
+        });
+        setting(ui, "Jump start", |ui| {
+            pick_value(ui, "qr_jump", &mut x.jump_start_penalty, &[(0, "No penalty"), (1, "Drive-through"), (2, "Pit lane start")]);
+        });
+        setting(ui, "Wheels off track", |ui| {
+            pick_value(
+                ui,
+                "qr_tyres_out",
+                &mut x.allowed_tyres_out,
+                &[(-1, "Laps never invalid"), (0, "None allowed"), (1, "One allowed"), (2, "Two allowed"), (3, "Three allowed")],
+            );
+        });
+        setting(ui, "Fixed setup", |ui| {
+            widgets::toggle(ui, &mut x.fixed_setup);
+            ui.label(RichText::new("everyone drives the same setup").size(12.0).color(theme::FAINT));
+        });
+    });
+
+    card(ui, "Driver aids", "Written to assists.ini when you start; your old file is kept as a backup.", |ui| {
+        setting(ui, "Use these aids", |ui| {
+            widgets::toggle(ui, &mut x.write_assists);
+            if !x.write_assists {
+                ui.label(RichText::new("off: the game keeps your current aids").size(12.0).color(theme::FAINT));
+            }
+        });
+        ui.add_enabled_ui(x.write_assists, |ui| {
+            let a = &mut x.assists;
+            setting(ui, "Quick setups", |ui| {
+                use acxs_manager::race_options::Assists;
+                if ui.button("Beginner").clicked() {
+                    *a = Assists {
+                        ideal_line: true,
+                        auto_shifter: true,
+                        stability_control: 60,
+                        traction_control: 2,
+                        abs: 2,
+                        auto_clutch: true,
+                        damage: 0,
+                        visual_damage: false,
+                        ..Assists::default()
+                    };
+                }
+                if ui.button("Relaxed").clicked() {
+                    *a = Assists { traction_control: 1, abs: 1, damage: 50, ..Assists::default() };
+                }
+                if ui.button("Realistic").clicked() {
+                    *a = Assists::default();
+                }
+                if ui.button("Hardcore").clicked() {
+                    *a = Assists { traction_control: 0, abs: 0, auto_blip: false, damage: 100, fuel_rate: 1, tyre_wear: 1, ..Assists::default() };
+                }
+            });
+            let tri = [(0u32, "Off"), (1, "As the car has it"), (2, "Always on")];
+            setting(ui, "Traction control", |ui| pick_value(ui, "qr_tc", &mut a.traction_control, &tri));
+            setting(ui, "ABS", |ui| pick_value(ui, "qr_abs", &mut a.abs, &tri));
+            setting(ui, "Stability control", |ui| {
+                ui.add(egui::Slider::new(&mut a.stability_control, 0..=100).suffix(" %"));
+            });
+            setting(ui, "Automatic gears", |ui| {
+                widgets::toggle(ui, &mut a.auto_shifter);
+            });
+            setting(ui, "Throttle blip", |ui| {
+                widgets::toggle(ui, &mut a.auto_blip);
+                ui.label(RichText::new("matches revs on downshifts").size(12.0).color(theme::FAINT));
+            });
+            setting(ui, "Automatic clutch", |ui| {
+                widgets::toggle(ui, &mut a.auto_clutch);
+            });
+            setting(ui, "Racing line", |ui| {
+                widgets::toggle(ui, &mut a.ideal_line);
+            });
+            setting(ui, "Damage", |ui| {
+                ui.add(egui::Slider::new(&mut a.damage, 0..=100).suffix(" %"));
+            });
+            setting(ui, "Damage on the body", |ui| {
+                widgets::toggle(ui, &mut a.visual_damage);
+            });
+            let times = [(0u32, "Off"), (1, "Normal"), (2, "2x"), (3, "3x"), (5, "5x"), (10, "10x")];
+            setting(ui, "Fuel use", |ui| pick_value(ui, "qr_fuel", &mut a.fuel_rate, &times));
+            setting(ui, "Tyre wear", |ui| pick_value(ui, "qr_wear", &mut a.tyre_wear, &times));
+            setting(ui, "Tyre blankets", |ui| {
+                widgets::toggle(ui, &mut a.tyre_blankets);
+                ui.label(RichText::new("tyres start warm").size(12.0).color(theme::FAINT));
+            });
+            setting(ui, "Slipstream", |ui| pick_value(ui, "qr_slip", &mut a.slipstream, &times));
+        });
+    });
+
+    if *check_requested {
+        if problems.is_empty() {
+            ui.label(RichText::new("Race settings are valid.").color(OK));
+        } else {
+            for problem in &problems {
+                ui.label(RichText::new(problem).color(WARN));
+            }
+        }
+        ui.add_space(6.0);
+    }
+
+    ui.horizontal(|ui| {
+        let launch = widgets::primary_button("Start race").min_size(egui::vec2(160.0, 38.0));
+        if ui.add_enabled(!busy && *scanned, launch).clicked() {
+            action = Some(Action::Launch);
+        }
+        if ui.add_enabled(!busy, egui::Button::new("Validate")).clicked() {
+            action = Some(Action::Validate);
+        }
+        if ui.add_enabled(!busy, egui::Button::new("Rescan content")).clicked() {
+            action = Some(Action::Rescan);
+        }
+        if busy {
+            ui.spinner();
+        }
     });
 
     action
@@ -675,4 +878,20 @@ fn presets_card(ui: &mut egui::Ui, page: &mut QuickRacePage, busy: bool) -> Opti
     });
 
     action
+}
+
+/// Weather types installed in `content/weather`, sorted by their number prefix.
+fn list_weather(root: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(root.join("content").join("weather"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort_by_key(|name| {
+        let number: u32 = name.split('_').next().and_then(|n| n.parse().ok()).unwrap_or(u32::MAX);
+        (number, name.clone())
+    });
+    names
 }

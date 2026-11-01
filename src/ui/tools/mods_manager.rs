@@ -471,7 +471,7 @@ impl Tool for ModsPage {
             "Turn cars and tracks off without deleting them. Review Lua apps and RARE settings.",
         );
         let Some(root) = ctx.ac_root.clone().filter(|_| ctx.ac_valid) else {
-            widgets::empty_state(ui, "Set your Assetto Corsa folder on the Home page to manage mods.");
+            widgets::empty_state(ui, "Set your Assetto Corsa folder in Settings to manage mods.");
             return;
         };
         if self.loaded_for.as_deref() != Some(root.as_path()) {

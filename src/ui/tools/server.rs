@@ -170,7 +170,7 @@ impl Tool for ServerPage {
         match action {
             Action::None => {}
             Action::Start => match ctx.ac_root.as_deref() {
-                None => notices.push(fail("Set your Assetto Corsa folder on the Home page first.")),
+                None => notices.push(fail("Set your Assetto Corsa folder in Settings first.")),
                 Some(root) => match find_server_executable(root) {
                     Err(e) => notices.push(fail(format!("Cannot start the server: {e}."))),
                     Ok(exe) => match self.dir() {
@@ -496,7 +496,7 @@ impl ServerPage {
             );
             if self.default_dir.is_none() {
                 ui.label(
-                    RichText::new("Set your Assetto Corsa folder on the Home page to get the default.").color(WARN),
+                    RichText::new("Set your Assetto Corsa folder in Settings to get the default.").color(WARN),
                 );
             }
             ui.horizontal_wrapped(|ui| {

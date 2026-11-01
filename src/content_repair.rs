@@ -550,6 +550,8 @@ fn create_ui_json(ac_root: &Path, path: &Path) -> Result<(), CreateError> {
         .open(path)
         .map_err(|e| match e.kind() {
             io::ErrorKind::AlreadyExists => CreateError::Exists,
+            // Windows reports "access denied", not "already exists", when a folder is in the way.
+            _ if path.symlink_metadata().is_ok() => CreateError::Exists,
             _ => CreateError::Failed(format!("cannot create the file: {e}")),
         })?;
     file.write_all(format!("{text}\n").as_bytes())

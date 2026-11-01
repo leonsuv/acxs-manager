@@ -169,7 +169,7 @@ impl Tool for CarTuningPage {
         self.poll(notices);
 
         let Some(root) = ctx.ac_root.as_deref().filter(|_| ctx.ac_valid) else {
-            widgets::empty_state(ui, "Set your Assetto Corsa folder on the Home page to tune cars.");
+            widgets::empty_state(ui, "Set your Assetto Corsa folder in Settings to tune cars.");
             return;
         };
         let egui_ctx = ui.ctx().clone();

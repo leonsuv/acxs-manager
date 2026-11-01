@@ -30,6 +30,9 @@ fn tasklist_lists_game(output: &str) -> bool {
     output.to_lowercase().contains(&AC_EXECUTABLE.to_lowercase())
 }
 
+/// Steam app id of Assetto Corsa.
+const STEAM_APP_ID: &str = "244210";
+
 pub fn launch_game(ac_root: &Path) -> io::Result<Child> {
     let exe = ac_root.join(AC_EXECUTABLE);
     if !exe.is_file() {
@@ -38,7 +41,14 @@ pub fn launch_game(ac_root: &Path) -> io::Result<Child> {
             format!("{AC_EXECUTABLE} not found in {}", ac_root.display()),
         ));
     }
-    Command::new(&exe).current_dir(ac_root).spawn()
+    // `acs.exe` hands over to Steam to restart the game through its launcher unless it already
+    // knows which Steam app it is. On a PC where the launcher is Content Manager that opens
+    // Content Manager instead of the race, so name the app up front.
+    Command::new(&exe)
+        .current_dir(ac_root)
+        .env("SteamAppId", STEAM_APP_ID)
+        .env("SteamGameId", STEAM_APP_ID)
+        .spawn()
 }
 
 #[cfg(test)]

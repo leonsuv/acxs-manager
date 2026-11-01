@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+- Sessions suggestions card has an "Open Setups" button (tools can now ask the app to open another tool page).
+
+- Replay Viewer: the summary now shows distance, top and average speed, full-throttle share, hard braking time and impact and drop counts worked out from the replay samples. Home ignores impossible "jumps" over a minute (falls off the map).
+
+- Home: "Best laps" card (best valid lap per car and track, from the Content Manager session files and ACXS recordings; laps with cuts are ignored).
+
+- Sessions page draws the track outline from the recorded path with a coloured dot for each trouble spot (crash, off track, lock-up, wheelspin, jump, understeer, oversteer).
+
+- Sessions page: "Keep more game replays" raises the autosave limits in the game's `replay.ini` (race 10, qualifying 5, other 10; larger values stay; old file backed up).
+
+- Sessions page: setup suggestions per car (understeer, oversteer, brake lock-ups, wheelspin) once enough driving is recorded, each with the number behind it.
+
+- Recorder also pins the trouble spots of each lap (100 slices of the track) and copies the game's fresh `.acreplay` into `%APPDATA%ACXSeplays` after a session (newest 20 kept) before the game overwrites it.
+
+- Recorder adds understeer/oversteer share (steering gain learned from low-speed driving, no car data needed) and a Sessions page under Driving data listing every recorded session.
+
+- Session recorder: while Assetto Corsa is live, ACXS samples the shared memory at about 30 Hz and saves one JSON file per session to `%APPDATA%ACXSsessions` (time, distance, top speed, laps, crashes, off-track, jumps, brake lock-ups, wheelspin). Shown in Home statistics, with "Recording session" in the status bar. Untested against the real game.
+
+- Home: "Your driving" section built from the Content Manager session history (drive time, distance, top speed, crashes, jumps, most driven cars and tracks, recent weeks). Read only; sessions started by ACXS are not recorded yet.
+
+Redesign:
+
+- New dark interface: grouped sidebar, status header, command palette (Ctrl+K), toasts, favorites, a card layout with real previews for cars, tracks and skins, and a Showroom with skins, specs and keyboard control.
+- Servers page: a compact table of your servers and the public Kunos lobby (read with the Steam id of whoever is signed in), a car chooser from the entry list, and the server's raw info. Joining writes `race.ini` and starts `acs.exe` directly, without Content Manager.
+- Quick Race and Launch start `acs.exe` with the Steam app id set so Steam no longer detours through the launcher.
+- Before/after view for video and `assetto_corsa.ini` settings; the CSP config editor shows changed values, the old value and a revert button.
+- Stock `ui_car.json` files with raw line breaks in strings are read (real car names, brands and specs).
+- Quick Race rebuilt: pictures of the track and car, "Choose track" / "Choose car and skin" open the Cars and Tracks pages in a picking mode and bring the choice back; practice, qualifying and race (laps or minutes), weather list, time of day and speed, temperatures, wind, track grip, AI, penalties, jump start, fixed setup, and driver aids (traction control, ABS, stability, automatic gears, throttle blip, automatic clutch, racing line, damage, fuel, tyre wear, tyre blankets, slipstream) written to `assists.ini` with a backup.
+- Public servers load by themselves at start: the list of the last session appears at once from a saved file, and a background refresh updates servers in place, adds new ones and drops the ones that came back empty, while the list stays usable; an open Online tab refreshes itself every five minutes. The Online tab now lists servers from the community directory acservers.online (those with players now, plus a search over every listed server), read with a plain ACXS-Manager user agent, one request at a time. Next to the Kunos lobby (which only answers the game's own client) there is a Custom list source for any address serving the lobby JSON, plain or gzip.
+- Joining a server that needs a Custom Shaders Patch build now tells the game the track exactly as the server names it (`csp/2651/../la_canyons`), strips the marker after a skin name, and sends an ASCII server name.
+- Server join panel rebuilt: the Join button is at the top and names the car it will use (one click joins with the first car you own that has a free slot; your last choice on each server is remembered); a searchable grid of the server's cars with pictures, free slots and "not installed" marks; double-click a car to join with it; skins, drivers and raw info below; clear reasons when Join is not possible (missing track or car, password, server offline).
+- Sidebar reorganised: Play (Home, Quick Race, Servers), Garage (Cars, Tracks, Showroom, Skins, Setups, Mods), Tuning (CSP Config, Game Settings, Lights Patch), Driving data (Lap Times, Replays, Live Telemetry), drawn icons, and the other 21 tools folded under "More tools". Right-click any entry to pin it to the top; pins and the folded state are remembered.
+- Updates: "Check for updates" is at the top of Settings and linked from the sidebar; it shows the new version, its notes and a button to the download page.
+- Servers whose track needs Custom Shaders Patch (`csp/2651/../la_canyons-freeroam`) are matched to your installed track and layout. Public and own servers can be found with Ctrl+K.
+- "Race this car" (cars, showroom) and "Race here" (tracks) open Quick Race with the choice filled in.
+- Drop a car or track `.zip` on the window to install it. RTX & ReShade is switched off for now.
+- The window remembers its size and position. `scripts/package-windows.ps1` builds the release zip on Windows.
+
 Fixes:
 
 - Live UDP telemetry: the client now subscribes to car updates after the handshake (no data arrived before), repeats the handshake until the game answers, and keeps retrying while the game port is unreachable. Handshake (408 bytes) and lap packets (212 bytes) are decoded with UTF-16 names, as the game sends them.

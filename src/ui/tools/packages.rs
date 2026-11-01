@@ -57,6 +57,17 @@ struct PackagesPage {
 }
 
 impl Tool for PackagesPage {
+    fn on_drop(&mut self, ctx: &egui::Context, paths: &[PathBuf]) -> bool {
+        let zip = paths.iter().find(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")));
+        match zip {
+            Some(path) => {
+                self.start_inspect(ctx, path.clone());
+                true
+            }
+            None => false,
+        }
+    }
+
     fn name(&self) -> &'static str {
         "Install Packages"
     }
@@ -76,7 +87,7 @@ impl Tool for PackagesPage {
         );
 
         let Some(root) = ctx.ac_root.as_deref() else {
-            widgets::empty_state(ui, "Set your Assetto Corsa folder on the Home page to install packages.");
+            widgets::empty_state(ui, "Set your Assetto Corsa folder in Settings to install packages.");
             return;
         };
 
@@ -155,7 +166,7 @@ impl Tool for PackagesPage {
                 ui.add_space(8.0);
                 if !root_valid {
                     ui.label(
-                        RichText::new("The Assetto Corsa folder is not valid. Fix it on the Home page first.")
+                        RichText::new("The Assetto Corsa folder is not valid. Fix it in Settings first.")
                             .color(WARN),
                     );
                 } else if game_running {

@@ -222,7 +222,7 @@ impl Tool for RtxPage {
         let Some(root) = root else {
             widgets::empty_state(
                 ui,
-                "Set your Assetto Corsa folder on the Home page to manage RTX and ReShade.",
+                "Set your Assetto Corsa folder in Settings to manage RTX and ReShade.",
             );
             return;
         };

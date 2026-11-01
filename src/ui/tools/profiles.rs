@@ -19,6 +19,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 const SUPPORT_WARNING: &str = "Graphics DLL switching only changes files. It does not check that the renderer is supported by the installed game version. Confirm that the renderer matches your Assetto Corsa version before switching.";
 
+/// Whether the ReShade and RTX Remix choices are offered.
+const SHOW_RESHADE_AND_REMIX: bool = false;
+
 pub fn tool() -> Box<dyn Tool> {
     let (tx, rx) = mpsc::channel();
     Box::new(ProfilesPage {
@@ -274,18 +277,21 @@ impl ProfilesPage {
                 });
             }
 
-            ui.radio_value(&mut self.choice, Choice::ReShade, "ReShade");
-            if self.choice == Choice::ReShade {
-                ui.indent("reshade_options", |ui| {
-                    folder_row(ui, &mut self.reshade_build, "Choose build folder...");
-                });
-            }
+            // ReShade and RTX Remix are switched off while they do not work (see the RTX tool).
+            if SHOW_RESHADE_AND_REMIX {
+                ui.radio_value(&mut self.choice, Choice::ReShade, "ReShade");
+                if self.choice == Choice::ReShade {
+                    ui.indent("reshade_options", |ui| {
+                        folder_row(ui, &mut self.reshade_build, "Choose build folder...");
+                    });
+                }
 
-            ui.radio_value(&mut self.choice, Choice::Remix, "RTX Remix");
-            if self.choice == Choice::Remix {
-                ui.indent("remix_options", |ui| {
-                    folder_row(ui, &mut self.remix_build, "Choose build folder...");
-                });
+                ui.radio_value(&mut self.choice, Choice::Remix, "RTX Remix");
+                if self.choice == Choice::Remix {
+                    ui.indent("remix_options", |ui| {
+                        folder_row(ui, &mut self.remix_build, "Choose build folder...");
+                    });
+                }
             }
         });
     }

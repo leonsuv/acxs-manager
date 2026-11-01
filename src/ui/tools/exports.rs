@@ -254,7 +254,7 @@ impl Tool for ExportsPage {
 
         widgets::heading(ui, "Exports", "Save installed cars or tracks to a CSV or JSON file.");
         if !ctx.ac_valid {
-            widgets::empty_state(ui, "Set your Assetto Corsa folder on the Home page to export content.");
+            widgets::empty_state(ui, "Set your Assetto Corsa folder in Settings to export content.");
             return;
         }
 

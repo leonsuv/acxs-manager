@@ -25,6 +25,17 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const INFO_PATH: &str = "/INFO";
 const ENTRY_LIST_PATH: &str = "/JSON|-1";
 
+/// One slot of the server's entry list.
+#[derive(Debug, Clone, Default)]
+pub struct ServerCar {
+    /// Car folder name, e.g. `ks_audi_r8_lms`.
+    pub model: String,
+    pub skin: String,
+    /// Driver in the slot, empty when the slot is free.
+    pub driver: String,
+    pub connected: bool,
+}
+
 /// Snapshot of a server's status as reported over HTTP.
 #[derive(Debug, Clone, Default)]
 pub struct ServerStatus {
@@ -43,6 +54,16 @@ pub struct ServerStatus {
     pub session: Option<String>,
     /// Driver names of connected cars, in entry-list order.
     pub players: Vec<String>,
+    /// The port the race itself runs on (`port` in `/INFO`), as `acs.exe` needs it.
+    pub port: Option<u16>,
+    /// The entry list: every slot with its car, skin and driver.
+    pub cars: Vec<ServerCar>,
+    /// Feature flags the server announces in its entry list (`WEATHERFX_V1`, `STEAM_TICKET`, ...).
+    pub features: Vec<String>,
+    /// The `/INFO` reply as the server sent it.
+    pub raw_info: String,
+    /// The entry-list reply as the server sent it.
+    pub raw_entries: String,
 }
 
 /// Errors returned by [`fetch`] and [`parse_status`].
@@ -104,11 +125,15 @@ pub fn fetch(host: &str, port: u16, timeout: Duration) -> Result<ServerStatus, S
     validate_host(host)?;
     let budget = Budget { started: Instant::now(), total: timeout };
 
-    let info = get(host, port, INFO_PATH, &budget)?;
-    let mut status = parse_status(&utf8_body(info)?)?;
+    let info = utf8_body(get(host, port, INFO_PATH, &budget)?)?;
+    let mut status = parse_status(&info)?;
+    status.raw_info = info;
 
-    let list = get(host, port, ENTRY_LIST_PATH, &budget)?;
-    status.players = parse_players(&utf8_body(list)?)?;
+    let list = utf8_body(get(host, port, ENTRY_LIST_PATH, &budget)?)?;
+    status.players = parse_players(&list)?;
+    status.cars = parse_cars(&list);
+    status.features = parse_features(&list);
+    status.raw_entries = list;
     Ok(status)
 }
 
@@ -128,8 +153,26 @@ pub fn parse_status(json: &str) -> Result<ServerStatus, StatusError> {
         clients: opt_u32(obj, "clients")?,
         max_clients: opt_u32(obj, "maxclients")?,
         session: opt_session(obj, "session")?,
-        players: Vec::new(),
+        port: opt_u32(obj, "port")?.and_then(|p| u16::try_from(p).ok()),
+        ..ServerStatus::default()
     })
+}
+
+/// Every slot of the entry list. Slots that do not parse are skipped; this is display only.
+fn parse_cars(json: &str) -> Vec<ServerCar> {
+    let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(json) else { return Vec::new() };
+    let Some(Value::Array(cars)) = obj.get("Cars") else { return Vec::new() };
+    let text = |car: &Map<String, Value>, key: &str| car.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+    cars.iter()
+        .filter_map(Value::as_object)
+        .map(|car| ServerCar {
+            model: text(car, "Model"),
+            // "black/ADAn": the part after the slash is a marker added by the server, not a folder.
+            skin: text(car, "Skin").split('/').next().unwrap_or("").to_string(),
+            driver: text(car, "DriverName"),
+            connected: car.get("IsConnected").and_then(Value::as_bool).unwrap_or(false),
+        })
+        .collect()
 }
 
 /// Parses the entry-list JSON and returns names of connected, named drivers.
@@ -785,5 +828,19 @@ mod tests {
         };
         let result = fetch("127.0.0.1", port, Duration::from_secs(2));
         assert!(matches!(result, Err(StatusError::Io(_)) | Err(StatusError::Timeout)));
+    }
+}
+
+/// The `Features` list of the entry-list reply; servers with Custom Shaders Patch support send it.
+fn parse_features(json: &str) -> Vec<String> {
+    let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(json) else { return Vec::new() };
+    match obj.get("Features") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|f| !f.is_empty() && f.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
     }
 }

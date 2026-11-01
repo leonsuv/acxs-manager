@@ -13,6 +13,7 @@
 //! `[GROOVE]`, `[GHOST_CAR]`, `[WIND]` and inactive `[REPLAY]`/`[RESTART]`/`[BENCHMARK]`
 //! sections.
 
+use crate::race_options::{Assists, RaceExtras};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -27,6 +28,7 @@ const MAX_HOUR: u8 = 23;
 const SESSION_TYPE_RACE: u8 = 3;
 
 /// File name prefix for backups of an overwritten race.ini.
+#[cfg(test)]
 const BACKUP_PREFIX: &str = "race.ini.acxs-backup-";
 
 /// Settings for a single quick race against AI opponents.
@@ -56,6 +58,8 @@ pub struct QuickRace {
     pub player_name: String,
     /// Player's starting grid slot, 0..=ai_count.
     pub grid_position: u32,
+    /// Sessions, conditions, rules and driver aids beyond the basics above.
+    pub extras: RaceExtras,
 }
 
 impl Default for QuickRace {
@@ -73,6 +77,7 @@ impl Default for QuickRace {
             ai_aggression: None,
             player_name: "Driver".to_string(),
             grid_position: 0,
+            extras: RaceExtras::default(),
         }
     }
 }
@@ -114,7 +119,7 @@ impl QuickRace {
                 "AI aggression is {aggression}, but the maximum is {MAX_AI_AGGRESSION}."
             ));
         }
-        if self.laps == 0 {
+        if self.laps == 0 && self.extras.race_enabled && self.extras.race_minutes == 0 {
             problems.push("Race must have at least one lap.".to_string());
         }
         if self.time_of_day_hour > MAX_HOUR {
@@ -129,6 +134,8 @@ impl QuickRace {
                 self.grid_position, self.ai_count, self.ai_count
             ));
         }
+
+        problems.extend(self.extras.validate());
 
         // Values are written one per line, so a line break would corrupt the file.
         let text_fields = [
@@ -208,9 +215,9 @@ impl QuickRace {
         kv(&mut out, "DRIFT_MODE", "0");
         kv(&mut out, "RACE_LAPS", &self.laps.to_string());
         kv(&mut out, "AI_LEVEL", &self.ai_level.to_string());
-        kv(&mut out, "FIXED_SETUP", "0");
-        kv(&mut out, "PENALTIES", "1");
-        kv(&mut out, "JUMP_START_PENALTY", "0");
+        kv(&mut out, "FIXED_SETUP", if self.extras.fixed_setup { "1" } else { "0" });
+        kv(&mut out, "PENALTIES", if self.extras.penalties { "1" } else { "0" });
+        kv(&mut out, "JUMP_START_PENALTY", &self.extras.jump_start_penalty.to_string());
 
         section(&mut out, "REMOTE");
         kv(&mut out, "ACTIVE", "0");
@@ -242,13 +249,7 @@ impl QuickRace {
             }
         }
 
-        section(&mut out, "SESSION_0");
-        kv(&mut out, "NAME", "Quick Race");
-        kv(&mut out, "TYPE", &SESSION_TYPE_RACE.to_string());
-        kv(&mut out, "LAPS", &self.laps.to_string());
-        kv(&mut out, "DURATION_MINUTES", "0");
-        kv(&mut out, "SPAWN_SET", "START");
-        kv(&mut out, "STARTING_POSITION", &self.grid_position.saturating_add(1).to_string());
+        self.write_sessions(&mut out);
 
         section(&mut out, "WEATHER");
         kv(&mut out, "NAME", &self.weather);
@@ -260,25 +261,25 @@ impl QuickRace {
             "TIME_OF_DAY_HOUR",
             &self.time_of_day_hour.to_string(),
         );
-        kv(&mut out, "TIME_MULT", "1.0");
+        kv(&mut out, "TIME_MULT", &format!("{}.0", self.extras.time_multiplier));
         kv(&mut out, "CLOUD_SPEED", "0.200");
 
         section(&mut out, "TEMPERATURE");
-        kv(&mut out, "AMBIENT", "26");
-        kv(&mut out, "ROAD", "32");
+        kv(&mut out, "AMBIENT", &self.extras.ambient_temp.to_string());
+        kv(&mut out, "ROAD", &self.extras.road_temp.to_string());
 
         section(&mut out, "WIND");
-        kv(&mut out, "SPEED_KMH_MIN", "0");
-        kv(&mut out, "SPEED_KMH_MAX", "0");
-        kv(&mut out, "DIRECTION_DEG", "0");
+        kv(&mut out, "SPEED_KMH_MIN", &self.extras.wind_min_kmh.to_string());
+        kv(&mut out, "SPEED_KMH_MAX", &self.extras.wind_max_kmh.to_string());
+        kv(&mut out, "DIRECTION_DEG", &self.extras.wind_direction.to_string());
 
         // The "Optimum" grip preset of the game's launcher.
         section(&mut out, "DYNAMIC_TRACK");
         kv(&mut out, "PRESET", "5");
-        kv(&mut out, "SESSION_START", "100");
+        kv(&mut out, "SESSION_START", &self.extras.track_grip.to_string());
         kv(&mut out, "RANDOMNESS", "0");
         kv(&mut out, "LAP_GAIN", "1");
-        kv(&mut out, "SESSION_TRANSFER", "100");
+        kv(&mut out, "SESSION_TRANSFER", &self.extras.track_grip.to_string());
 
         section(&mut out, "GROOVE");
         kv(&mut out, "VIRTUAL_LAPS", "10");
@@ -293,7 +294,7 @@ impl QuickRace {
         kv(&mut out, "ENABLED", "0");
 
         section(&mut out, "LAP_INVALIDATOR");
-        kv(&mut out, "ALLOWED_TYRES_OUT", "-1");
+        kv(&mut out, "ALLOWED_TYRES_OUT", &self.extras.allowed_tyres_out.to_string());
 
         section(&mut out, "OPTIONS");
         kv(&mut out, "USE_MPH", "0");
@@ -308,6 +309,154 @@ impl QuickRace {
 
         out
     }
+}
+
+impl QuickRace {
+    /// The `[SESSION_n]` sections in the order they are played: practice, qualifying, race.
+    fn write_sessions(&self, out: &mut String) {
+        const SESSION_TYPE_PRACTICE: u8 = 1;
+        const SESSION_TYPE_QUALIFY: u8 = 2;
+        let x = &self.extras;
+        let mut index = 0;
+        for (name, kind, minutes) in [
+            ("Practice", SESSION_TYPE_PRACTICE, x.practice_minutes),
+            ("Qualify", SESSION_TYPE_QUALIFY, x.qualify_minutes),
+        ] {
+            if minutes == 0 {
+                continue;
+            }
+            section(out, &format!("SESSION_{index}"));
+            kv(out, "NAME", name);
+            kv(out, "TYPE", &kind.to_string());
+            kv(out, "LAPS", "0");
+            kv(out, "DURATION_MINUTES", &minutes.to_string());
+            kv(out, "SPAWN_SET", "PIT");
+            index += 1;
+        }
+        if x.race_enabled {
+            section(out, &format!("SESSION_{index}"));
+            kv(out, "NAME", "Quick Race");
+            kv(out, "TYPE", &SESSION_TYPE_RACE.to_string());
+            if x.race_minutes > 0 {
+                kv(out, "LAPS", "0");
+                kv(out, "DURATION_MINUTES", &x.race_minutes.to_string());
+            } else {
+                kv(out, "LAPS", &self.laps.to_string());
+                kv(out, "DURATION_MINUTES", "0");
+            }
+            kv(out, "SPAWN_SET", if x.pit_start { "PIT" } else { "START" });
+            kv(out, "STARTING_POSITION", &self.grid_position.saturating_add(1).to_string());
+        }
+    }
+}
+
+/// Writes the driver aids to `cfg_dir/assists.ini`, keeping any existing file as a backup.
+pub fn write_assists_ini(cfg_dir: &Path, assists: &Assists) -> io::Result<PathBuf> {
+    let problems = assists.validate();
+    if !problems.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, problems.join(" ")));
+    }
+    write_named_ini(cfg_dir, "assists.ini", &assists.to_ini())
+}
+
+/// Everything `acs.exe` needs to join an online server without a launcher in between.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OnlineJoin {
+    pub ip: String,
+    /// The race port (`tport` in the lobby, `port` in `/INFO`).
+    pub port: u16,
+    pub http_port: u16,
+    pub server_name: String,
+    /// Track folder and layout folder as the server runs them.
+    pub track: String,
+    pub track_layout: Option<String>,
+    /// The car to drive, and its skin.
+    pub car: String,
+    pub skin: String,
+    pub driver: String,
+    pub password: String,
+    pub steam_id: String,
+    /// Feature flags the server announces. When there are any, Custom Shaders Patch is told, the
+    /// way Content Manager does, with `__CM_EXTENDED` and `__FEATURES`.
+    pub features: Vec<String>,
+}
+
+/// Values go into a line-based file: no line breaks may get through.
+fn one_line(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
+}
+
+impl OnlineJoin {
+    /// The problems that stop a join, one sentence each.
+    pub fn validate(&self) -> Result<(), Vec<String>> {
+        let mut problems = Vec::new();
+        if self.ip.trim().is_empty() {
+            problems.push("The server has no address.".to_string());
+        }
+        if self.port == 0 {
+            problems.push("The server's race port is unknown yet. Wait for its status, then try again.".to_string());
+        }
+        if self.car.trim().is_empty() {
+            problems.push("Pick a car.".to_string());
+        }
+        if self.track.trim().is_empty() {
+            problems.push("The server's track is unknown yet.".to_string());
+        }
+        if problems.is_empty() { Ok(()) } else { Err(problems) }
+    }
+
+    /// A `race.ini` that makes the game connect: the usual quick-race file with its `[REMOTE]`
+    /// section switched on and pointed at the server.
+    pub fn to_race_ini(&self) -> String {
+        let base = QuickRace {
+            track: one_line(&self.track),
+            track_layout: self.track_layout.as_deref().map(one_line),
+            car: one_line(&self.car),
+            skin: one_line(&self.skin),
+            ai_count: 0,
+            // Like Content Manager: the weekend shape comes from the server, the file just needs one session.
+            extras: RaceExtras { practice_minutes: 30, race_enabled: false, ..RaceExtras::default() },
+            player_name: one_line(&self.driver),
+            ..QuickRace::default()
+        }
+        .to_race_ini();
+
+        let mut remote = String::new();
+        section(&mut remote, "REMOTE");
+        kv(&mut remote, "SERVER_IP", &one_line(&self.ip));
+        kv(&mut remote, "SERVER_PORT", &self.port.to_string());
+        kv(&mut remote, "SERVER_HTTP_PORT", &self.http_port.to_string());
+        // The file is read as plain ANSI text; names full of symbols are cut down to ASCII.
+        let ascii_name: String = self.server_name.chars().filter(|c| c.is_ascii() && !c.is_control()).collect();
+        kv(&mut remote, "SERVER_NAME", ascii_name.trim());
+        kv(&mut remote, "REQUESTED_CAR", &one_line(&self.car));
+        kv(&mut remote, "NAME", &one_line(&self.driver));
+        kv(&mut remote, "TEAM", "");
+        kv(&mut remote, "PASSWORD", &one_line(&self.password));
+        kv(&mut remote, "GUID", &one_line(&self.steam_id));
+        kv(&mut remote, "ACTIVE", "1");
+        // Read by Custom Shaders Patch: it takes over the join (including a `csp/<build>/..` track
+        // requirement) when the server announces features.
+        let features: Vec<String> = self.features.iter().map(|f| one_line(f)).filter(|f| !f.is_empty()).collect();
+        kv(&mut remote, "__CM_EXTENDED", if features.is_empty() { "0" } else { "1" });
+        if !features.is_empty() {
+            kv(&mut remote, "__FEATURES", &features.join(","));
+        }
+        // `section` puts a blank line first; the file already has one there.
+        let remote = remote.trim_start_matches("\r\n");
+
+        let offline = "[REMOTE]\r\nACTIVE=0\r\n";
+        base.replacen(offline, remote, 1)
+    }
+}
+
+/// Writes the join file to `cfg_dir/race.ini`, keeping any existing one as a backup like
+/// [`write_race_ini`] does. Fails with `InvalidInput` when the join is not complete.
+pub fn write_online_ini(cfg_dir: &Path, join: &OnlineJoin) -> io::Result<PathBuf> {
+    if let Err(problems) = join.validate() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, problems.join(" ")));
+    }
+    write_ini_text(cfg_dir, &join.to_race_ini())
 }
 
 /// Sun angle the game uses for `hour`: 0 at 13:00, 16 degrees per hour,
@@ -353,12 +502,23 @@ pub fn write_race_ini(cfg_dir: &Path, race: &QuickRace) -> io::Result<PathBuf> {
         ));
     }
 
+    write_ini_text(cfg_dir, &race.to_race_ini())
+}
+
+/// Writes `text` as `cfg_dir/race.ini`, renaming an existing file to a backup first.
+fn write_ini_text(cfg_dir: &Path, text: &str) -> io::Result<PathBuf> {
+    write_named_ini(cfg_dir, "race.ini", text)
+}
+
+/// Writes `text` as `cfg_dir/<file_name>`, renaming an existing file to
+/// `<file_name>.acxs-backup-<time>` first.
+fn write_named_ini(cfg_dir: &Path, file_name: &str, text: &str) -> io::Result<PathBuf> {
     let cfg_dir = cfg_dir.to_path_buf();
     fs::create_dir_all(&cfg_dir)?;
 
-    let target = cfg_dir.join("race.ini");
+    let target = cfg_dir.join(file_name);
     if path_exists(&target)? {
-        let backup = next_backup_path(&cfg_dir)?;
+        let backup = next_backup_path(&cfg_dir, file_name)?;
         fs::rename(&target, &backup)?;
     }
 
@@ -367,14 +527,14 @@ pub fn write_race_ini(cfg_dir: &Path, race: &QuickRace) -> io::Result<PathBuf> {
         .write(true)
         .create_new(true)
         .open(&target)?;
-    file.write_all(race.to_race_ini().as_bytes())?;
+    file.write_all(text.as_bytes())?;
     Ok(target)
 }
 
 /// Returns a backup path in `cfg_dir` that does not exist yet.
-fn next_backup_path(cfg_dir: &Path) -> io::Result<PathBuf> {
+fn next_backup_path(cfg_dir: &Path, file_name: &str) -> io::Result<PathBuf> {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-    let base = format!("{BACKUP_PREFIX}{stamp}");
+    let base = format!("{file_name}.acxs-backup-{stamp}");
     let mut candidate = cfg_dir.join(&base);
     let mut n = 2u32;
     while path_exists(&candidate)? {
@@ -567,5 +727,133 @@ mod tests {
         assert!(!root.join("cfg").exists());
 
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod online_tests {
+    use super::*;
+
+    fn join() -> OnlineJoin {
+        OnlineJoin {
+            ip: "203.0.113.9".into(),
+            port: 9600,
+            http_port: 8081,
+            server_name: "Test".into(),
+            track: "ks_barcelona".into(),
+            track_layout: Some("layout_gp".into()),
+            car: "abarth500".into(),
+            skin: "0_white_scorpion".into(),
+            driver: "Leo".into(),
+            password: String::new(),
+            steam_id: "76561198000000002".into(),
+            features: vec!["WEATHERFX_V1".into(), "STEAM_TICKET".into()],
+        }
+    }
+
+    #[test]
+    fn writes_an_active_remote_section() {
+        let ini = join().to_race_ini();
+        let remote = &ini[ini.find("[REMOTE]").unwrap()..];
+        let remote = &remote[..remote.find("[CAR_0]").unwrap()];
+        assert!(remote.contains("SERVER_IP=203.0.113.9"));
+        assert!(remote.contains("SERVER_PORT=9600"));
+        assert!(remote.contains("SERVER_HTTP_PORT=8081"));
+        assert!(remote.contains("REQUESTED_CAR=abarth500"));
+        assert!(remote.contains("GUID=76561198000000002"));
+        assert!(remote.contains("ACTIVE=1"));
+        assert!(remote.contains("__CM_EXTENDED=1"));
+        assert!(remote.contains("__FEATURES=WEATHERFX_V1,STEAM_TICKET"));
+        assert!(!remote.contains("ACTIVE=0"));
+        assert!(ini.contains("CONFIG_TRACK=layout_gp"));
+    }
+
+    #[test]
+    fn refuses_an_incomplete_join() {
+        let mut j = join();
+        j.port = 0;
+        assert!(j.validate().is_err());
+        j.port = 9600;
+        j.car.clear();
+        assert!(j.validate().is_err());
+    }
+
+    #[test]
+    fn keeps_line_breaks_out_of_values() {
+        let mut j = join();
+        j.driver = "Leo\nACTIVE=0".into();
+        let ini = j.to_race_ini();
+        assert!(ini.contains("NAME=LeoACTIVE=0"));
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    #[test]
+    fn a_full_weekend_writes_three_sessions_in_order() {
+        let mut race = QuickRace::default();
+        race.extras.practice_minutes = 15;
+        race.extras.qualify_minutes = 10;
+        let ini = race.to_race_ini();
+        let p = ini.find("[SESSION_0]").unwrap();
+        let q = ini.find("[SESSION_1]").unwrap();
+        let r = ini.find("[SESSION_2]").unwrap();
+        assert!(p < q && q < r);
+        assert!(ini[p..q].contains("NAME=Practice"));
+        assert!(ini[p..q].contains("TYPE=1"));
+        assert!(ini[p..q].contains("DURATION_MINUTES=15"));
+        assert!(ini[q..r].contains("TYPE=2"));
+        assert!(ini[r..].contains("TYPE=3"));
+    }
+
+    #[test]
+    fn the_default_race_is_one_session() {
+        let ini = QuickRace::default().to_race_ini();
+        assert!(ini.contains("[SESSION_0]"));
+        assert!(!ini.contains("[SESSION_1]"));
+        assert!(ini.contains("TYPE=3"));
+    }
+
+    #[test]
+    fn a_timed_race_has_minutes_and_no_laps() {
+        let mut race = QuickRace::default();
+        race.extras.race_minutes = 30;
+        let ini = race.to_race_ini();
+        let session = &ini[ini.find("[SESSION_0]").unwrap()..];
+        assert!(session.contains("DURATION_MINUTES=30"));
+        assert!(session.contains("LAPS=0"));
+    }
+
+    #[test]
+    fn conditions_reach_the_file() {
+        let mut race = QuickRace::default();
+        race.extras.ambient_temp = 12;
+        race.extras.wind_max_kmh = 20;
+        race.extras.track_grip = 90;
+        race.extras.fixed_setup = true;
+        let ini = race.to_race_ini();
+        assert!(ini.contains("AMBIENT=12"));
+        assert!(ini.contains("SPEED_KMH_MAX=20"));
+        assert!(ini.contains("SESSION_START=90"));
+        assert!(ini.contains("FIXED_SETUP=1"));
+    }
+
+    #[test]
+    fn assists_are_written_beside_race_ini_with_a_backup() {
+        let dir = std::env::temp_dir().join(format!("acxs-assists-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("assists.ini"), "old").unwrap();
+        let path = write_assists_ini(&dir, &Assists { auto_shifter: true, ..Assists::default() }).unwrap();
+        assert!(fs::read_to_string(path).unwrap().contains("AUTO_SHIFTER=1"));
+        let backups = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("assists.ini.acxs-backup-"))
+            .count();
+        assert_eq!(backups, 1);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

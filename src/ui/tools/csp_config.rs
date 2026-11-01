@@ -155,6 +155,7 @@ pub struct CspConfig {
     root: Option<PathBuf>,
     data: Data,
     allow_new_key: bool,
+    file_filter: String,
     patch_v02: String,
     patch_v03: String,
     /// Jobs started and not yet finished.
@@ -171,6 +172,7 @@ impl CspConfig {
             root: None,
             data: Data::default(),
             allow_new_key: false,
+            file_filter: String::new(),
             patch_v02: String::new(),
             patch_v03: String::new(),
             pending: 0,
@@ -660,77 +662,63 @@ impl CspConfig {
             {
                 compare = true;
             }
-            ui.checkbox(&mut self.allow_new_key, "Allow creating new keys");
+            ui.add_space(8.0);
+            widgets::toggle(ui, &mut self.allow_new_key);
+            ui.label(RichText::new("Allow creating new keys").color(MUTED));
         });
         show_error(ui, &self.data, Tab::Settings);
         diff_card(ui, &self.data.diff, Tab::Settings);
-
-        ui.horizontal_wrapped(|ui| {
-            if self.data.files.is_empty() {
-                ui.label(RichText::new("No .ini files found in extension/config.").color(MUTED));
-            }
-            for file in &self.data.files {
-                let is_selected = self.data.selected.as_deref() == Some(file.path.as_path());
-                if ui.selectable_label(is_selected, file.name.as_str()).clicked() {
-                    select = Some(file.path.clone());
-                }
-            }
-        });
         ui.add_space(6.0);
+
+        // Left: the config files, searchable. Right: the selected file's settings.
+        egui::Panel::left("csp_files")
+            .exact_size(250.0)
+            .resizable(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::SIDEBAR)
+                    .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                    .corner_radius(egui::CornerRadius::same(theme::RADIUS))
+                    .inner_margin(egui::Margin::same(10)),
+            )
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.file_filter)
+                        .hint_text("Filter files")
+                        .desired_width(f32::INFINITY)
+                        .margin(egui::Margin::symmetric(10, 6)),
+                );
+                ui.add_space(4.0);
+                let filter = self.file_filter.trim().to_lowercase();
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    if self.data.files.is_empty() {
+                        ui.label(RichText::new("No .ini files found in extension/config.").color(MUTED));
+                    }
+                    for file in &self.data.files {
+                        let nice = friendly_name(&file.name);
+                        if !filter.is_empty()
+                            && !nice.to_lowercase().contains(&filter)
+                            && !file.name.to_lowercase().contains(&filter)
+                        {
+                            continue;
+                        }
+                        let is_selected = self.data.selected.as_deref() == Some(file.path.as_path());
+                        let response = widgets::nav_item(ui, is_selected, &nice, None, 0.0).on_hover_text(file.name.as_str());
+                        if response.clicked() {
+                            select = Some(file.path.clone());
+                        }
+                    }
+                });
+            });
 
         if let Some(path) = self.data.selected.clone() {
             let allow_new = self.allow_new_key;
-            let avail = ui.available_height();
             let Data { settings, edits, new_section, new_key, new_value, .. } = &mut self.data;
             match settings {
                 None => {
                     ui.label(RichText::new("Loading...").color(MUTED));
                 }
                 Some(list) => {
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .max_height((avail - 110.0).max(160.0))
-                        .show(ui, |ui| {
-                            ui.add_enabled_ui(!busy, |ui| {
-                                egui::Grid::new("csp_settings")
-                                    .num_columns(2)
-                                    .spacing([14.0, 6.0])
-                                    .striped(true)
-                                    .show(ui, |ui| {
-                                        let mut section_shown: Option<&str> = None;
-                                        for s in list.iter() {
-                                            if section_shown != Some(s.section.as_str()) {
-                                                section_shown = Some(s.section.as_str());
-                                                ui.label(
-                                                    RichText::new(format!("[{}]", s.section))
-                                                        .strong()
-                                                        .color(ACCENT),
-                                                );
-                                                ui.label("");
-                                                ui.end_row();
-                                            }
-                                            let value = edits
-                                                .entry((s.section.clone(), s.key.clone()))
-                                                .or_insert_with(|| s.value.clone());
-                                            let changed = value.as_str() != s.value.as_str();
-                                            let key_text = RichText::new(s.key.as_str())
-                                                .color(if changed { ACCENT } else { TEXT });
-                                            let key_label = ui.label(key_text);
-                                            if let Some(doc) = &s.doc {
-                                                key_label.on_hover_text(doc.as_str());
-                                            }
-                                            let edit = ui.add(
-                                                egui::TextEdit::singleline(value).desired_width(260.0),
-                                            );
-                                            if let Some(doc) = &s.doc {
-                                                edit.on_hover_text(doc.as_str());
-                                            }
-                                            ui.end_row();
-                                        }
-                                    });
-                            });
-                        });
-
                     let changes: Vec<(String, String, String)> = list
                         .iter()
                         .filter_map(|s| {
@@ -741,41 +729,90 @@ impl CspConfig {
                         })
                         .collect();
                     let dirty = !changes.is_empty();
-                    ui.horizontal(|ui| {
-                        if ui.add_enabled(!busy && dirty, widgets::primary_button("Save changes")).clicked() {
-                            save = Some(changes.clone());
-                        }
-                        if ui.add_enabled(!busy && dirty, egui::Button::new("Discard")).clicked() {
-                            edits.clear();
-                        }
-                        if dirty {
-                            ui.label(RichText::new(format!("{} unsaved change(s)", changes.len())).color(WARN));
-                        }
-                    });
 
-                    if allow_new {
-                        ui.horizontal(|ui| {
-                            ui.label("Add setting:");
-                            ui.add(egui::TextEdit::singleline(&mut *new_section).hint_text("section").desired_width(130.0));
-                            ui.add(egui::TextEdit::singleline(&mut *new_key).hint_text("key").desired_width(150.0));
-                            ui.add(egui::TextEdit::singleline(&mut *new_value).hint_text("value").desired_width(150.0));
-                            let ready = !busy && !new_section.trim().is_empty() && !new_key.trim().is_empty();
-                            if ui.add_enabled(ready, egui::Button::new("Add")).clicked() {
-                                save = Some(vec![(
-                                    new_section.trim().to_string(),
-                                    new_key.trim().to_string(),
-                                    new_value.trim().to_string(),
-                                )]);
+                    // The save bar stays at the bottom so it is always in reach.
+                    egui::Panel::bottom("csp_savebar")
+                        .frame(
+                            egui::Frame::new()
+                                .fill(if dirty { theme::CARD_SELECTED } else { theme::CARD })
+                                .stroke(egui::Stroke::new(1.0, if dirty { ACCENT.gamma_multiply(0.7) } else { theme::BORDER }))
+                                .corner_radius(egui::CornerRadius::same(12))
+                                .inner_margin(egui::Margin::symmetric(14, 8)),
+                        )
+                        .show_separator_line(false)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                if ui.add_enabled(!busy && dirty, widgets::primary_button("Save changes")).clicked() {
+                                    save = Some(changes.clone());
+                                }
+                                if ui.add_enabled(!busy && dirty, egui::Button::new("Discard")).clicked() {
+                                    edits.clear();
+                                }
+                                if dirty {
+                                    ui.label(RichText::new(format!("{} unsaved change(s)", changes.len())).color(WARN));
+                                } else {
+                                    ui.label(RichText::new("No changes").color(MUTED));
+                                }
+                            });
+                            if allow_new {
+                                ui.horizontal(|ui| {
+                                    ui.label("Add setting:");
+                                    ui.add(egui::TextEdit::singleline(&mut *new_section).hint_text("section").desired_width(130.0));
+                                    ui.add(egui::TextEdit::singleline(&mut *new_key).hint_text("key").desired_width(150.0));
+                                    ui.add(egui::TextEdit::singleline(&mut *new_value).hint_text("value").desired_width(150.0));
+                                    let ready = !busy && !new_section.trim().is_empty() && !new_key.trim().is_empty();
+                                    if ui.add_enabled(ready, egui::Button::new("Add")).clicked() {
+                                        save = Some(vec![(
+                                            new_section.trim().to_string(),
+                                            new_key.trim().to_string(),
+                                            new_value.trim().to_string(),
+                                        )]);
+                                    }
+                                });
                             }
                         });
-                    }
+                    ui.add_space(8.0);
+
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                        ui.add_enabled_ui(!busy, |ui| {
+                            let mut index = 0;
+                            while index < list.len() {
+                                // One card per [section].
+                                let section = list[index].section.clone();
+                                let end = list[index..].iter().position(|s| s.section != section).map_or(list.len(), |n| index + n);
+                                let group = &list[index..end];
+                                let edited = group
+                                    .iter()
+                                    .filter(|s| edits.get(&(s.section.clone(), s.key.clone())).is_some_and(|v| v != &s.value))
+                                    .count();
+                                theme::card().inner_margin(egui::Margin::symmetric(18, 12)).show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new(humanize(&section)).font(theme::bold(15.0)));
+                                        if edited > 0 {
+                                            widgets::pill(ui, &format!("{edited} changed"), ACCENT);
+                                        }
+                                    });
+                                    ui.add_space(6.0);
+                                    for s in group {
+                                        let value = edits
+                                            .entry((s.section.clone(), s.key.clone()))
+                                            .or_insert_with(|| s.value.clone());
+                                        setting_row(ui, s, value);
+                                    }
+                                });
+                                ui.add_space(10.0);
+                                index = end;
+                            }
+                        });
+                    });
                 }
             }
             if let Some(changes) = save {
                 self.save_settings(egui_ctx, root, path, changes);
             }
         } else {
-            widgets::empty_state(ui, "Select a config file above.");
+            widgets::empty_state(ui, "Pick a config file on the left.");
         }
 
         if reload {
@@ -1326,7 +1363,7 @@ impl Tool for CspConfig {
             "Edit Custom Shaders Patch settings, and review FFB, weather, gamepad and car class config.",
         );
         let Some(root) = self.root.clone() else {
-            widgets::empty_state(ui, "Set your Assetto Corsa folder on the Home page to edit CSP config.");
+            widgets::empty_state(ui, "Set your Assetto Corsa folder in Settings to edit CSP config.");
             return;
         };
         self.ensure(&egui_ctx, &root);
@@ -1451,20 +1488,38 @@ fn diff_card(ui: &mut egui::Ui, diff: &Option<(Tab, Vec<String>)>, tab: Tab) {
         return;
     }
     theme::card().show(ui, |ui| {
-        widgets::section_title(ui, &format!("Version compare ({} lines)", lines.len()));
+        ui.set_width(ui.available_width());
+        widgets::section_title(ui, &format!("What changed ({} lines)", lines.len()));
         egui::ScrollArea::vertical().max_height(220.0).auto_shrink([false, true]).show(ui, |ui| {
             for line in lines {
-                ui.label(RichText::new(line.as_str()).monospace().small());
+                // Added lines green, removed red, so a change reads at a glance.
+                let trimmed = line.trim_start();
+                let (color, tint) = if trimmed.starts_with('+') {
+                    (theme::OK, theme::OK.gamma_multiply(0.10))
+                } else if trimmed.starts_with('-') {
+                    (theme::DANGER, theme::DANGER.gamma_multiply(0.10))
+                } else {
+                    (theme::MUTED, egui::Color32::TRANSPARENT)
+                };
+                egui::Frame::new().fill(tint).corner_radius(4).inner_margin(egui::Margin::symmetric(8, 2)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new(line.as_str()).monospace().small().color(color));
+                });
             }
         });
     });
     ui.add_space(8.0);
 }
 
+/// A titled card that groups related settings.
 fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
-    egui::CollapsingHeader::new(RichText::new(title).strong())
-        .default_open(true)
-        .show(ui, add);
+    theme::card().inner_margin(egui::Margin::symmetric(18, 14)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new(title).font(theme::bold(15.0)));
+        ui.add_space(8.0);
+        add(ui);
+    });
+    ui.add_space(10.0);
 }
 
 fn grid(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui)) {
@@ -1474,7 +1529,7 @@ fn grid(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui)) {
 /// One checkbox row. `key` is the file key, shown as hover text.
 fn flag(ui: &mut egui::Ui, label: &str, key: &str, value: &mut bool) {
     ui.label(label).on_hover_text(key);
-    ui.checkbox(value, "");
+    widgets::toggle(ui, value).on_hover_text(key);
     ui.end_row();
 }
 
@@ -1579,4 +1634,87 @@ fn gamepad_form(ui: &mut egui::Ui, s: &mut PadSetup) {
             slider_row(ui, "Rumble", "RUMBLE_INTENSITY", &mut s.rumble, gamepad::RUMBLE_RANGE, false);
         });
     });
+}
+
+/// `rain_fx.ini` becomes `Rain fx`.
+fn friendly_name(file: &str) -> String {
+    humanize(file.strip_suffix(".ini").unwrap_or(file))
+}
+
+/// `SOME_KEY_NAME` / `some_key` becomes `Some key name`.
+fn humanize(raw: &str) -> String {
+    let spaced = raw.replace(['_', '.'], " ");
+    let lower = spaced.to_lowercase();
+    let mut chars = lower.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// One setting: readable name, a control that fits the value, the old value when changed.
+fn setting_row(ui: &mut egui::Ui, setting: &acxs_manager::csp_config::Setting, value: &mut String) {
+    let original = setting.value.clone();
+    let changed = *value != original;
+    ui.horizontal(|ui| {
+        // Change marker.
+        let (marker, _) = ui.allocate_exact_size(egui::vec2(4.0, 22.0), egui::Sense::hover());
+        if changed {
+            ui.painter().rect_filled(marker, egui::CornerRadius::same(2), ACCENT);
+        }
+        ui.allocate_ui_with_layout(
+            egui::vec2(280.0, 28.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                let label = ui.add(
+                    egui::Label::new(RichText::new(humanize(&setting.key)).color(if changed { ACCENT } else { TEXT })).truncate(),
+                );
+                label.on_hover_text(match &setting.doc {
+                    Some(doc) => format!("{}\n\n{doc}", setting.key),
+                    None => setting.key.clone(),
+                });
+            },
+        );
+
+        let lower = value.trim().to_lowercase();
+        let is_bool = matches!(lower.as_str(), "0" | "1" | "true" | "false" | "on" | "off");
+        let number: Option<f64> = value.trim().parse().ok();
+        if is_bool {
+            let mut on = matches!(lower.as_str(), "1" | "true" | "on");
+            if widgets::toggle(ui, &mut on).changed() {
+                // Keep the file's own spelling of booleans.
+                *value = match (lower.as_str(), on) {
+                    ("true" | "false", _) => if on { "true" } else { "false" }.to_string(),
+                    ("on" | "off", _) => if on { "on" } else { "off" }.to_string(),
+                    _ => if on { "1" } else { "0" }.to_string(),
+                };
+            }
+        } else if let Some(mut n) = number {
+            let whole = !value.contains('.');
+            let speed = if whole { 1.0 } else { (n.abs() * 0.01).max(0.001) };
+            if ui.add(egui::DragValue::new(&mut n).speed(speed).max_decimals(if whole { 0 } else { 4 })).changed() {
+                *value = if whole { format!("{}", n.round() as i64) } else { trim_float(n) };
+            }
+        } else {
+            ui.add(egui::TextEdit::singleline(value).desired_width(260.0).margin(egui::Margin::symmetric(8, 5)));
+        }
+
+        if changed {
+            ui.label(RichText::new(format!("was {}", if original.is_empty() { "empty" } else { original.as_str() })).size(12.0).color(MUTED));
+            if widgets::glyph_button(ui, "↺", "Revert this setting") {
+                *value = original;
+            }
+        }
+    });
+    if let Some(doc) = &setting.doc {
+        ui.horizontal(|ui| {
+            ui.add_space(14.0);
+            ui.add(egui::Label::new(RichText::new(doc.as_str()).size(11.5).color(theme::FAINT)).truncate());
+        });
+    }
+}
+
+fn trim_float(n: f64) -> String {
+    let text = format!("{n:.4}");
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
 }

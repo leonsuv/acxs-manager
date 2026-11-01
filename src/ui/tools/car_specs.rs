@@ -439,7 +439,7 @@ impl Tool for CarSpecsPage {
             "Physical specs and shift lights of an installed car, and how it differs from another.",
         );
         let Some(root) = ctx.ac_root.as_deref().filter(|_| ctx.ac_valid) else {
-            widgets::empty_state(ui, "Set your Assetto Corsa folder on the Home page to see car specs.");
+            widgets::empty_state(ui, "Set your Assetto Corsa folder in Settings to see car specs.");
             return;
         };
         let egui_ctx = ui.ctx().clone();

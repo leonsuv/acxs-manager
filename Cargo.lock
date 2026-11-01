@@ -133,6 +133,8 @@ dependencies = [
  "chrono",
  "eframe",
  "egui_extras",
+ "flate2",
+ "image",
  "native-tls",
  "rfd",
  "serde",
@@ -1744,6 +1746,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
