@@ -9,7 +9,9 @@ param(
     [int]$Seconds = 40,
     [string]$TrackDir = "C:\Program Files (x86)\Steam\steamapps\common\assettocorsa\content\tracks\ks_nordschleife\nordschleife",
     [string]$TrackId = "ks_nordschleife",
-    [string]$Layout = "nordschleife"
+    [string]$Layout = "nordschleife",
+    # Leave the memory behind, frozen on Live, for this many seconds after the lap (what a launcher holding the mapping does).
+    [int]$FreezeSeconds = 0
 )
 Add-Type -AssemblyName System.Core
 
@@ -35,6 +37,7 @@ foreach ($i in 0..3) { $sa.Write(436 + 4 * $i, [single]0.3) }
 $start = Get-Date
 $lapSeconds = $Seconds - 2.0
 $crashStart = -1.0
+$tick = 0
 $gain = 0.1
 while (((Get-Date) - $start).TotalSeconds -lt $Seconds) {
     $t = ((Get-Date) - $start).TotalSeconds
@@ -56,6 +59,7 @@ while (((Get-Date) - $start).TotalSeconds -lt $Seconds) {
     if ($lat -gt 1.0 -and $g0 -lt $lat) { $g0 = $lat }
     $v = $speed / 3.6
     $roll = $v / 0.3
+    $tick++; $pa.Write(0, [int]$tick)
     $pa.Write(4, [single]$throttle); $pa.Write(8, [single]$brake)
     $pa.Write(24, [single]$steer); $pa.Write(28, [single]$speed)
     $pa.Write(44, [single]$g0)
@@ -76,7 +80,7 @@ while (((Get-Date) - $start).TotalSeconds -lt $Seconds) {
     $ga.Write(260, [single]$line[$idx][1])
     Start-Sleep -Milliseconds 25
 }
-$ga.Write(4, [int]0)
+if ($FreezeSeconds -gt 0) { Start-Sleep $FreezeSeconds } else { $ga.Write(4, [int]0) }
 Start-Sleep -Milliseconds 500
 $pa.Dispose(); $ga.Dispose(); $sa.Dispose(); $phys.Dispose(); $gfx.Dispose(); $stat.Dispose()
 

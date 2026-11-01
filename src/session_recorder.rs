@@ -500,35 +500,79 @@ fn now_stamp() -> String {
     chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
 }
 
+/// Decides from consecutive snapshots whether the game is really running a session.
+///
+/// The game's shared memory can outlive the game (the launcher holds it) with its last values
+/// frozen, even `Live`. Only a physics packet counter that keeps moving counts as driving.
+#[derive(Debug, Default)]
+pub struct Watch {
+    last_packet: Option<i32>,
+    idle: f64,
+}
+
+impl Watch {
+    /// Feeds one reading and returns whether the car is being driven right now.
+    pub fn observe(&mut self, snap: Option<&Snapshot>, dt: f64) -> bool {
+        let Some(snap) = snap else {
+            self.last_packet = None;
+            self.idle += dt;
+            return false;
+        };
+        let packet = snap.physics.packet_id;
+        let moved = self.last_packet.is_some_and(|last| last != packet);
+        self.last_packet = Some(packet);
+        let driving = snap.graphics.status == AcStatus::Live && moved;
+        // A paused game stops the counter; that is not the end of the session.
+        if driving || snap.graphics.status == AcStatus::Pause {
+            self.idle = 0.0;
+        } else {
+            self.idle += dt;
+        }
+        driving
+    }
+
+    /// True once nothing has been driven for [`GONE_AFTER`] seconds.
+    pub fn gone(&self) -> bool {
+        self.idle >= GONE_AFTER
+    }
+}
+
 fn run(control: &RecorderControl, on_saved: &dyn Fn()) {
     let dir = sessions_dir();
     let mut agg: Option<SessionAggregator> = None;
     let mut last = Instant::now();
-    let mut gone = 0.0_f64;
+    let mut watch = Watch::default();
+    let mut last_error: Option<sharedmem::SharedMemError> = None;
     loop {
-        let snap = if control.paused.load(Ordering::Relaxed) { None } else { sharedmem::read_snapshot().ok() };
+        let reading = if control.paused.load(Ordering::Relaxed) { Err(sharedmem::SharedMemError::Unsupported) } else { sharedmem::read_snapshot() };
+        if let Err(err) = &reading
+            && !matches!(err, sharedmem::SharedMemError::NotRunning { .. } | sharedmem::SharedMemError::Unsupported)
+            && last_error.as_ref() != Some(err)
+        {
+            log_line(&format!("shared memory: {err}"));
+            last_error = Some(err.clone());
+        }
+        let snap = reading.ok();
         let now = Instant::now();
         let dt = now.duration_since(last).as_secs_f64();
         last = now;
-        match snap {
-            Some(snap) => {
-                gone = 0.0;
-                let changed = agg.as_ref().and_then(SessionAggregator::identity).is_some_and(|(car, track)| {
-                    car != snap.static_page.car_model || track != snap.static_page.track
-                });
-                if changed {
-                    close(agg.take(), &dir, on_saved);
-                }
-                if snap.graphics.status == AcStatus::Live && agg.is_none() {
-                    agg = Some(SessionAggregator::new(now_stamp()));
-                }
-                if let Some(a) = agg.as_mut() {
-                    a.feed(&snap, dt);
-                }
+        let driving = watch.observe(snap.as_ref(), dt);
+        if let Some(snap) = &snap {
+            let changed = agg.as_ref().and_then(SessionAggregator::identity).is_some_and(|(car, track)| {
+                car != snap.static_page.car_model || track != snap.static_page.track
+            });
+            if changed {
+                close(agg.take(), &dir, on_saved);
             }
-            None => gone += dt,
+            if driving && agg.is_none() {
+                log_line(&format!("session started: {} on {}", snap.static_page.car_model, snap.static_page.track));
+                agg = Some(SessionAggregator::new(now_stamp()));
+            }
+            if driving && let Some(a) = agg.as_mut() {
+                a.feed(snap, dt);
+            }
         }
-        if gone >= GONE_AFTER {
+        if watch.gone() {
             close(agg.take(), &dir, on_saved);
         }
         control.recording.store(agg.is_some(), Ordering::Relaxed);
@@ -580,6 +624,7 @@ pub fn archive_replays(source: &Path, archive: &Path, since: std::time::SystemTi
 fn close(agg: Option<SessionAggregator>, dir: &Path, on_saved: &dyn Fn()) {
     if let Some(mut session) = agg.and_then(SessionAggregator::finish) {
         session.ended_unix = chrono::Utc::now().timestamp();
+        log_line(&format!("session ended: {} on {}, {:.0} s", session.car_id, session.track_id, session.seconds));
         let hits = crate::collision_app::collisions_between(session.started_unix - 1, session.ended_unix + 5);
         attach_collisions(&mut session, &hits);
         if save(dir, &session).is_ok() {
@@ -982,5 +1027,73 @@ mod spot_tests {
         assert_eq!(spots[0].kind, EventKind::Crash);
         assert_eq!((spots[1].kind, spots[1].count), (EventKind::Understeer, 9));
         assert!((spots[1].start - 0.10).abs() < 1e-6 && (spots[1].end - 0.13).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod watch_tests {
+    use super::*;
+
+    fn snap(status: i32, packet: i32) -> Snapshot {
+        let mut physics = sharedmem::parse_physics(&[0u8; sharedmem::PHYSICS_PAGE_LEN]).unwrap();
+        physics.packet_id = packet;
+        let mut graphics = sharedmem::parse_graphics(&[0u8; sharedmem::GRAPHICS_PAGE_LEN]).unwrap();
+        graphics.status = match status {
+            2 => AcStatus::Live,
+            3 => AcStatus::Pause,
+            _ => AcStatus::Off,
+        };
+        let static_page = sharedmem::parse_static(&[0u8; sharedmem::STATIC_PAGE_LEN]).unwrap();
+        Snapshot { physics, graphics, static_page }
+    }
+
+    #[test]
+    fn a_moving_counter_is_driving_and_a_frozen_one_ends_the_session() {
+        let mut w = Watch::default();
+        // First reading has nothing to compare with.
+        assert!(!w.observe(Some(&snap(2, 10)), 0.03));
+        assert!(w.observe(Some(&snap(2, 11)), 0.03));
+        assert!(!w.gone());
+        // The game exited but its memory stayed, frozen on Live.
+        for _ in 0..200 {
+            w.observe(Some(&snap(2, 11)), 0.03);
+        }
+        assert!(w.gone());
+        // Memory that never moves does not start a session either.
+        let mut fresh = Watch::default();
+        assert!(!fresh.observe(Some(&snap(2, 5)), 2.0));
+        assert!(!fresh.observe(Some(&snap(2, 5)), 2.0));
+    }
+
+    #[test]
+    fn pause_and_missing_memory_are_told_apart() {
+        let mut w = Watch::default();
+        w.observe(Some(&snap(2, 1)), 0.03);
+        for _ in 0..1000 {
+            w.observe(Some(&snap(3, 1)), 0.03);
+        }
+        assert!(!w.gone(), "a paused game is still a session");
+        for _ in 0..200 {
+            w.observe(None, 0.03);
+        }
+        assert!(w.gone());
+    }
+}
+
+/// Appends a line to `%APPDATA%\ACXS\recorder.log` so a missing session can be explained. The file
+/// is cut back to its newest half when it grows past 64 KB.
+pub fn log_line(text: &str) {
+    let Some(dir) = sessions_dir().parent().map(Path::to_path_buf) else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("recorder.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 64 * 1024)
+        && let Ok(old) = std::fs::read_to_string(&path)
+    {
+        let _ = std::fs::write(&path, &old[old.len() / 2..]);
+    }
+    let line = format!("{}  {text}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        use std::io::Write;
+        let _ = file.write_all(line.as_bytes());
     }
 }
