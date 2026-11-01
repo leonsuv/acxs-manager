@@ -124,6 +124,8 @@ impl Servers {
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
+        // A first-time user has no servers of their own: open on the public list.
+        let no_own_servers = entries.is_empty();
         let mut servers = Servers {
             entries,
             sort_col: 2,
@@ -133,6 +135,7 @@ impl Servers {
             custom_url: saved["url"].as_str().unwrap_or("").to_string(),
             hide_empty: true,
             installed_only: true,
+            online: no_own_servers,
             driver: previous_driver_name(),
             ..Servers::default()
         };
