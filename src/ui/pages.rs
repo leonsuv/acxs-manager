@@ -1086,7 +1086,7 @@ fn driving_section(app: &App, ui: &mut egui::Ui) {
             ("Wheelspins", stats.wheelspins.to_string()),
         ]);
     }
-    widgets::tile_grid(ui, 150.0, tiles.len(), |ui, i| {
+    widgets::tile_grid(ui, 190.0, tiles.len(), |ui, i| {
         let (label, value) = &tiles[i];
         tile(ui, |ui| widgets::stat(ui, label, value, TEXT));
     });

@@ -765,18 +765,50 @@ mod tests {
     }
 }
 
+/// A stretch of the lap where something kept happening.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Spot {
+    /// Lap position 0..1 where it starts and ends.
+    pub start: f32,
+    pub end: f32,
+    pub kind: EventKind,
+    /// Occurrences, or tenths of a second for understeer and oversteer.
+    pub count: u32,
+}
+
+impl EventKind {
+    /// True for the kinds measured in tenths of a second.
+    pub fn is_timed(self) -> bool {
+        matches!(self, EventKind::Understeer | EventKind::Oversteer)
+    }
+}
+
 impl RecordedSession {
-    /// The `limit` worst spots, most events first. Each is `(position 0..1, kind, count)`.
-    /// Understeer and oversteer are in tenths of a second.
-    pub fn worst_spots(&self, limit: usize) -> Vec<(f32, EventKind, u32)> {
-        let mut spots: Vec<(f32, EventKind, u32)> = self
-            .hotspots
-            .iter()
-            .map(|h| ((f32::from(h.segment) + 0.5) / SEGMENTS as f32, h.kind, h.count))
-            .collect();
-        spots.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.total_cmp(&b.0)));
-        spots.truncate(limit);
-        spots
+    /// The `limit` worst spots. Neighbouring slices of the same kind are merged into one stretch.
+    /// Ranking counts one crash or lock-up like two seconds of understeer, so single events are
+    /// not buried under long balance stretches.
+    pub fn worst_spots(&self, limit: usize) -> Vec<Spot> {
+        let mut cells: Vec<&Hotspot> = self.hotspots.iter().collect();
+        cells.sort_by_key(|h| (h.kind, h.segment));
+        let mut spots: Vec<(u32, Spot)> = Vec::new();
+        let width = 1.0 / SEGMENTS as f32;
+        let mut last_segment = 0u8;
+        for h in cells {
+            let start = f32::from(h.segment) * width;
+            match spots.last_mut() {
+                Some((_, spot)) if spot.kind == h.kind && h.segment <= last_segment + 1 => {
+                    spot.end = start + width;
+                    spot.count += h.count;
+                }
+                _ => spots.push((0, Spot { start, end: start + width, kind: h.kind, count: h.count })),
+            }
+            last_segment = h.segment;
+        }
+        for (score, spot) in &mut spots {
+            *score = if spot.kind.is_timed() { spot.count } else { spot.count * 20 };
+        }
+        spots.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.start.total_cmp(&b.1.start)));
+        spots.into_iter().take(limit).map(|(_, spot)| spot).collect()
     }
 }
 
@@ -813,7 +845,8 @@ mod hotspot_tests {
         assert!(done.path.contains(&(42, 10.0, -4.0)));
         let worst = done.worst_spots(3);
         assert_eq!(worst.len(), 1);
-        assert!((worst[0].0 - 0.425).abs() < 1e-6);
+        assert_eq!(worst[0].kind, EventKind::FrontLockup);
+        assert!((worst[0].start - 0.42).abs() < 1e-6 && (worst[0].end - 0.43).abs() < 1e-6);
     }
 }
 
@@ -924,5 +957,30 @@ mod collision_tests {
         assert_eq!((s.wall_hits, s.car_hits), (2, 1));
         assert!(s.hotspots.contains(&Hotspot { segment: 50, kind: EventKind::WallHit, count: 2 }));
         assert!(s.hotspots.contains(&Hotspot { segment: 10, kind: EventKind::CarHit, count: 1 }));
+    }
+}
+
+#[cfg(test)]
+mod spot_tests {
+    use super::*;
+
+    #[test]
+    fn neighbours_merge_and_single_events_outrank_balance_cells() {
+        let cell = |segment, kind, count| Hotspot { segment, kind, count };
+        let s = RecordedSession {
+            hotspots: vec![
+                cell(10, EventKind::Understeer, 3),
+                cell(11, EventKind::Understeer, 3),
+                cell(12, EventKind::Understeer, 3),
+                cell(40, EventKind::Understeer, 2),
+                cell(60, EventKind::Crash, 1),
+            ],
+            ..RecordedSession::default()
+        };
+        let spots = s.worst_spots(5);
+        assert_eq!(spots.len(), 3);
+        assert_eq!(spots[0].kind, EventKind::Crash);
+        assert_eq!((spots[1].kind, spots[1].count), (EventKind::Understeer, 9));
+        assert!((spots[1].start - 0.10).abs() < 1e-6 && (spots[1].end - 0.13).abs() < 1e-6);
     }
 }

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Sessions page redesigned: big track map (real outline from the recorded lap, start marker, glowing trouble-spot dots with hover names, legend), stat grid, handling bar and ranked trouble spots. Stretches of understeer/oversteer are merged into one entry; the list reloads when a session is saved.
+- Test tools: `scripts/fake-ac-drive.ps1` plays a lap along a real track line (default Nordschleife) with problems at known positions into fake shared memory, `examples/recorder_probe.rs` runs the recorder against it, and `ACXS_SHM_PREFIX` points the reader at the fake mappings. Checked end to end: all seven event kinds landed at the scripted lap positions and the Nordschleife outline matches the game's own map.
+
 - Phase 6: optional "ACXS Collisions" CSP Lua app (installed from the Sessions page) logs wall and car hits; the recorder adds them to each session and to the track map. Untested in the game.
 
 - Sessions suggestions card has an "Open Setups" button (tools can now ask the app to open another tool page).

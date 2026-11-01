@@ -511,9 +511,9 @@ pub struct SharedPages {
 #[cfg(windows)]
 pub fn open_pages() -> Result<SharedPages, SharedMemError> {
     Ok(SharedPages {
-        physics: read_mapping(PHYSICS_MAPPING, PHYSICS_PAGE_LEN, "physics")?,
-        graphics: read_mapping(GRAPHICS_MAPPING, GRAPHICS_PAGE_LEN, "graphics")?,
-        static_page: read_mapping(STATIC_MAPPING, STATIC_PAGE_LEN, "static")?,
+        physics: read_mapping(&mapping_name(PHYSICS_MAPPING), PHYSICS_PAGE_LEN, "physics")?,
+        graphics: read_mapping(&mapping_name(GRAPHICS_MAPPING), GRAPHICS_PAGE_LEN, "graphics")?,
+        static_page: read_mapping(&mapping_name(STATIC_MAPPING), STATIC_PAGE_LEN, "static")?,
     })
 }
 
@@ -1007,5 +1007,16 @@ mod tests {
     fn read_snapshot_returns_error_off_windows() {
         let result = read_snapshot();
         assert!(matches!(result, Err(SharedMemError::Unsupported)));
+    }
+}
+
+/// Name of a game mapping. The `ACXS_SHM_PREFIX` environment variable replaces the game's
+/// `acpmf_` prefix so tests can play a fake drive into mappings of their own
+/// (`scripts/fake-ac-drive.ps1`) while the real game may be running.
+#[cfg(windows)]
+fn mapping_name(base: &str) -> String {
+    match std::env::var("ACXS_SHM_PREFIX") {
+        Ok(prefix) if !prefix.is_empty() => base.replacen("acpmf_", &prefix, 1),
+        _ => base.to_string(),
     }
 }

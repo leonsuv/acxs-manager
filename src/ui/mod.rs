@@ -739,6 +739,7 @@ impl App {
             ac_root: self.settings.ac_root_path(),
             ac_valid: self.snapshot.ac_valid,
             game_running: self.snapshot.game_running,
+            sessions_saved: self.recorder.saved.load(std::sync::atomic::Ordering::Relaxed),
         };
         let mut notices = Vec::new();
         if let Some(tool) = self.tools.get_mut(index) {

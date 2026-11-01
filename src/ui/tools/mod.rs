@@ -15,6 +15,8 @@ pub struct ToolContext {
     pub ac_root: Option<PathBuf>,
     pub ac_valid: bool,
     pub game_running: bool,
+    /// Sessions the recorder has saved since the app started.
+    pub sessions_saved: usize,
 }
 
 mod content_editor;
