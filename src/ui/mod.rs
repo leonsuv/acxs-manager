@@ -506,6 +506,7 @@ impl App {
                     tool("Lap Times", Icon::Clock),
                     tool("Sessions", Icon::Chart),
                     tool("Replay Viewer", Icon::Replay),
+                    tool("Screenshots", Icon::Paint),
                     tool("Live Telemetry", Icon::Chart),
                 ],
             ),

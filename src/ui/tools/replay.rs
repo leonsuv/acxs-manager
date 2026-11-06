@@ -8,6 +8,7 @@ use acxs_manager::replay::{
     format_lap_time, read_replay_samples, ReplayInfo, ReplaySamples, Sample,
 };
 use acxs_manager::replay_analysis;
+use acxs_manager::replay_library::{self, ReplayFile, ReplayPlace};
 use acxs_manager::replay_player::Player;
 use acxs_manager::telemetry::LapInfo;
 use acxs_manager::telemetry_csv::{laps_to_csv, replay_samples_to_csv, write_csv};
@@ -51,6 +52,8 @@ struct ReplayViewer {
     busy: bool,
     /// The replay currently shown, with its playback state.
     loaded: Option<Loaded>,
+    /// The replays on this PC; read when the page opens.
+    library: Option<Vec<ReplayFile>>,
 }
 
 impl ReplayViewer {
@@ -61,6 +64,7 @@ impl ReplayViewer {
             rx,
             busy: false,
             loaded: None,
+            library: None,
         }
     }
 
@@ -177,6 +181,22 @@ impl Tool for ReplayViewer {
             "Open an Assetto Corsa .acreplay file to play back its telemetry, see its summary and export the lap times.",
         );
 
+        let files = self.library.get_or_insert_with(read_library);
+        let mut reread = false;
+        let mut open = None;
+        egui::CollapsingHeader::new(format!("Replay library ({})", files.len()))
+            .default_open(self.loaded.is_none())
+            .show(ui, |ui| open = library_rows(ui, files, notices, &mut reread));
+        if reread {
+            self.library = None;
+        }
+        if let Some(path) = open
+            && !self.busy
+        {
+            self.start_parse(path, ui.ctx().clone());
+        }
+        ui.add_space(6.0);
+
         ui.horizontal(|ui| {
             let open = ui.add_enabled(!self.busy, widgets::primary_button("Open replay"));
             if open.clicked() {
@@ -240,6 +260,51 @@ impl Tool for ReplayViewer {
                 }
             });
     }
+}
+
+/// The game's saved and autosave folders.
+fn replay_dir() -> Option<PathBuf> {
+    acxs_manager::settings::ac_documents_dir().map(|docs| docs.join("replay"))
+}
+
+fn read_library() -> Vec<ReplayFile> {
+    replay_dir()
+        .map(|dir| replay_library::list(&dir, &acxs_manager::session_recorder::replay_archive_dir()))
+        .unwrap_or_default()
+}
+
+/// One row per replay. Returns the replay to open.
+fn library_rows(ui: &mut egui::Ui, files: &[ReplayFile], notices: &mut Vec<Notice>, reread: &mut bool) -> Option<PathBuf> {
+    let mut open = None;
+    egui::ScrollArea::vertical().id_salt("replay_library").max_height(280.0).auto_shrink([false, true]).show(ui, |ui| {
+        for file in files {
+            ui.horizontal(|ui| {
+                widgets::pill(ui, file.place.label(), if file.place == ReplayPlace::Autosave { theme::WARN } else { theme::MUTED });
+                if file.online {
+                    widgets::pill(ui, "Online", theme::INFO);
+                }
+                ui.add(egui::Label::new(file.title.as_str()).truncate());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("Open").clicked() {
+                        open = Some(file.path.clone());
+                    }
+                    if file.place != ReplayPlace::Saved
+                        && ui.small_button("Keep").on_hover_text("Copy it to the saved folder, where the game leaves it alone.").clicked()
+                        && let Some(dir) = replay_dir()
+                    {
+                        match replay_library::keep(file, &dir) {
+                            Ok(_) => notices.push(Notice { text: "Replay kept.".into(), ok: true }),
+                            Err(err) => notices.push(Notice { text: format!("Could not keep the replay: {err}"), ok: false }),
+                        }
+                        *reread = true;
+                    }
+                    let when: chrono::DateTime<chrono::Local> = file.modified.into();
+                    ui.label(RichText::new(format!("{}  \u{00B7}  {} MB", when.format("%-d %b %H:%M"), file.bytes / 1_000_000)).size(12.0).color(theme::MUTED));
+                });
+            });
+        }
+    });
+    open
 }
 
 /// Play/pause, speed selector, seek slider and the readout of the sample at the playhead.

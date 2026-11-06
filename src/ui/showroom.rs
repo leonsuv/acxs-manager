@@ -147,6 +147,7 @@ pub fn showroom(app: &mut App, ui: &mut egui::Ui) {
     let mut open_folder = false;
     let mut jump_cars = false;
     let mut race_car = false;
+    let mut game_showroom = false;
     let mut goto_tool: Option<&str> = None;
 
     let area = ui.available_size();
@@ -206,6 +207,9 @@ pub fn showroom(app: &mut App, ui: &mut egui::Ui) {
                 ui.horizontal_wrapped(|ui| {
                     if ui.add(widgets::primary_button("Race this car")).clicked() {
                         race_car = true;
+                    }
+                    if ui.button("Open in the game").on_hover_text("Starts the showroom of Assetto Corsa with this car.").clicked() {
+                        game_showroom = true;
                     }
                     if ui.button("Open folder").clicked() {
                         open_folder = true;
@@ -325,6 +329,16 @@ pub fn showroom(app: &mut App, ui: &mut egui::Ui) {
     }
     if open_folder {
         super::pages::open_folder(&car.path);
+    }
+    if game_showroom {
+        let skin = skins.get(skin_pos).map(|(name, _)| name.clone()).unwrap_or_default();
+        let result = match (app.settings.ac_root_path(), crate::settings::ac_user_cfg_dir()) {
+            (Some(root), Some(cfg)) => crate::game::launch_showroom(&root, &cfg, &car.id, &skin).map(|_| ()),
+            _ => Err(std::io::Error::other("the game folder is not set")),
+        };
+        if let Err(err) = result {
+            app.push_notice(format!("Could not open the showroom: {err}"), false);
+        }
     }
     if race_car {
         app.race_request = Some(super::pages::RaceAction {

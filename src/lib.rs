@@ -66,6 +66,7 @@ pub mod rare;
 pub mod remix;
 pub mod replay;
 pub mod replay_analysis;
+pub mod replay_library;
 pub mod replay_player;
 pub mod reshade;
 pub mod server;

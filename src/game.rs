@@ -124,3 +124,50 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 }
+
+/// Opens a car in the game's own showroom: `showroom_start.ini` names the car and skin,
+/// `acShowroom.exe` reads it. The other values in the file stay.
+pub fn launch_showroom(ac_root: &Path, cfg_dir: &Path, car: &str, skin: &str) -> io::Result<Child> {
+    let exe = ac_root.join("acShowroom.exe");
+    if !exe.is_file() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "acShowroom.exe is not in the game folder"));
+    }
+    write_showroom_start(cfg_dir, car, skin)?;
+    Command::new(&exe)
+        .current_dir(ac_root)
+        .env("SteamAppId", STEAM_APP_ID)
+        .env("SteamGameId", STEAM_APP_ID)
+        .spawn()
+}
+
+fn write_showroom_start(cfg_dir: &Path, car: &str, skin: &str) -> io::Result<()> {
+    let path = cfg_dir.join("showroom_start.ini");
+    let mut ini = crate::ini::Ini::load(&path).unwrap_or_else(|_| crate::ini::Ini::parse(""));
+    ini.set("SHOWROOM", "CAR", car);
+    ini.set("SHOWROOM", "SKIN", skin);
+    ini.set("SHOWROOM", "SELECTED_SKIN", skin);
+    ini.set("SHOWROOM", "ALLOW_SELECT_SKIN", 1);
+    if ini.get("SHOWROOM", "TRACK").is_none() {
+        ini.set("SHOWROOM", "TRACK", "showroom");
+    }
+    ini.save_with_backup(&path)
+}
+
+#[cfg(test)]
+mod showroom_tests {
+    use super::*;
+
+    #[test]
+    fn the_start_file_names_the_car_and_keeps_the_rest() {
+        let dir = std::env::temp_dir().join(format!("acxs-showroom-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("showroom_start.ini"), "[SHOWROOM]\nCAR=old\nTRACK=studio\n\n[FADES]\nENTER_EXIT_MS=0\n").unwrap();
+        write_showroom_start(&dir, "ks_ferrari_488_gt3", "red").unwrap();
+        let ini = crate::ini::Ini::load(&dir.join("showroom_start.ini")).unwrap();
+        assert_eq!(ini.get("SHOWROOM", "CAR"), Some("ks_ferrari_488_gt3"));
+        assert_eq!(ini.get("SHOWROOM", "SELECTED_SKIN"), Some("red"));
+        assert_eq!(ini.get("SHOWROOM", "TRACK"), Some("studio"));
+        assert_eq!(ini.get_i64("FADES", "ENTER_EXIT_MS"), Some(0));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
