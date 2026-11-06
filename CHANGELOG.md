@@ -2,10 +2,26 @@
 
 ## Unreleased
 
+Checked against real drives, a live game session and a working Content Manager `race.ini`:
+
+- Quick Race and server joins confirmed on the real game: three Quick Races and a 75-car server session started from files ACXS wrote. The join file now has the same keys as Content Manager's, and the race port, feature list and Steam id matched exactly on a live server.
+- Joining says so when Steam is not signed in, and asks the server for its features again if the panel has not heard from it yet.
+- `race.ini` keeps the driver's nationality, which also clears the game's only logged error. `race.ini` backups stop at the newest 10.
+- The status bar and Lights Patch page name the installed CSP version from its own manifest instead of "unrecognized", and scans no longer hash the 140 MB `dwrite.dll`.
+- Recorder fixes from real data: sessions are saved when the game's memory freezes after exit; a crash is found across a short window, because the g spike arrives before the speed loss, so slow crashes count; kerbs, landings and the end of a braking zone do not; counter-steering counts as oversteer; handling is judged only while the wheel is steady; a new session type starts a new session; long drives stay whole on the map.
+- Tracks without lap position, such as La Canyons and Drift, get their map from the driven path. Only lasting handling spots get a dot on it.
+- Sessions page: installed car and track names, session type, delete a session, handling marked as an estimate. Files are written compactly.
+- Replays made while ACXS was closed reach the archive at the next start. A `recorder.log` explains missing sessions.
+- ACXS Collisions rewritten against CSP's own apps: `script.windowMain`, `io.save` in its own folder, an icon, hits in replays skipped. It needs no step in the game. Still not run in the game.
+- Championships read dedicated server result files.
+- Content health checks: a model list naming files the track does not ship is a note, not an error, because stock tracks do it and run fine. An empty car folder is one warning.
+
+Earlier in this cycle:
+
 - Sessions page redesigned: big track map (real outline from the recorded lap, start marker, glowing trouble-spot dots with hover names, legend), stat grid, handling bar and ranked trouble spots. Stretches of understeer/oversteer are merged into one entry; the list reloads when a session is saved.
 - Test tools: `scripts/fake-ac-drive.ps1` plays a lap along a real track line (default Nordschleife) with problems at known positions into fake shared memory, `examples/recorder_probe.rs` runs the recorder against it, and `ACXS_SHM_PREFIX` points the reader at the fake mappings. Checked end to end: all seven event kinds landed at the scripted lap positions and the Nordschleife outline matches the game's own map.
 
-- Phase 6: optional "ACXS Collisions" CSP Lua app (installed from the Sessions page) logs wall and car hits; the recorder adds them to each session and to the track map. Untested in the game.
+- Phase 6: optional "ACXS Collisions" CSP Lua app (installed from the Sessions page) logs wall and car hits; the recorder adds them to each session and to the track map.
 
 - Sessions suggestions card has an "Open Setups" button (tools can now ask the app to open another tool page).
 
@@ -23,7 +39,7 @@
 
 - Recorder adds understeer/oversteer share (steering gain learned from low-speed driving, no car data needed) and a Sessions page under Driving data listing every recorded session.
 
-- Session recorder: while Assetto Corsa is live, ACXS samples the shared memory at about 30 Hz and saves one JSON file per session to `%APPDATA%ACXSsessions` (time, distance, top speed, laps, crashes, off-track, jumps, brake lock-ups, wheelspin). Shown in Home statistics, with "Recording session" in the status bar. Untested against the real game.
+- Session recorder: while Assetto Corsa is live, ACXS samples the shared memory at about 30 Hz and saves one JSON file per session to `%APPDATA%\ACXS\sessions\` (time, distance, top speed, laps, crashes, off-track, jumps, brake lock-ups, wheelspin). Shown in Home statistics, with "Recording session" in the status bar.
 
 - Home: "Your driving" section built from the Content Manager session history (drive time, distance, top speed, crashes, jumps, most driven cars and tracks, recent weeks). Read only; sessions started by ACXS are not recorded yet.
 

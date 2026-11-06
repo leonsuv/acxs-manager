@@ -446,7 +446,7 @@ fn detail(ui: &mut egui::Ui, champ: &Championship, form: &mut RoundForm, actions
         }
         if ui
             .button("Load server result file")
-            .on_hover_text("Fills the form from a results\*.json of a dedicated server.")
+            .on_hover_text("Fills the form from a file in the results folder of a dedicated server.")
             .clicked()
         {
             actions.push(Action::LoadServerResults);

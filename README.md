@@ -50,7 +50,12 @@ game directly; Content Manager is not needed.
   injector build folder, a runtime build folder or none, and manages those folders.
 - **Racing:** writes a quick-race config and starts the game with named presets,
   keeps lap records with a delta trace, views replays, and offers race engineer,
-  setup, strategy and timing-tower views. Championships are scored from CSV results.
+  setup, strategy and timing-tower views. Championships are scored from CSV results
+  or dedicated server result files.
+- **Driving statistics:** records your own sessions while the game runs (time,
+  distance, laps, crashes, jumps, lock-ups, wheelspin, an estimate of understeer and
+  oversteer) with a track map of your trouble spots and setup suggestions. Home adds
+  your Content Manager history. Everything stays on your PC.
 - **Server:** edits the dedicated server configuration and entry list, starts
   and stops the server process, and shows live server status.
 - **Telemetry and logs:** shows live UDP telemetry with charts and a track map,
@@ -137,15 +142,14 @@ Core modules by feature area (all in `src/`):
   quick race, dedicated server files and process control, lap records, replay
   viewing, live telemetry with charts, KN5 export and preview, graphics injector
   switching, configuration snapshots, the diagnostics bundle, the install-from-zip
-  page, live server status, and the shared memory reader.
+  page, live server status, the shared memory reader, session recording, and joining
+  servers. Quick Race, joining and the recorder have run against the real game.
 - Partial: a few pages stop short of the full feature. Examples: the HUD layout
-  (no in-game drawing), AO baking (values not written), and car tuning (tyre and
-  suspension values not covered). ROADMAP.md names what is missing for each.
+  (no in-game drawing) and AO baking (values not written). ROADMAP.md names what is
+  missing for each.
 - Not started: the Planned rows in ROADMAP.md, such as the online content catalog,
   shared leaderboards, server uploads, hardware outputs and the Windows CI workflow.
-
-The CSP gamepad config file location has not yet been checked against a real game
-install. The page shows a warning about this.
+- Switched off: RTX & ReShade. Remix hooks Direct3D 9 and the game uses Direct3D 11.
 
 Build and test results above were recorded from the repository state at the time
 of writing. Run `cargo test --lib` before relying on them.

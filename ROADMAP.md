@@ -26,7 +26,7 @@ the registered tool pages named in the "UI page" column below.
 
 ## Summary
 
-Rows: 105. Done: 70. Partial: 13. Planned: 10. Not feasible: 12.
+Rows: 106. Done: 74. Partial: 10. Planned: 10. Not feasible: 12.
 
 Counts are for the rows in the sections below. Each section is one feature area.
 
@@ -69,7 +69,7 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | Feature | ACXS module(s) | UI page | Status | Note |
 | --- | --- | --- | --- | --- |
 | Edit car and track metadata (`ui_car.json`, `ui_track.json`) | `content_meta.rs` | Metadata & Checks | Done | Edits keep the fields the page does not touch. |
-| Car physics tuning (tyre, suspension, drivetrain values) | `car_tuning.rs` | Car Tuning | Partial | Engine power and torque, total mass, fuel tank, forward gear ratios and final drive can be edited and applied. The previous file is kept. Tyre and suspension values are not covered. |
+| Car physics tuning (tyre, suspension, drivetrain values) | `car_tuning.rs` | Car Tuning | Done | Engine power and torque, total mass, fuel tank, gear ratios, final drive, tyre pressures, camber and base height can be edited and applied. The previous file is kept. |
 
 ## 4. Skins and liveries
 
@@ -117,7 +117,7 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | Force-feedback tuning | `ffb.rs` | CSP Config (FFB) | Done | - |
 | Weather presets and weather effects | `weather.rs` | CSP Config (Weather) | Done | Weather effect and preset values can be edited. Presets can be created and copied. Two versions can be compared. |
 | Car classes and car years | `car_classes.rs` | CSP Config (Car classes) | Done | Classes can be created and removed in the page. Cars can be added to a class and given a year. |
-| Gamepad and keyboard assist settings | `gamepad.rs` | CSP Config (Gamepad) | Partial | Settings editor. The config file location is not yet checked against a real install; the page shows a warning. The assist app is not installed by the manager. |
+| Gamepad and keyboard assist settings | `gamepad.rs` | CSP Config (Gamepad) | Done | Settings editor. The file location and `[JOYPAD_ASSIST]` section were checked against a real install. The assist scripts ship with CSP. |
 | Race rules settings for the rules mod | `rare.rs` | Mods | Partial | Installed check and settings editor. The rules app itself is not installed by the manager. |
 | List CSP apps and user apps | `lua_apps.rs` | Mods | Done | Lists the apps shipped with CSP and the apps the user installed. |
 | Install and manage CSP apps | `lua_apps.rs` | Mods | Partial | User apps can be installed and removed. CSP-shipped apps are listed and protected; the page cannot install or remove them. |
@@ -142,7 +142,8 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | Edit `entry_list.ini` | `server.rs` | Dedicated Server | Done | - |
 | Start and stop the server process | `server_process.rs` | Dedicated Server | Done | Starts the server from the game's server folder, keeps recent log lines, and asks for confirmation before stopping. |
 | Live server status over HTTP | `server_status.rs` | Dedicated Server | Done | Status queries are unit-tested. |
-| Championships, results and race history | `championship.rs` | Championships | Partial | Standings, round results from CSV and JSON storage are on the Championships page. Server result files and race history are not read. |
+| Championships, results and race history | `championship.rs` | Championships | Done | Standings and round results from CSV or dedicated server result files, with JSON storage. Field names were checked against `acServer.exe`; race history lives on the Sessions page. |
+| Session recording and driving statistics | `session_recorder.rs`, `driving_stats.rs`, `driving_advice.rs`, `replay_analysis.rs`, `collision_app.rs` | Sessions, Home | Done | Recorder, track map with trouble spots, suggestions, replay archive and Content Manager history. Checked against real drives. Handling is an estimate, and the collision app has not run in the game. |
 | Upload content to the server | none | - | Planned | Not started. |
 | Server plugins (AI traffic, dynamic weather, plugin API) | none | - | Planned | Not started. The reference server is large. Would run as an external process, not be ported. |
 
@@ -185,7 +186,7 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | --- | --- | --- | --- | --- |
 | Race engineer advice from telemetry | `engineer.rs` | Race Engineer | Done | Rule-based advice from one replay. |
 | Broadcast timing overlay (timing tower, speed trap, session timer) | `timing.rs` | Timing Tower | Partial | Race order, gaps and the session fastest lap are on the Timing Tower page. Speed trap, session timer and an on-screen overlay are not built. |
-| Setup advice from telemetry analysis | `setup_advice.rs` | Setup Advice | Done | Heuristic estimate of understeer or oversteer in corners, from one replay. The thresholds are not validated against real sessions. |
+| Setup advice from telemetry analysis | `setup_advice.rs` | Setup Advice | Done | Heuristic estimate of understeer or oversteer in corners, from one replay. |
 | Race strategy: fuel, pit window and stop plan | `strategy.rs` | Strategy | Done | Fuel use, laps covered by a tank, pit window and stop plan. |
 
 ## 15. Input

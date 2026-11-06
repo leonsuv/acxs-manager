@@ -4,7 +4,7 @@
 `docs/session-stats-plan.md`, dann `C:\Setup-Notes\WINDOWS_SETUP.md` (Regeln dieses PCs).
 
 Zweck dieser Datei: Wer (oder welche Claude-Sitzung) hier weitermacht, findet den ganzen Stand an
-einem Ort. Zuletzt aktualisiert am 1. November 2026. Ergänzend: `plan.md` (Aufgabenliste mit Häkchen),
+einem Ort. Zuletzt aktualisiert am 6. November 2026. Ergänzend: `plan.md` (Aufgabenliste mit Häkchen),
 `docs/session-stats-plan.md` (Plan für die Statistiken), `CHANGELOG.md` (Abschnitt "Unreleased").
 
 ## 1. Projekt in einem Absatz
@@ -12,8 +12,8 @@ einem Ort. Zuletzt aktualisiert am 1. November 2026. Ergänzend: `plan.md` (Aufg
 ACXS Manager ist ein Rust-Programm mit egui/eframe (Version 0.37, Edition 2024, Rust 1.88 oder neuer)
 für Assetto Corsa unter Windows. Eine Bibliothek (`acxs_manager`, `src/*.rs`) enthält die Logik ohne
 Oberfläche, die Oberfläche liegt in `src/ui/`. Repo: `C:\Users\leob\Documents\acsx-manager`
-(GitHub `leonsuv/acxs-manager`, privat). Es gibt einen Git-Stand, aber **61 Änderungen sind noch nicht
-eingecheckt**; es wurde nichts committet oder gepusht, weil es niemand verlangt hat.
+(GitHub `leonsuv/acxs-manager`, privat). Alles ist lokal auf `main` committet, **nichts gepusht**. Das
+Repo hat keine Git-Identität: Commits mit `git -c user.name=leonsuv -c user.email=leon.suvorkov@outlook.de`.
 
 ## 2. Regeln dieses PCs und des Nutzers (unbedingt beachten)
 
@@ -122,25 +122,38 @@ Die App-Daten liegen in `%APPDATA%\ACXS\`: `settings.json`, `servers.json` (eige
 - Fenstergröße wird gemerkt, Fenstersymbol, Über-Karte mit Tastenkürzeln und Changelog, Release-Zip-Skript,
   README mit Screenshots (`docs/screenshots/`), Test für Windows-Pfadfehler repariert.
 
-## 6. Offene Punkte (Reihenfolge nach Nutzen)
+## 6. Stand der Prüfungen (6. November 2026)
 
-1. **Join zu CSP-Servern prüfen.** Stand: Das Spiel startet direkt (ohne Content Manager) und
-   verbindet. Zuletzt kam "Can't join this server: track csp/2651/../la_canyons is missing". Daraufhin
-   wurde auf das Verhalten des Content Managers umgestellt: `TRACK`/`CONFIG_TRACK` mit dem **lokalen**
-   Track (`la_canyons`, `freeroam`), und im `[REMOTE]`-Abschnitt `__CM_EXTENDED=1` und
-   `__FEATURES=<Feature-Liste des Servers>`. **Noch nicht vom Nutzer bestätigt.** Wenn es weiter
-   scheitert: CSP-Version des Nutzers (`0.3.0-preview649`) gegen die vom Server verlangte Version
-   (`2651`) klären, sonst die Skins (`name/ADAn`: der Teil nach dem Schrägstrich wird abgeschnitten)
-   und Buchungen (`/SUB`) prüfen.
-2. **Quick Race starten** testen (Steam-Umleitung über Content Manager sollte weg sein). Ungetestet.
-3. **Statistiken auf dem Home Screen**: siehe Abschnitt 8 und `docs/session-stats-plan.md`.
-4. Gemeinsame Speicherleiste für alle Konfigurationswerkzeuge; Vorher/Nachher für Graphics Profiles
-   (ist ein Umschalter, braucht ein eigenes Konzept) und Setups (hat schon eine Vergleichstabelle).
-5. Weitere Werkzeuge im neuen Stil: Collections, Lap Times, Replay Viewer, Live Telemetry und andere.
-6. Hover-Hilfen, leere Zustände mit Aktion, Bildplatzhalter beim Laden.
-7. README-Screenshots erneut aufnehmen (nach der neuen Seitenleiste und dem Join-Panel).
-8. Aktualisierungs-Feed (`https://test2.azendix.de/acxs/latest.json`) gegen den echten Server prüfen.
-9. Änderungen **committen** (nur auf Wunsch des Nutzers).
+**Am echten Spiel belegt:**
+- **Quick Race** läuft: `race.ini`-Sicherungen von 15:05, 15:17 und 15:20 am 1. Nov. passen zu Sessions, die
+  Sekunden später starteten.
+- **Server-Join** läuft: Datei um 15:20:19 von ACXS geschrieben, Session 30 s später mit 75 Autos im Replay,
+  877 s lang. Die Join-Datei hat dieselben Schlüssel wie eine funktionierende vom Content Manager;
+  `examples/join_check.rs` zeigte live: Rennport, 8 Features und Steam-ID stimmen exakt.
+- **Rekorder** läuft (drei echte Sessions). Shared-Memory-Layout live bestätigt mit `examples/shm_dump.rs`:
+  Tempo passt zum Geschwindigkeitsvektor, Raddrehzahl zum Tempo, Querbeschleunigung zu Gierrate mal Tempo.
+- **Aktualisierung** (`live_update_feed`) und **Verzeichnis** (`live_directory`) bestehen live.
+
+**Nur auf Daten oder Dateiebene geprüft, im Spiel noch nie gelaufen:**
+- Lua-App ACXS Collisions: gegen CSP-SDK und CSP-eigene Apps gebaut, aber nie im Spiel gestartet.
+  Der Nutzer hat sie nicht installiert. Bei `LAZY = NONE` sollte sie ohne Klick im Spiel laufen.
+- Der neue Crash-Stand (2,5 g oder 4,5 g mit Bremse, 15 km/h Verlust) ist gegen das Ferrari-Replay
+  durchgerechnet, aber seit der Änderung nicht gefahren. Referenz: `examples/replay_events.rs`.
+- Handling ist eine Schätzung ohne Wahrheitsquelle. Normale Fahrt ergab 18 bis 36 %, darum Empfehlung erst ab 35 %.
+- Seiten nach den letzten Änderungen (Sessions-Karte mit Namen und Löschen, Championship-Knopf) sind
+  gebaut, aber nicht angesehen: ACXS durfte zuletzt nicht gestartet werden. Karten aus echten Daten lassen sich
+  ohne App prüfen: `examples/session_map.rs`.
+- Server mit Buchung (`/SUB`) sind unbewiesen.
+
+**Offen, nur mit dem Nutzer lösbar:**
+- RTX & ReShade bleibt aus (Remix kann nur Direct3D 9). Ob ReShade allein zurückkommen soll, entscheidet er.
+- README-Screenshots brauchen eine laufende App.
+- Vier Fragen aus Abschnitt 8. Vorgaben gelten: nur eigenes Auto, keine Detaildaten-Löschfrist, App muss offen sein.
+- Push und eine neue Version im Update-Feed sind seine Entscheidung.
+
+**Bewusst nicht gebaut:** siehe `ROADMAP.md`: Partial und Planned brauchen Hardware, einen Server, Inhalte Dritter
+oder neue In-Game-Apps (HUD-Anzeige, Delta-Balken). Gestalterisch offen: gemeinsame Speicherleiste,
+Vorher/Nachher für Graphics Profiles, weitere Werkzeuge im neuen Stil, mehr Hover-Hilfen.
 
 ## 7. Wichtige Erkenntnisse (nicht noch einmal herausfinden)
 
@@ -216,13 +229,16 @@ Volltext in `docs/session-stats-plan.md`. Befund auf diesem PC:
 - **Neue Tests** für Logik in der Bibliothek (Parser, Zusammenführen, Regeln). Oberflächentests nur
   dort, wo reine Funktionen stecken.
 
-## 10. Nächste Schritte, wenn es weitergeht
+## 10. Nächste Schritte und Fallen aus der letzten Runde
 
-(Stand 1. Nov: Phasen 0-6 sind gebaut und committet (lokal, nicht gepusht). Phase 6 = `src/collision_app.rs`, Lua-App "ACXSCollisions", schreibt `DocumentsAssetto Corsaogscxs-collisions.log`; ungetestet im Spiel, ob die App ohne Einschalten in der Spiel-App-Leiste lädt. Als Nächstes: echte Fahrt testen.)
+- **Nie Quelltext über PowerShell `Get-Content | Set-Content` umschreiben.** Das hat `src/ui/mod.rs` zerstört
+  (`…` wurde zu `â€¦`, dazu ein BOM) und ging bis in einen Commit. Danach prüfen:
+  `grep -rnP 'â€|Â·' src` muss leer sein.
+- **Vor jedem Commit `cargo check --all-targets`**, nicht nur `cargo test --lib`: die Oberfläche ist ein eigenes Ziel.
+- Während der Nutzer fährt: `nice -n 19` und `CARGO_BUILD_JOBS=2`, laufendes ACXS nie beenden, Spiel und ACXS
+  nicht starten. Lesendes `examples/shm_dump.exe` stört nicht.
+- Ein Testlauf ohne Spiel: `scripts/fake-ac-drive.ps1` mit `ACXS_SHM_PREFIX=acxstest_` und `examples/recorder_probe.rs`.
+  `APPDATA` dabei auf einen Temp-Ordner umbiegen. Schalter `-NoSpline` und `-FreezeSeconds` spielen die echten Fälle nach.
+- Der Rekorder zeichnet nur auf, solange ACXS offen ist. Die Fahrten vom 2., 3. und 6. November fehlen deshalb.
 
-1. Antworten des Nutzers auf die vier Fragen in Abschnitt 8 einholen (oder sinnvolle Vorgaben nehmen:
-   nur eigenes Auto, 50 Sessions Detail, Hintergrundbetrieb als Option).
-2. **Phase 0 und 1 der Statistiken sind gebaut**: `src/driving_stats.rs` (Import, Home "Your driving"), `src/session_recorder.rs` (Rekorder-Thread 30 Hz, JSON je Session in `%APPDATA%ACXSsessions`, Kennzahlen Crash/Sprung/Blockieren/Wheelspin, Statuspille "Recording session"). **Ungetestet gegen das echte Spiel**: Schwellen (Crash 4,5 g + 25 km/h Verlust, Blockieren unter 70 % Tempo) beim ersten Fahren prüfen. Untersteuern/Übersteuern (selbstkalibrierter Lenk-Gierraten-Gewinn, Schwellen 0,8 / 1,25) und Seite "Sessions" (`tools/sessions.rs`) sind drin. Streckenabschnitte (100 Scheiben, "Trouble spots" auf der Sessions-Seite) und Replay-Archiv (20 neueste, `replays`) sind drin. Empfehlungen (`driving_advice.rs`, auf der Sessions-Seite) sind drin. Streckenkarte mit Problemstellen (Pfad je Session gespeichert) ist drin, aber optisch ungeprüft. `Sessions*.json`-Rundenzeiten sind importiert (Home "Best laps"). Replay-Auswertung (`replay_analysis.rs`, Replay Viewer) ist drin. Knopf "Open Setups" an den Empfehlungen ist drin (kein automatisches Ändern von Setups). Offen: Detailseite, Nachauswertung der Replays, (`replay.ini`-Schalter ist drin: Knopf auf der Sessions-Seite), `Sessions*.json`-Import, `personalbest.ini`.
-   `personalbest.ini`, Typen in der Bibliothek mit Tests, Kacheln und Sessionliste auf Home.
-3. Ergebnis des Join-Tests (Server LAC) vom Nutzer abfragen und bei Fehlern gemäß Abschnitt 6, Punkt 1
-   weiter eingrenzen.
+Nächster sinnvoller Schritt: eine Fahrt mit offenem ACXS, dann `%APPDATA%\ACXS\recorder.log` und die neue Sessions-Seite ansehen.
