@@ -2,7 +2,7 @@
 //! `cargo run --example join_check`. Reads `race.ini`, asks the server named in it for its
 //! status, and prints only whether each value matches, so no Steam id reaches the output.
 
-use acxs_manager::{lobby, race::OnlineJoin, server_status, settings, steam};
+use acxs_manager::{lobby, server_status, settings, steam};
 use std::time::Duration;
 
 fn value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
@@ -25,5 +25,4 @@ fn main() {
     println!("  only from server:  {:?}", features.iter().filter(|f| !reference_features.contains(f)).collect::<Vec<_>>());
     println!("steam id matches: {}", steam_id == value(&text, "GUID").unwrap_or(""));
     println!("track reported: {:?}", status.track);
-    let _ = OnlineJoin::validate;
 }

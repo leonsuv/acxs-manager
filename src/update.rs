@@ -885,3 +885,20 @@ mod tests {
         assert!(dechunk(b"3\r\nabcXX0\r\n\r\n").is_err());
     }
 }
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    /// Asks the real update server: `cargo test --lib live_update_feed -- --ignored`.
+    #[test]
+    #[ignore = "needs the network"]
+    fn live_update_feed() {
+        let old = Version::parse("0.0.1").unwrap();
+        let release = check("https://test2.azendix.de/acxs/latest.json", Duration::from_secs(15), &old).unwrap();
+        let release = release.expect("the feed names a version above 0.0.1");
+        assert!(release.url.starts_with("https://"));
+        let current = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        assert!(release.version <= current, "the feed is ahead of this build: {}", release.version);
+    }
+}

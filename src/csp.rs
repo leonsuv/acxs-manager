@@ -195,14 +195,28 @@ pub fn archive_dir(ac_root: &Path) -> PathBuf {
     ac_root.join(ARCHIVE_DIR)
 }
 
-/// Version of the `dwrite.dll` in the AC root: a known version, `unrecognized`, or None if absent.
+/// Version of the installed patch: what its own manifest says, else a known `dwrite.dll` by hash,
+/// else `unrecognized`. `None` if there is no `dwrite.dll`. The manifest comes first because
+/// hashing the 140 MB file slows every scan and only ever finds versions on our list.
 pub fn installed_version(ac_root: &Path) -> io::Result<Option<String>> {
     let dll = ac_root.join(DLL_NAME);
     if !dll.is_file() {
         return Ok(None);
     }
+    if let Some(version) = manifest_version(ac_root) {
+        return Ok(Some(version));
+    }
     let sha = sha256_file(&dll)?;
     Ok(Some(known_version(&sha).unwrap_or(UNRECOGNIZED).to_string()))
+}
+
+/// `[VERSION] SHADERS_PATCH` from `extension/config/data_manifest.ini`, the file CSP keeps for
+/// launchers.
+fn manifest_version(ac_root: &Path) -> Option<String> {
+    let path = ac_root.join(EXTENSION_NAME).join("config").join("data_manifest.ini");
+    let text = String::from_utf8_lossy(&fs::read(path).ok()?).into_owned();
+    let ini = crate::ini::Ini::parse(&text);
+    ini.get("VERSION", "SHADERS_PATCH").map(str::trim).filter(|v| !v.is_empty()).map(str::to_string)
 }
 
 /// Move the live `dwrite.dll` and `extension/` into a new archive folder.
@@ -527,5 +541,24 @@ mod tests {
         let pb = load_patch(&b).unwrap().unwrap();
         assert_eq!(describe_patch_differences(&pa, &pb), ["version: 0.2.11 -> 0.2.12"]);
         fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    use super::*;
+
+    #[test]
+    fn the_patch_names_its_own_version_and_an_unknown_dll_stays_unrecognized() {
+        let root = std::env::temp_dir().join(format!("acxs-csp-manifest-{}", std::process::id()));
+        fs::create_dir_all(root.join("extension").join("config")).unwrap();
+        fs::write(root.join(DLL_NAME), b"not a known build").unwrap();
+        assert_eq!(installed_version(&root).unwrap().as_deref(), Some(UNRECOGNIZED));
+        let manifest = "; comment\n[\u{2139}]\nNAME=x\n\n[VERSION]\nSHADERS_PATCH=0.3.0-preview649\nSHADERS_PATCH_BUILD=4184\n";
+        fs::write(root.join("extension").join("config").join("data_manifest.ini"), manifest).unwrap();
+        assert_eq!(installed_version(&root).unwrap().as_deref(), Some("0.3.0-preview649"));
+        fs::remove_file(root.join(DLL_NAME)).unwrap();
+        assert_eq!(installed_version(&root).unwrap(), None);
+        fs::remove_dir_all(&root).ok();
     }
 }

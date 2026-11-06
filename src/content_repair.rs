@@ -124,6 +124,11 @@ pub fn check_car(car_dir: &Path) -> Vec<Issue> {
     if !check_root(car_dir, "car", &mut issues) {
         return issues;
     }
+    // A leftover folder from an uninstalled DLC or mod is one finding, not one per missing file.
+    if fs::read_dir(car_dir).is_ok_and(|mut entries| entries.next().is_none()) {
+        issues.push(Issue::new(Severity::Warning, car_dir, "empty folder, not a car: safe to remove"));
+        return issues;
+    }
 
     // The content scanner only treats a folder as a car when ui/ui_car.json exists.
     let ui_car = car_dir.join("ui").join("ui_car.json");
@@ -365,8 +370,9 @@ fn check_track_unit(
                 for file in referenced_models(&ini) {
                     let kn5 = track_dir.join(&file);
                     if probe(&kn5, false, issues) == Some(false) {
+                        // The game skips these: stock tracks such as Spa list files they do not ship.
                         issues.push(Issue::new(
-                            Severity::Error,
+                            Severity::Info,
                             &kn5,
                             format!("{who}: {models_name} references missing model {file}"),
                         ));
@@ -701,13 +707,13 @@ mod tests {
             &issues,
             &[
                 (Severity::Error, "track: data/ folder is missing"),
-                (Severity::Error, "references missing model missing.kn5"),
+                (Severity::Info, "references missing model missing.kn5"),
                 (Severity::Warning, "track: ai/fast_lane.ai is missing"),
                 (Severity::Info, "layout folder gp has no ui/gp folder"),
                 (Severity::Info, "track has no ai folder"),
             ],
         );
-        assert_eq!(summary(&issues), (2, 1, 2));
+        assert_eq!(summary(&issues), (1, 1, 3));
 
         let no_ui = check_track(&root.0.join("content/tracks/noui"));
         assert_issues(
@@ -723,7 +729,7 @@ mod tests {
     fn check_all_counts_every_folder() {
         let root = fixture("all");
         let issues = check_all(&root.0);
-        assert_eq!(summary(&issues), (4, 3, 5));
+        assert_eq!(summary(&issues), (3, 3, 6));
         assert_eq!(issues.len(), 12);
     }
 
@@ -946,5 +952,20 @@ mod tests {
         write(&lanes.join("gp").join("data").join("surfaces.ini"), "");
         write(&lanes.join("gp").join("ai").join("fast_lane.ai"), "");
         assert_issues(&check_track(&lanes), &[]);
+    }
+}
+
+#[cfg(test)]
+mod real_install_tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_car_folder_is_a_single_warning() {
+        let dir = std::env::temp_dir().join(format!("acxs-empty-car-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let issues = check_car(&dir);
+        fs::remove_dir_all(&dir).ok();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(summary(&issues), (0, 1, 0));
     }
 }
