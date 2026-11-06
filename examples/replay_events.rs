@@ -12,6 +12,8 @@ fn main() {
         let info = replay.info();
         println!("{path}\n  car {} driver {} cars {} {:.0} s", info.car, info.driver, info.num_cars, info.duration_s);
         let samples = replay.samples();
+        let found = acxs_manager::replay_analysis::analyze(samples);
+        println!("  analysis: {} impacts, {} drops, {:.1} km, top {:.0}", found.impacts, found.drops, found.distance_km, found.max_speed);
         let mut last = f64::NEG_INFINITY;
         for (i, s) in samples.iter().enumerate() {
             let from = i.saturating_sub(12);
