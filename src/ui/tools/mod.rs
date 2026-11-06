@@ -34,9 +34,10 @@ mod sessions;
 mod live_telemetry;
 mod csp_config;
 mod game_settings;
-mod game_options;
+pub(crate) mod game_options;
 mod quick_race;
 mod events;
+pub(crate) mod names;
 mod collections;
 mod install;
 mod model_tools;
@@ -71,6 +72,10 @@ pub trait Tool {
     fn group(&self) -> &'static str;
     /// Draw the page. Push status messages into `notices`.
     fn ui(&mut self, ui: &mut egui::Ui, ctx: &ToolContext, notices: &mut Vec<Notice>);
+    /// Widest the page may get. Text and forms past this width only get harder to read.
+    fn content_width(&self) -> f32 {
+        1240.0
+    }
     /// Called every frame for every tool, also while another page is shown, so
     /// background work (live telemetry, the web dashboard) keeps flowing.
     fn tick(&mut self) {}
@@ -108,7 +113,6 @@ pub fn registry() -> Vec<Box<dyn Tool>> {
         live_telemetry::tool(),
         csp_config::tool(),
         game_settings::tool(),
-        game_options::tool(),
         quick_race::tool(),
         events::tool(),
         collections::tool(),
@@ -193,16 +197,16 @@ mod headless_tests {
 /// `ACXS_RENDER_DIR=<dir> cargo test --bin acxs-manager render_pages -- --ignored`.
 /// `ACXS_RENDER_PAGES` limits it to a comma-separated list. Pictures from disk stay blank.
 #[cfg(test)]
-mod render_tests {
+pub(crate) mod render_tests {
     use super::*;
     use eframe::egui::epaint::{ImageDelta, Primitive, Vertex, textures::TexturesDelta};
     use std::collections::HashMap;
 
-    const WIDTH: usize = 1400;
-    const HEIGHT: usize = 1000;
+    pub(crate) const WIDTH: usize = 1400;
+    pub(crate) const HEIGHT: usize = 1000;
 
     #[derive(Default)]
-    struct Canvas {
+    pub(crate) struct Canvas {
         textures: HashMap<egui::TextureId, (usize, usize, Vec<egui::Color32>)>,
         pixels: Vec<[f32; 3]>,
     }
@@ -223,7 +227,7 @@ mod render_tests {
     }
 
     impl Canvas {
-        fn update(&mut self, delta: &mut TexturesDelta) {
+        pub(crate) fn update(&mut self, delta: &mut TexturesDelta) {
             for (id, images) in &delta.set {
                 for image in images.iter() {
                     apply_image(self.textures.entry(*id).or_default(), image);
@@ -274,7 +278,7 @@ mod render_tests {
             }
         }
 
-        fn draw(&mut self, ctx: &egui::Context, shapes: Vec<egui::epaint::ClippedShape>) {
+        pub(crate) fn draw(&mut self, ctx: &egui::Context, shapes: Vec<egui::epaint::ClippedShape>) {
             self.pixels = vec![[0x0B as f32, 0x0D as f32, 0x11 as f32]; WIDTH * HEIGHT];
             for primitive in ctx.tessellate(shapes, 1.0) {
                 let Primitive::Mesh(mesh) = primitive.primitive else { continue };
@@ -285,7 +289,7 @@ mod render_tests {
             }
         }
 
-        fn save(&self, path: &std::path::Path) {
+        pub(crate) fn save(&self, path: &std::path::Path) {
             let bytes: Vec<u8> = self.pixels.iter().flat_map(|p| [p[0] as u8, p[1] as u8, p[2] as u8, 255]).collect();
             std::fs::write(path, acxs_manager::png::encode_rgba(WIDTH as u32, HEIGHT as u32, &bytes).unwrap()).unwrap();
         }

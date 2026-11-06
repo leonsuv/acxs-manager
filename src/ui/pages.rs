@@ -117,10 +117,10 @@ pub fn home(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(18.0);
         // Jump-off cards.
         let actions: [(&str, &str, &str); 4] = [
-            ("Showroom", "Cars up close, skins and specs", "showroom"),
-            ("Servers", "Live status of your servers", "servers"),
-            ("Quick Race", "Pick car, track and go", "quick"),
-            ("Lights Patch", "Install or archive CSP lights", "patch"),
+            ("Quick Race", "Pick a car and track, and go", "quick"),
+            ("Servers", "Join a race online", "servers"),
+            ("Events", "Special Events and Career", "events"),
+            ("Sessions", "Your drives and trouble spots", "sessions"),
         ];
         widgets::tile_grid(ui, 200.0, actions.len(), |ui, i| {
             let (title, text, key) = actions[i];
@@ -147,8 +147,8 @@ pub fn home(app: &mut App, ui: &mut egui::Ui) {
             }
             if response.clicked() {
                 goto = Some(match key {
-                    "showroom" => Page::Showroom,
-                    "patch" => Page::Patches,
+                    "events" => Page::Tool(app.tool_index("Events")),
+                    "sessions" => Page::Tool(app.tool_index("Sessions")),
                     "servers" => Page::Servers,
                     _ => Page::Tool(app.tool_index("Quick Race")),
                 });
@@ -234,7 +234,7 @@ fn onboarding(app: &mut App, ui: &mut egui::Ui) {
 }
 
 pub fn settings(app: &mut App, ui: &mut egui::Ui) {
-    widgets::heading(ui, "Settings", "Folders, updates and crash reporting.");
+    widgets::heading(ui, "Settings", "ACXS Manager itself: updates, folders and privacy. Game options live in Game Settings.");
     let ac_valid = app.snapshot.ac_valid;
 
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
@@ -244,12 +244,12 @@ pub fn settings(app: &mut App, ui: &mut egui::Ui) {
         theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
             widgets::section_title(ui, "Folders");
-            path_row(ui, "Assetto Corsa folder (the one containing acs.exe)", "Not set", &mut app.ac_input);
+            path_row(ui, "Assetto Corsa folder", "Not set", &mut app.ac_input);
             ui.add_space(10.0);
             path_row(
                 ui,
-                "Patch library (where lights patch folders live)",
-                "Default: the folder the program runs from",
+                "Lights patch library",
+                "Next to this program",
                 &mut app.library_input,
             );
             ui.add_space(12.0);
@@ -903,12 +903,17 @@ fn crash_card(app: &mut App, ui: &mut egui::Ui) {
     };
 
     theme::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
         widgets::section_title(ui, "Crash reports");
         let mut enabled = app.settings.crash_reports;
-        if ui
-            .checkbox(&mut enabled, "Send crash reports to the developer (anonymous, opt-in)")
-            .changed()
-        {
+        let changed = ui
+            .horizontal(|ui| {
+                let response = widgets::toggle(ui, &mut enabled);
+                ui.label("Send crash reports to the developer");
+                response.changed()
+            })
+            .inner;
+        if changed {
             app.settings.crash_reports = enabled;
             match app.settings.save(&settings::settings_path()) {
                 Ok(()) if enabled => app.push_notice("Crash reports will be sent when the app starts.", true),
@@ -1086,7 +1091,7 @@ fn driving_section(app: &App, ui: &mut egui::Ui) {
             ("Wheelspins", stats.wheelspins.to_string()),
         ]);
     }
-    widgets::tile_grid(ui, 190.0, tiles.len(), |ui, i| {
+    widgets::tile_grid(ui, 165.0, tiles.len(), |ui, i| {
         let (label, value) = &tiles[i];
         tile(ui, |ui| widgets::stat(ui, label, value, TEXT));
     });
@@ -1110,7 +1115,7 @@ fn driving_section(app: &App, ui: &mut egui::Ui) {
         .weekly_hours
         .iter()
         .rev()
-        .map(|(week, hours)| CountEntry { label: week.clone(), count: (hours * 60.0).round() as usize })
+        .map(|(week, hours)| CountEntry { label: driving_stats::week_range(week), count: (hours * 60.0).round() as usize })
         .collect();
     ui.columns(3, |cols| {
         bar_card(&mut cols[0], "Most driven cars (minutes)", &usage_bars(&stats.top_cars, &car_name));

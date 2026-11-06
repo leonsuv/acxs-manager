@@ -859,7 +859,7 @@ fn presets_card(ui: &mut egui::Ui, page: &mut QuickRacePage, busy: bool) -> Opti
         let has_selection = selected_name.is_some();
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(!busy && has_selection, widgets::primary_button("Load into form"))
+                .add_enabled(!busy && has_selection, widgets::primary_button("Load"))
                 .clicked()
                 && let Some(name) = &selected_name
             {

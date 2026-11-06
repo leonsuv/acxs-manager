@@ -647,3 +647,154 @@ mod tests {
         assert!(version_diff("missing.ini", &v02, &v03).is_empty());
     }
 }
+
+/// A config file's own description, from its `[ℹ]` section. Files without one are CSP's internal
+/// data tables, not settings for people.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfigMeta {
+    /// Text after the group, such as `Lighting FX`.
+    pub title: String,
+    /// Text before the colon of the full name, such as `Graphics`.
+    pub group: String,
+    pub summary: String,
+    pub description: String,
+    pub order: f64,
+}
+
+/// Reads a config file's description. `None` for internal files and the version page.
+pub fn config_meta(path: &Path) -> Option<ConfigMeta> {
+    let bytes = fs::read(path).ok()?;
+    let ini = Ini::parse(&String::from_utf8_lossy(&bytes));
+    let section = "\u{2139}";
+    let full = ini.get(section, "FULLNAME")?.trim();
+    if full == "Information" {
+        return None;
+    }
+    let (group, title) = match full.split_once(':') {
+        Some((group, title)) => (group.trim().to_string(), title.trim().to_string()),
+        None => ("Other".to_string(), full.to_string()),
+    };
+    let text = |key: &str| ini.get(section, key).unwrap_or_default().trim().to_string();
+    Some(ConfigMeta {
+        title,
+        group,
+        summary: text("SHORT_DESCRIPTION"),
+        description: text("DESCRIPTION"),
+        order: ini.get_f64(section, "ORDER").unwrap_or(0.0),
+    })
+}
+
+/// What control an option wants.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OptionKind {
+    Toggle,
+    Range { min: f64, max: f64, percent: bool, step: Option<f64> },
+    /// Not stated: the value decides.
+    Unknown,
+}
+
+/// An option as CSP describes it in its comment: `Label (detail); type; note`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OptionDoc {
+    pub label: String,
+    pub hint: Option<String>,
+    pub kind: OptionKind,
+    /// Marked hidden, or undocumented: not for the normal view.
+    pub hidden: bool,
+}
+
+/// `SOME_KEY` as `Some key`.
+fn key_label(key: &str) -> String {
+    let lower = key.replace(['_', '.'], " ").trim().to_lowercase();
+    let mut chars = lower.chars();
+    chars.next().map_or(String::new(), |c| c.to_uppercase().collect::<String>() + chars.as_str())
+}
+
+/// The first number in a text, skipping any unit around it.
+fn first_number(text: &str) -> Option<f64> {
+    let start = text.find(|c: char| c.is_ascii_digit() || c == '-')?;
+    let tail = &text[start..];
+    let end = tail.find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-')).unwrap_or(tail.len());
+    tail[..end].parse().ok()
+}
+
+/// `from 0.5 s to 4.0, round to 0.1` or `from 0 to 2, perc`.
+fn parse_range(text: &str) -> Option<OptionKind> {
+    let body = text.strip_prefix("from ")?;
+    let (low, high) = body.split_once(" to ")?;
+    let step = high.split_once("round to ").and_then(|(_, step)| first_number(step));
+    Some(OptionKind::Range { min: first_number(low)?, max: first_number(high)?, percent: text.contains("perc"), step })
+}
+
+/// Reads an option's comment.
+pub fn parse_option_doc(key: &str, doc: Option<&str>) -> OptionDoc {
+    let parts: Vec<&str> = doc.unwrap_or_default().split(';').map(str::trim).filter(|p| !p.is_empty()).collect();
+    let hidden = parts.is_empty() || parts.iter().any(|p| p.eq_ignore_ascii_case("hidden"));
+    let mut kind = OptionKind::Unknown;
+    let mut notes = Vec::new();
+    for part in parts.iter().skip(1) {
+        if part.eq_ignore_ascii_case("hidden") || part.starts_with("only with") {
+            continue;
+        }
+        if *part == "1 or 0" {
+            kind = OptionKind::Toggle;
+        } else if let Some(range) = parse_range(part) {
+            kind = range;
+        } else {
+            notes.push(*part);
+        }
+    }
+    let first = parts.first().copied().filter(|p| !p.eq_ignore_ascii_case("hidden")).unwrap_or_default();
+    let (label, detail) = match first.split_once(" (") {
+        Some((label, detail)) if detail.ends_with(')') => (label, Some(detail.trim_end_matches(')'))),
+        _ => (first, None),
+    };
+    let label = if label.is_empty() { key_label(key) } else { label.to_string() };
+    let hint = detail.into_iter().chain(notes).collect::<Vec<_>>().join(". ");
+    OptionDoc { label, hint: Some(hint).filter(|h| !h.is_empty()), kind, hidden }
+}
+
+#[cfg(test)]
+mod doc_tests {
+    use super::*;
+
+    #[test]
+    fn csp_comments_become_labels_controls_and_hints() {
+        let toggle = parse_option_doc("X", Some("Use compatible sky shader (on newer systems, disabling this might help); 1 or 0"));
+        assert_eq!(toggle.label, "Use compatible sky shader");
+        assert_eq!(toggle.hint.as_deref(), Some("on newer systems, disabling this might help"));
+        assert_eq!(toggle.kind, OptionKind::Toggle);
+        assert!(!toggle.hidden);
+
+        let delay = parse_option_doc("X", Some("Delay between updates; from 0.5 s to 4.0, round to 0.1"));
+        assert_eq!(delay.kind, OptionKind::Range { min: 0.5, max: 4.0, percent: false, step: Some(0.1) });
+
+        let bright = parse_option_doc("X", Some("Brightness (to adjust for PP-filter); from 0 to 2, perc"));
+        assert_eq!(bright.kind, OptionKind::Range { min: 0.0, max: 2.0, percent: true, step: None });
+
+        let script = parse_option_doc("X", Some("Script; look for assist.lua in extension/lua/joypad-assist; only with ENABLED"));
+        assert_eq!(script.kind, OptionKind::Unknown);
+        assert_eq!(script.hint.as_deref(), Some("look for assist.lua in extension/lua/joypad-assist"));
+    }
+
+    #[test]
+    fn hidden_and_undocumented_options_stay_out_of_the_normal_view() {
+        assert!(parse_option_doc("SPECULAR_MULT", Some("; hidden")).hidden);
+        assert_eq!(parse_option_doc("SPECULAR_MULT", Some("; hidden")).label, "Specular mult");
+        assert!(parse_option_doc("ENABLED", Some("this option does not do anything; hidden")).hidden);
+        assert!(parse_option_doc("SOME_KEY", None).hidden);
+    }
+
+    #[test]
+    fn a_file_describes_itself_and_internal_files_do_not() {
+        let dir = std::env::temp_dir().join(format!("acxs-meta-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.ini"), "[\u{2139}]\nFULLNAME=Graphics: Lighting FX\nSHORT_DESCRIPTION=Dynamic lights\nORDER=-1.6\n\n[BASIC]\nENABLED=1\n").unwrap();
+        fs::write(dir.join("b.ini"), "[DEFAULTS]\nX=1\n").unwrap();
+        let meta = config_meta(&dir.join("a.ini")).unwrap();
+        assert_eq!((meta.group.as_str(), meta.title.as_str()), ("Graphics", "Lighting FX"));
+        assert_eq!(meta.order, -1.6);
+        assert!(config_meta(&dir.join("b.ini")).is_none());
+        fs::remove_dir_all(&dir).ok();
+    }
+}

@@ -10,7 +10,7 @@ use crate::ui::theme::{self, ACCENT, DANGER, INFO, MUTED, OK, TEXT, WARN};
 use crate::ui::widgets;
 use crate::ui::Notice;
 use acxs_manager::car_classes::{self, CarClass, CarYear};
-use acxs_manager::csp_config::{self, ConfigFile, Setting};
+use acxs_manager::csp_config::{self, ConfigFile, OptionDoc, OptionKind, Setting, config_meta, parse_option_doc};
 use acxs_manager::ffb::{self, FfbTweaks};
 use acxs_manager::gamepad::{self, PadSetup};
 use acxs_manager::weather::{self, WeatherPreset};
@@ -42,8 +42,8 @@ enum Tab {
 }
 
 const TABS: [(Tab, &str); 5] = [
-    (Tab::Settings, "Settings"),
-    (Tab::Ffb, "FFB"),
+    (Tab::Settings, "All settings"),
+    (Tab::Ffb, "Force feedback"),
     (Tab::Weather, "Weather"),
     (Tab::Gamepad, "Gamepad"),
     (Tab::Classes, "Car classes"),
@@ -155,6 +155,9 @@ pub struct CspConfig {
     root: Option<PathBuf>,
     data: Data,
     allow_new_key: bool,
+    /// Options CSP marks hidden, and its internal data files, stay out of sight until asked for.
+    show_all: bool,
+    pages: Vec<ConfigPage>,
     file_filter: String,
     patch_v02: String,
     patch_v03: String,
@@ -172,6 +175,8 @@ impl CspConfig {
             root: None,
             data: Data::default(),
             allow_new_key: false,
+            show_all: false,
+            pages: Vec::new(),
             file_filter: String::new(),
             patch_v02: String::new(),
             patch_v03: String::new(),
@@ -209,9 +214,10 @@ impl CspConfig {
                 Msg::Notice(notice) => notices.push(notice),
                 Msg::Files { root, files } => {
                     if self.is_current(&root) {
+                        self.pages = config_pages(&files);
                         self.data.files = files;
                         if self.data.selected.is_none() {
-                            self.data.selected = self.data.files.first().map(|f| f.path.clone());
+                            self.data.selected = self.pages.first().map(|p| p.path.clone());
                         }
                     }
                 }
@@ -646,25 +652,15 @@ impl CspConfig {
     }
 
     fn settings_tab(&mut self, ui: &mut egui::Ui, egui_ctx: &egui::Context, root: &Path, busy: bool) {
-        let mut reload = false;
         let mut compare = false;
         let mut select: Option<PathBuf> = None;
         let mut save: Option<Vec<(String, String, String)>> = None;
         let can_compare = !busy && self.data.selected.is_some() && self.patches_set();
 
         ui.horizontal(|ui| {
-            if ui.add_enabled(!busy, egui::Button::new("Reload")).clicked() {
-                reload = true;
-            }
-            if ui
-                .add_enabled(can_compare, egui::Button::new("Compare patch versions"))
-                .clicked()
-            {
+            if self.patches_set() && ui.add_enabled(can_compare, egui::Button::new("Compare patch versions")).clicked() {
                 compare = true;
             }
-            ui.add_space(8.0);
-            widgets::toggle(ui, &mut self.allow_new_key);
-            ui.label(RichText::new("Allow creating new keys").color(MUTED));
         });
         show_error(ui, &self.data, Tab::Settings);
         diff_card(ui, &self.data.diff, Tab::Settings);
@@ -684,28 +680,33 @@ impl CspConfig {
             .show(ui, |ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.file_filter)
-                        .hint_text("Filter files")
+                        .hint_text("Search settings pages")
                         .desired_width(f32::INFINITY)
                         .margin(egui::Margin::symmetric(10, 6)),
                 );
                 ui.add_space(4.0);
                 let filter = self.file_filter.trim().to_lowercase();
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    if self.data.files.is_empty() {
-                        ui.label(RichText::new("No .ini files found in extension/config.").color(MUTED));
+                    if self.pages.is_empty() {
+                        ui.label(RichText::new("Custom Shaders Patch has no settings here.").color(MUTED));
                     }
-                    for file in &self.data.files {
-                        let nice = friendly_name(&file.name);
+                    let mut last_group = "";
+                    for page in self.pages.iter().filter(|p| self.show_all || !p.internal) {
                         if !filter.is_empty()
-                            && !nice.to_lowercase().contains(&filter)
-                            && !file.name.to_lowercase().contains(&filter)
+                            && ![&page.title, &page.group, &page.summary].iter().any(|t| t.to_lowercase().contains(&filter))
                         {
                             continue;
                         }
-                        let is_selected = self.data.selected.as_deref() == Some(file.path.as_path());
-                        let response = widgets::nav_item(ui, is_selected, &nice, None, 0.0).on_hover_text(file.name.as_str());
+                        if page.group != last_group {
+                            last_group = &page.group;
+                            ui.add_space(8.0);
+                            ui.label(RichText::new(page.group.to_uppercase()).font(theme::bold(11.0)).color(theme::FAINT));
+                            ui.add_space(2.0);
+                        }
+                        let is_selected = self.data.selected.as_deref() == Some(page.path.as_path());
+                        let response = widgets::nav_item(ui, is_selected, &page.title, None, 0.0).on_hover_text(page.summary.as_str());
                         if response.clicked() {
-                            select = Some(file.path.clone());
+                            select = Some(page.path.clone());
                         }
                     }
                 });
@@ -773,17 +774,36 @@ impl CspConfig {
                         });
                     ui.add_space(8.0);
 
+                    let show_all = self.show_all;
+                    let page = self.pages.iter().find(|p| p.path == path);
                     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                        if let Some(page) = page {
+                            ui.label(RichText::new(page.title.as_str()).font(theme::bold(20.0)));
+                            if !page.description.is_empty() {
+                                ui.add(egui::Label::new(RichText::new(page.description.as_str()).size(12.5).color(MUTED)).wrap());
+                            }
+                            ui.add_space(10.0);
+                        }
                         ui.add_enabled_ui(!busy, |ui| {
                             let mut index = 0;
+                            let mut shown_any = false;
                             while index < list.len() {
-                                // One card per [section].
+                                // One card per [section], without options meant to stay out of sight.
                                 let section = list[index].section.clone();
                                 let end = list[index..].iter().position(|s| s.section != section).map_or(list.len(), |n| index + n);
-                                let group = &list[index..end];
+                                let group: Vec<(&Setting, OptionDoc)> = list[index..end]
+                                    .iter()
+                                    .map(|s| (s, parse_option_doc(&s.key, s.doc.as_deref())))
+                                    .filter(|(_, doc)| show_all || !doc.hidden)
+                                    .collect();
+                                index = end;
+                                if group.is_empty() {
+                                    continue;
+                                }
+                                shown_any = true;
                                 let edited = group
                                     .iter()
-                                    .filter(|s| edits.get(&(s.section.clone(), s.key.clone())).is_some_and(|v| v != &s.value))
+                                    .filter(|(s, _)| edits.get(&(s.section.clone(), s.key.clone())).is_some_and(|v| v != &s.value))
                                     .count();
                                 theme::card().inner_margin(egui::Margin::symmetric(18, 12)).show(ui, |ui| {
                                     ui.set_width(ui.available_width());
@@ -794,15 +814,17 @@ impl CspConfig {
                                         }
                                     });
                                     ui.add_space(6.0);
-                                    for s in group {
+                                    for (s, doc) in &group {
                                         let value = edits
                                             .entry((s.section.clone(), s.key.clone()))
                                             .or_insert_with(|| s.value.clone());
-                                        setting_row(ui, s, value);
+                                        setting_row(ui, s, doc, value);
                                     }
                                 });
                                 ui.add_space(10.0);
-                                index = end;
+                            }
+                            if !shown_any {
+                                widgets::empty_state(ui, "Nothing to set here. Turn on Show hidden options to see the rest.");
                             }
                         });
                     });
@@ -815,9 +837,6 @@ impl CspConfig {
             widgets::empty_state(ui, "Pick a config file on the left.");
         }
 
-        if reload {
-            self.reload(Tab::Settings);
-        }
         if let Some(path) = select {
             self.select_file(egui_ctx, root, path);
         }
@@ -1345,6 +1364,10 @@ impl Tool for CspConfig {
         "CSP Config"
     }
 
+    fn content_width(&self) -> f32 {
+        1400.0
+    }
+
     fn group(&self) -> &'static str {
         "Config"
     }
@@ -1360,7 +1383,7 @@ impl Tool for CspConfig {
         widgets::heading(
             ui,
             "CSP Config",
-            "Edit Custom Shaders Patch settings, and review FFB, weather, gamepad and car class config.",
+            "Custom Shaders Patch: graphics, weather, cameras and more. Your changes are kept apart from the defaults.",
         );
         let Some(root) = self.root.clone() else {
             widgets::empty_state(ui, "Set your Assetto Corsa folder in Settings to edit CSP config.");
@@ -1379,31 +1402,25 @@ impl Tool for CspConfig {
         });
         ui.add_space(6.0);
 
-        egui::CollapsingHeader::new("Patch folders for version compare")
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new("Each folder is an install root that contains extension/. Compare buttons stay disabled until both are set.")
-                        .small()
-                        .color(MUTED),
-                );
-                egui::Grid::new("patch_folders").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-                    ui.label("Older (v0.2.11)");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.patch_v02)
-                            .desired_width(480.0)
-                            .hint_text("Folder path"),
-                    );
-                    ui.end_row();
-                    ui.label("Newer (v0.3.0)");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.patch_v03)
-                            .desired_width(480.0)
-                            .hint_text("Folder path"),
-                    );
-                    ui.end_row();
-                });
+        egui::CollapsingHeader::new("Advanced").default_open(false).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                widgets::toggle(ui, &mut self.show_all);
+                ui.label("Show hidden options");
+                ui.add_space(16.0);
+                widgets::toggle(ui, &mut self.allow_new_key);
+                ui.label("Allow adding new options");
             });
+            ui.add_space(6.0);
+            ui.label(RichText::new("Compare two patch versions: each folder is a game folder with an extension folder inside.").size(12.5).color(MUTED));
+            egui::Grid::new("patch_folders").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                ui.label("Older version");
+                ui.add(egui::TextEdit::singleline(&mut self.patch_v02).desired_width(480.0).hint_text("Folder"));
+                ui.end_row();
+                ui.label("Newer version");
+                ui.add(egui::TextEdit::singleline(&mut self.patch_v03).desired_width(480.0).hint_text("Folder"));
+                ui.end_row();
+            });
+        });
         ui.add_space(8.0);
 
         self.ensure(&egui_ctx, &root);
@@ -1636,6 +1653,58 @@ fn gamepad_form(ui: &mut egui::Ui, s: &mut PadSetup) {
     });
 }
 
+/// One entry of the settings list.
+struct ConfigPage {
+    path: PathBuf,
+    title: String,
+    group: String,
+    summary: String,
+    description: String,
+    /// A data table of CSP's with no description: listed only on request.
+    internal: bool,
+}
+
+/// CSP's groups, most used first.
+const GROUP_ORDER: [&str; 9] = ["Graphics", "Display mode", "Track", "Cars", "Simulation", "Camera", "UI", "Input", "Other"];
+
+fn config_pages(files: &[ConfigFile]) -> Vec<ConfigPage> {
+    let mut pages: Vec<(f64, ConfigPage)> = files
+        .iter()
+        .map(|file| match config_meta(&file.path) {
+            Some(meta) => (
+                meta.order,
+                ConfigPage {
+                    path: file.path.clone(),
+                    title: meta.title,
+                    group: meta.group,
+                    summary: meta.summary,
+                    description: meta.description,
+                    internal: false,
+                },
+            ),
+            None => (
+                0.0,
+                ConfigPage {
+                    path: file.path.clone(),
+                    title: friendly_name(&file.name),
+                    group: "Internal".to_string(),
+                    summary: String::new(),
+                    description: String::new(),
+                    internal: true,
+                },
+            ),
+        })
+        .collect();
+    let rank = |group: &str| GROUP_ORDER.iter().position(|g| *g == group).unwrap_or(GROUP_ORDER.len());
+    pages.sort_by(|a, b| {
+        (a.1.internal, rank(&a.1.group))
+            .cmp(&(b.1.internal, rank(&b.1.group)))
+            .then(a.0.total_cmp(&b.0))
+            .then_with(|| a.1.title.cmp(&b.1.title))
+    });
+    pages.into_iter().map(|(_, page)| page).collect()
+}
+
 /// `rain_fx.ini` becomes `Rain fx`.
 fn friendly_name(file: &str) -> String {
     humanize(file.strip_suffix(".ini").unwrap_or(file))
@@ -1652,8 +1721,8 @@ fn humanize(raw: &str) -> String {
     }
 }
 
-/// One setting: readable name, a control that fits the value, the old value when changed.
-fn setting_row(ui: &mut egui::Ui, setting: &acxs_manager::csp_config::Setting, value: &mut String) {
+/// One setting with CSP's own label, the control its comment asks for, and the old value when changed.
+fn setting_row(ui: &mut egui::Ui, setting: &acxs_manager::csp_config::Setting, doc: &OptionDoc, value: &mut String) {
     let original = setting.value.clone();
     let changed = *value != original;
     ui.horizontal(|ui| {
@@ -1663,40 +1732,60 @@ fn setting_row(ui: &mut egui::Ui, setting: &acxs_manager::csp_config::Setting, v
             ui.painter().rect_filled(marker, egui::CornerRadius::same(2), ACCENT);
         }
         ui.allocate_ui_with_layout(
-            egui::vec2(280.0, 28.0),
+            egui::vec2(380.0, 28.0),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
                 let label = ui.add(
-                    egui::Label::new(RichText::new(humanize(&setting.key)).color(if changed { ACCENT } else { TEXT })).truncate(),
+                    egui::Label::new(RichText::new(doc.label.as_str()).color(if changed { ACCENT } else { TEXT })).truncate(),
                 );
-                label.on_hover_text(match &setting.doc {
-                    Some(doc) => format!("{}\n\n{doc}", setting.key),
-                    None => setting.key.clone(),
-                });
+                label.on_hover_text(format!("{}: {}", setting.section, setting.key));
             },
         );
 
         let lower = value.trim().to_lowercase();
-        let is_bool = matches!(lower.as_str(), "0" | "1" | "true" | "false" | "on" | "off");
+        let looks_bool = matches!(lower.as_str(), "0" | "1" | "true" | "false" | "on" | "off");
         let number: Option<f64> = value.trim().parse().ok();
-        if is_bool {
-            let mut on = matches!(lower.as_str(), "1" | "true" | "on");
-            if widgets::toggle(ui, &mut on).changed() {
-                // Keep the file's own spelling of booleans.
-                *value = match (lower.as_str(), on) {
-                    ("true" | "false", _) => if on { "true" } else { "false" }.to_string(),
-                    ("on" | "off", _) => if on { "on" } else { "off" }.to_string(),
-                    _ => if on { "1" } else { "0" }.to_string(),
-                };
+        match (doc.kind, number) {
+            (OptionKind::Range { min, max, percent, step }, Some(n)) => {
+                let (low, high) = (min.min(n), max.max(n));
+                if percent {
+                    let mut shown = n * 100.0;
+                    let slider = egui::Slider::new(&mut shown, (low * 100.0)..=(high * 100.0)).suffix("%").max_decimals(0);
+                    if ui.add_sized([300.0, 22.0], slider).changed() {
+                        *value = trim_float((shown / 100.0 * 1000.0).round() / 1000.0);
+                    }
+                } else {
+                    let mut shown = n;
+                    let mut slider = egui::Slider::new(&mut shown, low..=high).max_decimals(3);
+                    if let Some(step) = step.filter(|s| *s > 0.0) {
+                        slider = slider.step_by(step);
+                    }
+                    if ui.add_sized([300.0, 22.0], slider).changed() {
+                        *value = trim_float(shown);
+                    }
+                }
             }
-        } else if let Some(mut n) = number {
-            let whole = !value.contains('.');
-            let speed = if whole { 1.0 } else { (n.abs() * 0.01).max(0.001) };
-            if ui.add(egui::DragValue::new(&mut n).speed(speed).max_decimals(if whole { 0 } else { 4 })).changed() {
-                *value = if whole { format!("{}", n.round() as i64) } else { trim_float(n) };
+            _ if doc.kind == OptionKind::Toggle || looks_bool => {
+                let mut on = matches!(lower.as_str(), "1" | "true" | "on");
+                if widgets::toggle(ui, &mut on).changed() {
+                    // Keep the file's own spelling of booleans.
+                    *value = match (lower.as_str(), on) {
+                        ("true" | "false", _) => if on { "true" } else { "false" }.to_string(),
+                        ("on" | "off", _) => if on { "on" } else { "off" }.to_string(),
+                        _ => if on { "1" } else { "0" }.to_string(),
+                    };
+                }
             }
-        } else {
-            ui.add(egui::TextEdit::singleline(value).desired_width(260.0).margin(egui::Margin::symmetric(8, 5)));
+            (_, Some(mut n)) => {
+                let whole = !value.contains('.');
+                let speed = if whole { 1.0 } else { (n.abs() * 0.01).max(0.001) };
+                if ui.add(egui::DragValue::new(&mut n).speed(speed).max_decimals(if whole { 0 } else { 4 })).changed() {
+                    *value = if whole { format!("{}", n.round() as i64) } else { trim_float(n) };
+                }
+            }
+            _ => {
+                ui.add(egui::TextEdit::singleline(value).desired_width(300.0).margin(egui::Margin::symmetric(8, 5)));
+            }
         }
 
         if changed {
@@ -1706,12 +1795,13 @@ fn setting_row(ui: &mut egui::Ui, setting: &acxs_manager::csp_config::Setting, v
             }
         }
     });
-    if let Some(doc) = &setting.doc {
+    if let Some(hint) = &doc.hint {
         ui.horizontal(|ui| {
             ui.add_space(14.0);
-            ui.add(egui::Label::new(RichText::new(doc.as_str()).size(11.5).color(theme::FAINT)).truncate());
+            ui.add(egui::Label::new(RichText::new(hint.as_str()).size(11.5).color(theme::FAINT)).truncate());
         });
     }
+    ui.add_space(2.0);
 }
 
 fn trim_float(n: f64) -> String {

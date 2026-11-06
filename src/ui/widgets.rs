@@ -16,6 +16,33 @@ pub fn pill(ui: &mut egui::Ui, text: &str, color: Color32) {
 }
 
 /// A pill with a leading status dot, used for live state (game running, CSP version).
+/// Pills in rows that fit the width. A wrapping layout cannot do this: a pill's frame does not
+/// wrap, so one long row would push the whole panel past its edge.
+pub fn pill_rows(ui: &mut egui::Ui, tags: &[String], color: Color32) {
+    let width = ui.available_width();
+    let font = egui::FontId::proportional(11.0);
+    let gap = ui.spacing().item_spacing.x;
+    let measured: Vec<f32> = tags
+        .iter()
+        .map(|tag| ui.painter().layout_no_wrap(tag.clone(), font.clone(), color).size().x + 22.0 + gap)
+        .collect();
+    let mut start = 0;
+    while start < tags.len() {
+        let mut end = start;
+        let mut used = 0.0;
+        while end < tags.len() && (end == start || used + measured[end] <= width) {
+            used += measured[end];
+            end += 1;
+        }
+        ui.horizontal(|ui| {
+            for tag in &tags[start..end] {
+                pill(ui, tag, color);
+            }
+        });
+        start = end;
+    }
+}
+
 pub fn status_pill(ui: &mut egui::Ui, text: &str, color: Color32) {
     egui::Frame::new()
         .fill(color.gamma_multiply(0.10))
@@ -110,7 +137,7 @@ pub fn empty_state(ui: &mut egui::Ui, text: &str) {
 
 /// Small uppercase label above a group of sidebar entries.
 pub fn nav_section(ui: &mut egui::Ui, text: &str) {
-    ui.add_space(14.0);
+    ui.add_space(9.0);
     ui.horizontal(|ui| {
         ui.add_space(8.0);
         ui.label(RichText::new(text.to_uppercase()).font(theme::bold(11.0)).color(FAINT));
@@ -347,7 +374,7 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
 
 /// A primary sidebar entry: a drawn icon, the label and an optional count on the right.
 pub fn nav_icon_item(ui: &mut egui::Ui, selected: bool, icon: Icon, label: &str, badge: Option<&str>) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 31.0), Sense::click());
     if ui.is_rect_visible(rect) {
         let hovered = response.hovered();
         let painter = ui.painter();

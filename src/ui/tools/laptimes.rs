@@ -123,6 +123,10 @@ impl Tool for LapTimes {
         "Lap Times"
     }
 
+    fn content_width(&self) -> f32 {
+        1400.0
+    }
+
     fn group(&self) -> &'static str {
         "Telemetry"
     }

@@ -196,28 +196,29 @@ pub fn showroom(app: &mut App, ui: &mut egui::Ui) {
                 }
                 if !car.tags.is_empty() {
                     ui.add_space(10.0);
-                    ui.horizontal_wrapped(|ui| {
-                        for tag in &car.tags {
-                            widgets::pill(ui, tag, MUTED);
-                        }
-                    });
+                    widgets::pill_rows(ui, &car.tags, MUTED);
                 }
 
                 ui.add_space(16.0);
-                ui.horizontal_wrapped(|ui| {
-                    if ui.add(widgets::primary_button("Race this car")).clicked() {
-                        race_car = true;
-                    }
-                    if ui.button("Open in the game").on_hover_text("Starts the showroom of Assetto Corsa with this car.").clicked() {
+                let full = ui.available_width();
+                if ui.add_sized([full, 38.0], widgets::primary_button("Race this car")).clicked() {
+                    race_car = true;
+                }
+                ui.add_space(4.0);
+                let half = (full - ui.spacing().item_spacing.x) / 2.0;
+                ui.horizontal(|ui| {
+                    if ui.add_sized([half, 32.0], egui::Button::new("Open in the game")).on_hover_text("Starts the showroom of Assetto Corsa with this car.").clicked() {
                         game_showroom = true;
                     }
-                    if ui.button("Open folder").clicked() {
+                    if ui.add_sized([half, 32.0], egui::Button::new("Open folder")).clicked() {
                         open_folder = true;
                     }
-                    if ui.button("Edit metadata").clicked() {
+                });
+                ui.horizontal(|ui| {
+                    if ui.add_sized([half, 32.0], egui::Button::new("Edit details")).clicked() {
                         goto_tool = Some("Metadata & Checks");
                     }
-                    if ui.button("All cars").clicked() {
+                    if ui.add_sized([half, 32.0], egui::Button::new("All cars")).clicked() {
                         jump_cars = true;
                     }
                 });

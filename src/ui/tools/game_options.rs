@@ -1,20 +1,15 @@
-//! Game Options tool page: audio, force feedback, gameplay, the post-processing filter and
+//! The Audio, Force feedback, Gameplay and Filter tabs of Game Settings: the post-processing filter and
 //! Python apps, all in the game's own config files.
 
-use super::{Tool, ToolContext};
+use super::ToolContext;
 use crate::ui::{theme, widgets, Notice};
-use acxs_manager::game_options::{self, Control, GROUPS, OPTIONS, PythonApp};
+use acxs_manager::game_options::{self, Control, OPTIONS, PythonApp};
 use acxs_manager::settings;
 use eframe::egui::{self, RichText};
 
-const FILTERS_TAB: &str = "Filter and apps";
 
-pub fn tool() -> Box<dyn Tool> {
-    Box::new(GameOptions { tab: GROUPS[0].to_string(), loaded: None, values: Vec::new(), filters: Vec::new(), filter: None, apps: Vec::new() })
-}
 
-struct GameOptions {
-    tab: String,
+pub struct GameOptions {
     /// The values as last read or saved; `None` until the first read.
     loaded: Option<Vec<Option<f64>>>,
     values: Vec<Option<f64>>,
@@ -24,6 +19,10 @@ struct GameOptions {
 }
 
 impl GameOptions {
+    pub fn new() -> Self {
+        GameOptions { loaded: None, values: Vec::new(), filters: Vec::new(), filter: None, apps: Vec::new() }
+    }
+
     fn read(&mut self, ctx: &ToolContext) {
         let Some(cfg) = settings::ac_user_cfg_dir() else { return };
         let values = game_options::load(&cfg);
@@ -36,11 +35,11 @@ impl GameOptions {
         }
     }
 
-    fn option_rows(&mut self, ui: &mut egui::Ui) {
-        let tab = self.tab.clone();
+    fn option_rows(&mut self, ui: &mut egui::Ui, tab: &str) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             let mut missing = 0;
-            egui::Grid::new("game_options").num_columns(2).spacing([24.0, 10.0]).show(ui, |ui| {
+            ui.spacing_mut().slider_width = 360.0;
+            egui::Grid::new("game_options").num_columns(2).min_col_width(300.0).spacing([24.0, 12.0]).show(ui, |ui| {
                 for (option, value) in OPTIONS.iter().zip(&mut self.values).filter(|(o, _)| o.group == tab) {
                     let Some(current) = value else {
                         missing += 1;
@@ -56,7 +55,7 @@ impl GameOptions {
                         }
                         Control::Slider(min, max, true) => {
                             let mut percent = (*current * 100.0).round();
-                            let slider = egui::Slider::new(&mut percent, (min * 100.0)..=(max * 100.0)).suffix("%");
+                            let slider = egui::Slider::new(&mut percent, (min * 100.0)..=(max * 100.0)).suffix("%").max_decimals(0);
                             if ui.add(slider).changed() {
                                 *current = percent / 100.0;
                             }
@@ -111,59 +110,43 @@ impl GameOptions {
             }
         });
     }
-}
-
-impl Tool for GameOptions {
-    fn name(&self) -> &'static str {
-        "Game Options"
-    }
-
-    fn group(&self) -> &'static str {
-        "Config"
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, ctx: &ToolContext, notices: &mut Vec<Notice>) {
-        widgets::heading(ui, "Game Options", "Audio, force feedback, gameplay, filter and Python apps. Each save keeps a backup.");
+    /// Draws one tab of Game Settings.
+    pub fn show(&mut self, ui: &mut egui::Ui, ctx: &ToolContext, notices: &mut Vec<Notice>, tab: &str) {
         if self.loaded.is_none() {
             self.read(ctx);
         }
         if ctx.game_running {
-            ui.label(RichText::new("The game rewrites these files when it closes, so changes wait until it is closed.").color(theme::WARN));
+            ui.label(RichText::new("The game rewrites these files when it closes, so saving waits until then.").color(theme::WARN));
             ui.add_space(6.0);
         }
+        if tab == "Filter and apps" {
+            self.filter_and_apps(ui, notices);
+            return;
+        }
 
+        let old = self.loaded.clone().unwrap_or_default();
+        let changed = old.iter().zip(&self.values).filter(|(a, b)| a != b).count();
         ui.horizontal(|ui| {
-            for tab in GROUPS.into_iter().chain([FILTERS_TAB]) {
-                ui.selectable_value(&mut self.tab, tab.to_string(), tab);
-            }
-            let old = self.loaded.clone().unwrap_or_default();
-            let changed = old.iter().zip(&self.values).filter(|(a, b)| a != b).count();
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let can_save = changed > 0 && !ctx.game_running;
-                if ui.add_enabled(can_save, widgets::primary_button("Save")).clicked()
-                    && let Some(cfg) = settings::ac_user_cfg_dir()
-                {
-                    match game_options::save(&cfg, &old, &self.values) {
-                        Ok(count) => {
-                            notices.push(Notice { text: format!("Saved {count} settings."), ok: true });
-                            self.loaded = Some(self.values.clone());
-                        }
-                        Err(err) => notices.push(Notice { text: format!("Could not save: {err}"), ok: false }),
+            let can_save = changed > 0 && !ctx.game_running;
+            if ui.add_enabled(can_save, widgets::primary_button("Save")).clicked()
+                && let Some(cfg) = settings::ac_user_cfg_dir()
+            {
+                match game_options::save(&cfg, &old, &self.values) {
+                    Ok(count) => {
+                        notices.push(Notice { text: format!("Saved {count} settings."), ok: true });
+                        self.loaded = Some(self.values.clone());
                     }
+                    Err(err) => notices.push(Notice { text: format!("Could not save: {err}"), ok: false }),
                 }
-                if ui.add_enabled(changed > 0, egui::Button::new("Revert")).clicked() {
-                    self.values = old;
-                }
-                if changed > 0 {
-                    ui.label(RichText::new(format!("{changed} changed")).color(theme::WARN));
-                }
-            });
+            }
+            if ui.add_enabled(changed > 0, egui::Button::new("Revert")).clicked() {
+                self.values = old;
+            }
+            if changed > 0 {
+                ui.label(RichText::new(format!("{changed} changed")).color(theme::WARN));
+            }
         });
         ui.add_space(10.0);
-        if self.tab == FILTERS_TAB {
-            self.filter_and_apps(ui, notices);
-        } else {
-            self.option_rows(ui);
-        }
+        self.option_rows(ui, tab);
     }
 }

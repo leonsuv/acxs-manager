@@ -472,7 +472,7 @@ impl App {
         let tool = |key, icon| NavEntry { key, icon, page: None };
         vec![
             (
-                "Play",
+                "Drive",
                 vec![
                     page("Home", Icon::Home, Page::Home),
                     tool("Quick Race", Icon::Play),
@@ -485,7 +485,6 @@ impl App {
                 vec![
                     page("Cars", Icon::Car, Page::Cars),
                     page("Tracks", Icon::Track, Page::Tracks),
-                    page("Showroom", Icon::Camera, Page::Showroom),
                     tool("Skins", Icon::Paint),
                     tool("Livery Painter", Icon::Paint),
                     tool("Setups", Icon::Sliders),
@@ -493,22 +492,21 @@ impl App {
                 ],
             ),
             (
-                "Tuning",
+                "Results",
                 vec![
-                    tool("CSP Config", Icon::Layers),
-                    tool("Game Settings", Icon::Gear),
-                    tool("Game Options", Icon::Layers),
-                    page("Lights Patch", Icon::Bulb, Page::Patches),
+                    tool("Sessions", Icon::Chart),
+                    tool("Lap Times", Icon::Clock),
+                    tool("Replay Viewer", Icon::Replay),
+                    tool("Live Telemetry", Icon::Chart),
+                    tool("Screenshots", Icon::Camera),
                 ],
             ),
             (
-                "Driving data",
+                "Game setup",
                 vec![
-                    tool("Lap Times", Icon::Clock),
-                    tool("Sessions", Icon::Chart),
-                    tool("Replay Viewer", Icon::Replay),
-                    tool("Screenshots", Icon::Paint),
-                    tool("Live Telemetry", Icon::Chart),
+                    tool("Game Settings", Icon::Gear),
+                    tool("CSP Config", Icon::Layers),
+                    page("Lights Patch", Icon::Bulb, Page::Patches),
                 ],
             ),
         ]
@@ -706,7 +704,7 @@ impl App {
         let (group, title) = self.page_title();
         ui.horizontal_centered(|ui| {
             if let Some(group) = group {
-                ui.label(RichText::new(format!("Tools  /  {group}  /")).color(theme::FAINT));
+                let _ = group;
             }
             ui.label(RichText::new(title).font(theme::bold(15.0)));
 
@@ -747,7 +745,10 @@ impl App {
         };
         let mut notices = Vec::new();
         if let Some(tool) = self.tools.get_mut(index) {
-            tool.ui(ui, &ctx, &mut notices);
+            let full = ui.max_rect();
+            let width = full.width().min(tool.content_width());
+            let rect = egui::Rect::from_center_size(full.center(), egui::vec2(width, full.height()));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| tool.ui(ui, &ctx, &mut notices));
         } else {
             widgets::empty_state(ui, "This tool is not available.");
         }
@@ -1119,4 +1120,68 @@ struct NavEntry {
     key: &'static str,
     icon: widgets::Icon,
     page: Option<Page>,
+}
+
+/// Draws the whole app, sidebar included, to PNG with no window:
+/// `ACXS_RENDER_DIR=<dir> cargo test --bin acxs-manager render_app -- --ignored`.
+#[cfg(test)]
+mod app_render_tests {
+    use super::tools::render_tests::{Canvas, HEIGHT, WIDTH};
+    use super::*;
+
+    #[test]
+    #[ignore = "writes pictures; needs ACXS_RENDER_DIR"]
+    fn render_app() {
+        let dir = PathBuf::from(std::env::var("ACXS_RENDER_DIR").expect("ACXS_RENDER_DIR"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wanted: Vec<String> = std::env::var("ACXS_RENDER_PAGES")
+            .map(|list| list.split(',').map(str::to_string).collect())
+            .unwrap_or_default();
+        let ctx = egui::Context::default();
+        let creation = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = App::new(&creation);
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut canvas = Canvas::default();
+        let mut time = 0.0;
+        let mut step = |app: &mut App, count: u32, shoot: Option<&str>| {
+            for i in 0..count {
+                time += 0.1;
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(WIDTH as f32, HEIGHT as f32))),
+                    time: Some(time),
+                    ..egui::RawInput::default()
+                };
+                let mut output = ctx.run_ui(input, |ui| eframe::App::ui(app, ui, &mut frame));
+                canvas.update(&mut output.textures_delta);
+                if let Some(name) = shoot.filter(|_| i + 1 == count) {
+                    canvas.draw(&ctx, output.shapes);
+                    canvas.save(&dir.join(format!("{}.png", name.replace([' ', '&'], "_"))));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        };
+        // The first scan fills the sidebar counts and the pages.
+        step(&mut app, 200, None);
+        let mut pages: Vec<(String, Page)> = [
+            ("Home", Page::Home),
+            ("Servers", Page::Servers),
+            ("Cars", Page::Cars),
+            ("Tracks", Page::Tracks),
+            ("Showroom", Page::Showroom),
+            ("Lights Patch", Page::Patches),
+            ("Settings", Page::Settings),
+        ]
+        .into_iter()
+        .map(|(name, page)| (name.to_string(), page))
+        .collect();
+        let tools: Vec<&'static str> = app.tools.iter().map(|t| t.name()).collect();
+        pages.extend(tools.iter().enumerate().map(|(i, name)| (name.to_string(), Page::Tool(i))));
+        for (name, page) in pages {
+            if !wanted.is_empty() && !wanted.contains(&name) {
+                continue;
+            }
+            app.page = page;
+            step(&mut app, 40, Some(&name));
+        }
+    }
 }

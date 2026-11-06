@@ -17,6 +17,8 @@ use crate::sharedmem::{self, AcStatus, Snapshot};
 
 /// Sessions shorter than this many seconds of live driving are not saved.
 const MIN_SESSION_SECONDS: f64 = 30.0;
+/// Shorter lap times are placeholders the game reports when a lap did not count.
+const MIN_REAL_LAP_MS: i32 = 10_000;
 /// Sample period while the game is live (about 30 Hz).
 const SAMPLE_PERIOD: Duration = Duration::from_millis(33);
 /// Poll period while no game is running.
@@ -455,11 +457,11 @@ impl SessionAggregator {
     }
 
     fn track_laps(&mut self, completed: i32, last_ms: i32, best_ms: i32) {
-        if self.last_completed.is_some_and(|prev| completed > prev) && last_ms > 0 {
+        if self.last_completed.is_some_and(|prev| completed > prev) && last_ms >= MIN_REAL_LAP_MS {
             self.session.laps.push(RecordedLap { number: completed, time_ms: last_ms });
         }
         self.last_completed = Some(completed);
-        if best_ms > 0 {
+        if best_ms >= MIN_REAL_LAP_MS {
             self.session.best_lap_ms = Some(self.session.best_lap_ms.map_or(best_ms, |b| b.min(best_ms)));
         }
     }

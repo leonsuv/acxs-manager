@@ -26,6 +26,7 @@ const MAX_CONFLICTS_SHOWN: usize = 50;
 pub fn tool() -> Box<dyn Tool> {
     let (tx, rx) = mpsc::channel();
     Box::new(SetupsPage {
+        ac_root: None,
         root_input: default_root(),
         import_track: "generic".to_string(),
         started: false,
@@ -52,6 +53,7 @@ pub fn tool() -> Box<dyn Tool> {
 }
 
 struct SetupsPage {
+    ac_root: Option<PathBuf>,
     /// Setups root, edited as text or picked with Browse.
     root_input: String,
     /// Track folder (inside the car folder) that imports go into. The game lists
@@ -180,11 +182,16 @@ impl Tool for SetupsPage {
         "Setups"
     }
 
+    fn content_width(&self) -> f32 {
+        1100.0
+    }
+
     fn group(&self) -> &'static str {
         "Setup"
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _ctx: &ToolContext, notices: &mut Vec<Notice>) {
+    fn ui(&mut self, ui: &mut egui::Ui, tool_ctx: &ToolContext, notices: &mut Vec<Notice>) {
+        self.ac_root = tool_ctx.ac_root.clone();
         let ctx = ui.ctx().clone();
         if !self.started {
             self.started = true;
@@ -465,47 +472,28 @@ impl SetupsPage {
         );
         let busy = self.busy > 0;
 
+        let car_names = self.ac_root.clone().map(|root| super::names::names(&root, ui.ctx()));
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             // Folder and car selection.
             theme::card().show(ui, |ui| {
-                ui.label(RichText::new("Setups folder (one subfolder per car)").color(MUTED));
-                ui.horizontal(|ui| {
-                    let width = (ui.available_width() - 200.0).max(160.0);
-                    let edit = ui.add(
-                        egui::TextEdit::singleline(&mut self.root_input)
-                            .desired_width(width)
-                            .hint_text("Not set"),
-                    );
-                    if edit.lost_focus() {
-                        *intent = Some(Intent::Rescan);
-                    }
-                    if ui.add_enabled(!busy, egui::Button::new("Browse")).clicked()
-                        && let Some(path) = rfd::FileDialog::new().pick_folder()
-                    {
-                        self.root_input = path.display().to_string();
-                        *intent = Some(Intent::Rescan);
-                    }
-                    if ui.add_enabled(!busy, egui::Button::new("Rescan")).clicked() {
-                        *intent = Some(Intent::Rescan);
-                    }
-                });
                 if let Some(error) = &self.error {
                     ui.label(RichText::new(error.as_str()).color(DANGER));
                 }
-                ui.add_space(8.0);
 
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new("Car").color(MUTED));
-                    let label = self.car.clone().unwrap_or_else(|| "Choose a car".into());
+                    let label = self.car.as_deref().map_or("Choose a car".to_string(), |id| car_names.as_ref().map_or(id.to_string(), |n| n.car(id)));
                     egui::ComboBox::from_id_salt("setups_car")
                         .selected_text(label)
-                        .width(220.0)
+                        .width(280.0)
+                        .height(420.0)
                         .show_ui(ui, |ui| {
                             for car in &self.cars {
-                                ui.selectable_value(&mut self.car, Some(car.clone()), car.as_str());
+                                let name = car_names.as_ref().map_or(car.clone(), |n| n.car(car));
+                                ui.selectable_value(&mut self.car, Some(car.clone()), name);
                             }
                         });
-                    ui.label(RichText::new("Track folder").color(MUTED));
+                    ui.label(RichText::new("Import for track").color(MUTED));
                     ui.add(
                         egui::TextEdit::singleline(&mut self.import_track)
                             .desired_width(110.0)
@@ -513,6 +501,9 @@ impl SetupsPage {
                     );
                     if ui.add_enabled(!busy && self.car.is_some(), egui::Button::new("Import .ini...")).clicked() {
                         *intent = Some(Intent::Import);
+                    }
+                    if ui.add_enabled(!busy, egui::Button::new("Rescan")).clicked() {
+                        *intent = Some(Intent::Rescan);
                     }
                     if ui.add_enabled(!busy && self.selected.is_some(), egui::Button::new("Archive selected")).clicked() {
                         *intent = Some(Intent::Archive);

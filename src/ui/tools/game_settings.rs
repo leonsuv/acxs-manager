@@ -34,6 +34,8 @@ const SCREENSHOT_CHOICES: &[&str] = &["JPG", "BMP", "PNG"];
 pub fn tool() -> Box<dyn Tool> {
     let (tx, rx) = mpsc::channel();
     Box::new(GameSettings {
+        tab: VIDEO_TAB,
+        options: super::game_options::GameOptions::new(),
         tx,
         rx,
         video_dir: default_video_dir(),
@@ -245,7 +247,13 @@ fn choice<T: Copy + PartialEq>(
         });
 }
 
+const VIDEO_TAB: &str = "Video";
+const ADVANCED_TAB: &str = "Advanced";
+const TABS: [&str; 6] = [VIDEO_TAB, "Audio", "Force feedback", "Gameplay", "Filter and apps", ADVANCED_TAB];
+
 struct GameSettings {
+    tab: &'static str,
+    options: super::game_options::GameOptions,
     tx: Sender<Event>,
     rx: Receiver<Event>,
 
@@ -475,15 +483,6 @@ impl GameSettings {
         let idle = self.video_pending == 0;
         let base = self.saved_form.clone();
         theme::card().show(ui, |ui| {
-            ui.label(RichText::new("Folder with video.ini (Documents/Assetto Corsa/cfg by default)").color(MUTED));
-            ui.horizontal(|ui| {
-                let field = (ui.available_width() - 110.0).max(160.0);
-                ui.add(egui::TextEdit::singleline(&mut self.video_dir).desired_width(field));
-                let can_reload = idle && !self.video_dir.trim().is_empty();
-                if ui.add_enabled(can_reload, egui::Button::new("Reload")).clicked() {
-                    self.load_video(ctx);
-                }
-            });
             if !self.video_loaded {
                 ui.label(RichText::new("Loading...").small().color(MUTED));
             } else if !self.video_file_present {
@@ -632,23 +631,9 @@ impl GameSettings {
         let idle = self.ac_pending == 0;
         let base = self.saved_ac_form.clone();
         theme::card().show(ui, |ui| {
-            ui.label(
-                RichText::new(format!(
-                    "Folder with {ASSETTO_CORSA_FILE} (system/cfg under the Assetto Corsa folder by default)"
-                ))
-                .color(MUTED),
-            );
-            ui.horizontal(|ui| {
-                let field = (ui.available_width() - 110.0).max(160.0);
-                ui.add(egui::TextEdit::singleline(&mut self.ac_dir).desired_width(field));
-                let can_reload = idle && !self.ac_dir.trim().is_empty();
-                if ui.add_enabled(can_reload, egui::Button::new("Reload")).clicked() {
-                    self.load_ac(ctx);
-                }
-            });
             if self.ac_dir.trim().is_empty() {
                 ui.label(
-                    RichText::new("Set the Assetto Corsa folder in Settings, or type a folder above.").color(WARN),
+                    RichText::new("Set the Assetto Corsa folder in Settings.").color(WARN),
                 );
             } else if !self.ac_loaded {
                 ui.label(RichText::new("Loading...").small().color(MUTED));
@@ -879,6 +864,10 @@ impl Tool for GameSettings {
         "Game Settings"
     }
 
+    fn content_width(&self) -> f32 {
+        960.0
+    }
+
     fn group(&self) -> &'static str {
         "Config"
     }
@@ -887,11 +876,7 @@ impl Tool for GameSettings {
         let egui_ctx = ui.ctx().clone();
         self.poll(notices);
 
-        widgets::heading(
-            ui,
-            "Game Settings",
-            "Video and assetto_corsa.ini options, and snapshots of your Assetto Corsa configuration.",
-        );
+        widgets::heading(ui, "Game Settings", "Everything the game asks for in its options. Each save keeps a backup of the old file.");
 
         if !self.video_requested {
             self.video_requested = true;
@@ -910,18 +895,28 @@ impl Tool for GameSettings {
             self.list_snapshots(&egui_ctx, root.clone());
         }
 
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                widgets::section_title(ui, "Video");
-                self.video_section(ui, &egui_ctx);
-                ui.add_space(16.0);
-                widgets::section_title(ui, "assetto_corsa.ini");
-                self.ac_section(ui, &egui_ctx);
-                ui.add_space(16.0);
-                widgets::section_title(ui, "Snapshots");
-                self.snapshot_section(ui, &egui_ctx, ctx.ac_root.clone(), ctx.game_running);
-            });
+        ui.horizontal(|ui| {
+            for tab in TABS {
+                ui.selectable_value(&mut self.tab, tab, tab);
+            }
+        });
+        ui.add_space(10.0);
+
+        match self.tab {
+            VIDEO_TAB => {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.video_section(ui, &egui_ctx));
+            }
+            ADVANCED_TAB => {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    widgets::section_title(ui, "Advanced game options");
+                    self.ac_section(ui, &egui_ctx);
+                    ui.add_space(16.0);
+                    widgets::section_title(ui, "Saved copies of your settings");
+                    self.snapshot_section(ui, &egui_ctx, ctx.ac_root.clone(), ctx.game_running);
+                });
+            }
+            tab => self.options.show(ui, ctx, notices, tab),
+        }
     }
 }
 

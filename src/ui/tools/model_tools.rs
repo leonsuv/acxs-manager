@@ -479,6 +479,10 @@ impl Tool for ModelTools {
         "Model Tools"
     }
 
+    fn content_width(&self) -> f32 {
+        1400.0
+    }
+
     fn group(&self) -> &'static str {
         "Content"
     }

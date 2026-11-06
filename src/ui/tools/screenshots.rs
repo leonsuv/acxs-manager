@@ -26,6 +26,10 @@ impl Tool for Screenshots {
         "Screenshots"
     }
 
+    fn content_width(&self) -> f32 {
+        1640.0
+    }
+
     fn group(&self) -> &'static str {
         "Content"
     }

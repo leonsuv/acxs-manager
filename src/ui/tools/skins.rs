@@ -579,12 +579,11 @@ impl SkinsPage {
         let selected_id = self.selected_skin.clone();
         let mut clicked: Option<String> = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for skin in &filtered {
-                    let selected = selected_id.as_deref() == Some(skin.skin_id.as_str());
-                    if skin_card(ui, skin, selected) {
-                        clicked = Some(skin.skin_id.clone());
-                    }
+            widgets::tile_grid(ui, CARD_WIDTH, filtered.len(), |ui, i| {
+                let skin = &filtered[i];
+                let selected = selected_id.as_deref() == Some(skin.skin_id.as_str());
+                if skin_card(ui, skin, selected) {
+                    clicked = Some(skin.skin_id.clone());
                 }
             });
         });
@@ -597,6 +596,10 @@ impl SkinsPage {
 impl Tool for SkinsPage {
     fn name(&self) -> &'static str {
         "Skins"
+    }
+
+    fn content_width(&self) -> f32 {
+        1640.0
     }
 
     fn group(&self) -> &'static str {
@@ -719,9 +722,10 @@ fn skin_card(ui: &mut egui::Ui, skin: &SkinEntry, selected: bool) -> bool {
             if selected { theme::ACCENT.gamma_multiply(0.7) } else { BORDER },
         ))
         .corner_radius(CornerRadius::same(10))
-        .inner_margin(Margin::same(12))
+        .inner_margin(Margin::same(10))
         .show(ui, |ui| {
-            ui.set_width(CARD_WIDTH);
+            let width = ui.available_width();
+            ui.set_width(width);
             // Thumbnail from the cached per-car skin list, so drawing a card does no file IO.
             let preview = skin
                 .path
@@ -729,15 +733,16 @@ fn skin_card(ui: &mut egui::Ui, skin: &SkinEntry, selected: bool) -> bool {
                 .and_then(|skins_dir| skins_dir.parent())
                 .map(media::car_skins)
                 .and_then(|list| list.iter().find(|(name, _)| *name == skin.skin_id).map(|(_, p)| p.clone()));
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(CARD_WIDTH, CARD_WIDTH * 9.0 / 16.0), Sense::hover());
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(width, width * 9.0 / 16.0), Sense::hover());
             media::paint_image(ui, rect, preview.as_deref(), &skin.name, INFO, CornerRadius::same(8));
-            ui.add_space(4.0);
-            ui.label(RichText::new(skin.name.as_str()).strong());
-            ui.label(RichText::new(skin.skin_id.as_str()).small().color(MUTED));
-            ui.add_space(4.0);
-            widgets::key_value(ui, "Driver", or_dash(&skin.driver));
-            widgets::key_value(ui, "Team", or_dash(&skin.team));
-            widgets::key_value(ui, "Number", or_dash(&skin.number));
+            ui.add_space(6.0);
+            ui.add(egui::Label::new(RichText::new(skin.name.as_str()).strong()).truncate());
+            let details: Vec<&str> = [skin.driver.as_str(), skin.team.as_str(), skin.number.as_str()]
+                .into_iter()
+                .filter(|text| !text.trim().is_empty())
+                .collect();
+            let line = if details.is_empty() { "No driver set".to_string() } else { details.join("  \u{00B7}  ") };
+            ui.add(egui::Label::new(RichText::new(line).small().color(MUTED)).truncate());
         })
         .response
         .interact(Sense::click());

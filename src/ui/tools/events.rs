@@ -86,6 +86,10 @@ impl Tool for Events {
         "Events"
     }
 
+    fn content_width(&self) -> f32 {
+        1200.0
+    }
+
     fn group(&self) -> &'static str {
         "Launch"
     }
@@ -121,15 +125,21 @@ impl Tool for Events {
             return;
         };
 
+        let names = super::names::names(&root, ui.ctx());
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.career, false, "Special Events");
             ui.selectable_value(&mut self.career, true, "Career");
             ui.add_space(12.0);
-            ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("Search name, car or track").desired_width(240.0));
+            ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("Search name, car or track").desired_width(300.0));
+            ui.add_space(12.0);
+            widgets::toggle(ui, &mut self.playable_only);
+            ui.label("Installed only");
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
             for kind in ["All", "Hotlap", "Race", "Practice", "Drift", "Time attack", "Drag"] {
                 ui.selectable_value(&mut self.kind, kind.to_string(), kind);
             }
-            ui.checkbox(&mut self.playable_only, "Installed only");
         });
         ui.add_space(8.0);
 
@@ -171,12 +181,9 @@ impl Tool for Events {
                                 ui.label(RichText::new(&event.name).font(theme::bold(15.0)));
                                 widgets::pill(ui, &event.kind, theme::INFO);
                             });
-                            let place = if event.layout.is_empty() {
-                                event.track.clone()
-                            } else {
-                                format!("{} / {}", event.track, event.layout)
-                            };
-                            ui.label(RichText::new(format!("{}  \u{00B7}  {place}", event.car)).size(12.5).color(theme::MUTED));
+                            let track = names.track(&event.track);
+                            let place = if event.layout.is_empty() { track } else { format!("{track}, {}", names.layout(&event.layout)) };
+                            ui.label(RichText::new(format!("{}  \u{00B7}  {place}", names.car(&event.car))).size(12.5).color(theme::MUTED));
                             if !event.series.is_empty() {
                                 ui.label(RichText::new(&event.series).size(12.0).color(theme::MUTED));
                             }

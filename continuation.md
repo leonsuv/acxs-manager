@@ -229,6 +229,39 @@ Volltext in `docs/session-stats-plan.md`. Befund auf diesem PC:
 - **Neue Tests** für Logik in der Bibliothek (Parser, Zusammenführen, Regeln). Oberflächentests nur
   dort, wo reine Funktionen stecken.
 
+## 0. HIER WEITERMACHEN (Stand 6. November 2026, abends)
+
+Der Nutzer will ein UI auf Enterprise-Niveau und hat das bisherige zu Recht scharf kritisiert. Er hat einen
+**4K-43-Zoll-Bildschirm**: Immer in dieser Breite prüfen, nicht bei 1400 px. Das Redesign ist **begonnen, nicht fertig**
+und nach den letzten Umbauten **noch nicht angesehen**.
+
+Screenshots sind wieder erlaubt. Ohne Fenster und ohne ACXS zu starten:
+`ACXS_RENDER_DIR=<ordner> ACXS_RENDER_PAGES="Sessions,Skins" ACXS_SHM_PREFIX=acxsnone_ APPDATA=<temp> cargo test --bin acxs-manager render_app -- --ignored`.
+Das rendert die echte App samt Seitenleiste (`src/ui/mod.rs`, `app_render_tests`). **Als Erstes `WIDTH` und `HEIGHT` in
+`src/ui/tools/mod.rs` (`render_tests`) auf rund 2000 x 1100 stellen**, sonst sieht man die Probleme des Nutzers nicht.
+
+Gebaut, noch nicht geprüft:
+- Seitenleiste neu: Drive, Garage, Results, Game setup; kompakte Zeilen; Showroom nur noch über Cars und Home.
+- Seitenbreite: `Tool::content_width()`, in `App::tool_page` zentriert. Standard 1240, je Seite eigener Wert.
+- Game Settings hat Tabs (Video, Audio, Force feedback, Gameplay, Filter and apps, Advanced); Game Options ist darin aufgegangen.
+- CSP Config: echte Titel aus `[ℹ]`, Gruppen, Labels und Regler aus den CSP-Kommentaren (`parse_option_doc`), Versteckte
+  Optionen unter Advanced.
+- Sessions neu als Liste und Detail, Skins-Raster repariert, Showroom-Panel repariert (`widgets::pill_rows`).
+
+Noch zu tun, nach Wirkung:
+1. Alle Seiten in 2000 x 1100 rendern und jede ansehen. Besonders: läuft `egui::Panel` in `tools/sessions.rs` und CSP Config
+   im zentrierten `scope_builder` richtig? Sitzt die Detailspalte rechts von der Liste?
+2. Quick Race neu ordnen: die Bilder sind bei großer Breite gestreckt, die Karten zu lang. Zweispaltig: links Auswahl,
+   rechts Einstellungen, oben ein klarer Start-Knopf.
+3. Einheitliches Seitenraster: gleiche Kartenbreiten, Abstände und Überschriften. App-Seiten (Home, Cars, Tracks, Servers,
+   Settings, Showroom, Lights Patch) haben noch keine Breitenbegrenzung, weil sie nicht über `tool_page` laufen.
+4. Servers: drei Bedienzeilen zu einer zusammenfassen. Lap Times, Replay Viewer und Live Telemetry im neuen Stil.
+5. Livery Painter: 16-Bit- und 8-Bit-DDS lesen (31 von 1035 Texturen scheitern).
+
+Der Nutzer hält nichts davon, wenn Fehler nur beschrieben statt behoben werden, und will kurze Antworten.
+Nie in die Quelltexte per PowerShell `Get-Content | Set-Content` schreiben. Lange Bash-Heredocs scheitern oft; Dateien mit dem
+Schreibwerkzeug anlegen.
+
 ## 10. Nächste Schritte und Fallen aus der letzten Runde
 
 Neu seit dem 6. November, gebaut und getestet, aber **noch nie im Spiel gelaufen und nicht angesehen**:

@@ -347,6 +347,10 @@ impl Tool for Painter {
         "Livery Painter"
     }
 
+    fn content_width(&self) -> f32 {
+        1900.0
+    }
+
     fn group(&self) -> &'static str {
         "Content"
     }

@@ -457,6 +457,10 @@ impl Tool for ModsPage {
         "Mods"
     }
 
+    fn content_width(&self) -> f32 {
+        1400.0
+    }
+
     fn group(&self) -> &'static str {
         "Content"
     }
@@ -468,7 +472,7 @@ impl Tool for ModsPage {
         widgets::heading(
             ui,
             "Mods",
-            "Turn cars and tracks off without deleting them. Review Lua apps and RARE settings.",
+            "Turn cars and tracks off without deleting them, and manage CSP apps and race rules.",
         );
         let Some(root) = ctx.ac_root.clone().filter(|_| ctx.ac_valid) else {
             widgets::empty_state(ui, "Set your Assetto Corsa folder in Settings to manage mods.");
@@ -483,8 +487,8 @@ impl Tool for ModsPage {
         let mut rescan = false;
         ui.horizontal(|ui| {
             ui.selectable_value(&mut section, Section::Content, "Content");
-            ui.selectable_value(&mut section, Section::Lua, "Lua apps");
-            ui.selectable_value(&mut section, Section::Rare, "RARE");
+            ui.selectable_value(&mut section, Section::Lua, "CSP apps");
+            ui.selectable_value(&mut section, Section::Rare, "Race rules");
             ui.add_space(12.0);
             if busy {
                 ui.spinner();

@@ -412,3 +412,30 @@ mod lap_tests {
         assert_eq!((bests[0].time_ms, bests[0].laps), (860_000, 3));
     }
 }
+
+/// `2026-W45` as `2 - 8 Nov`. A label that does not parse stays as it is.
+pub fn week_range(label: &str) -> String {
+    use chrono::{Duration, NaiveDate, Weekday};
+    let parsed = label.split_once("-W").and_then(|(year, week)| {
+        NaiveDate::from_isoywd_opt(year.parse().ok()?, week.parse().ok()?, Weekday::Mon)
+    });
+    let Some(monday) = parsed else { return label.to_string() };
+    let sunday = monday + Duration::days(6);
+    if monday.format("%b").to_string() == sunday.format("%b").to_string() {
+        format!("{} - {}", monday.format("%-d"), sunday.format("%-d %b"))
+    } else {
+        format!("{} - {}", monday.format("%-d %b"), sunday.format("%-d %b"))
+    }
+}
+
+#[cfg(test)]
+mod week_tests {
+    use super::*;
+
+    #[test]
+    fn weeks_read_as_dates() {
+        assert_eq!(week_range("2026-W45"), "2 - 8 Nov");
+        assert_eq!(week_range("2026-W44"), "26 Oct - 1 Nov");
+        assert_eq!(week_range("nonsense"), "nonsense");
+    }
+}
