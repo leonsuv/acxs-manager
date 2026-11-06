@@ -195,6 +195,10 @@ impl QuickRace {
     ///   "Optimum" preset), `[GROOVE]`, `[GHOST_CAR]`, `[LAP_INVALIDATOR]` and
     ///   `[OPTIONS]` use the values Content Manager writes by default.
     pub fn to_race_ini(&self) -> String {
+        // Hotlap, time attack and drift are driven alone.
+        if self.extras.mode.session().is_some() && self.ai_count > 0 {
+            return QuickRace { ai_count: 0, grid_position: 0, ..self.clone() }.to_race_ini();
+        }
         let mut out = String::new();
 
         section(&mut out, "RACE");
@@ -317,6 +321,14 @@ impl QuickRace {
         const SESSION_TYPE_PRACTICE: u8 = 1;
         const SESSION_TYPE_QUALIFY: u8 = 2;
         let x = &self.extras;
+        if let Some((name, kind, spawn)) = x.mode.session() {
+            section(out, "SESSION_0");
+            kv(out, "NAME", name);
+            kv(out, "TYPE", &kind.to_string());
+            kv(out, "DURATION_MINUTES", "0");
+            kv(out, "SPAWN_SET", spawn);
+            return;
+        }
         let mut index = 0;
         for (name, kind, minutes) in [
             ("Practice", SESSION_TYPE_PRACTICE, x.practice_minutes),
@@ -457,6 +469,11 @@ impl OnlineJoin {
 
 /// Writes the join file to `cfg_dir/race.ini`, keeping any existing one as a backup like
 /// [`write_race_ini`] does. Fails with `InvalidInput` when the join is not complete.
+/// Writes an already complete `race.ini`, such as one built from a game event.
+pub fn write_event_ini(cfg_dir: &Path, text: &str) -> io::Result<PathBuf> {
+    write_ini_text(cfg_dir, text)
+}
+
 pub fn write_online_ini(cfg_dir: &Path, join: &OnlineJoin) -> io::Result<PathBuf> {
     if let Err(problems) = join.validate() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, problems.join(" ")));
@@ -533,7 +550,7 @@ const KEEP_BACKUPS: usize = 10;
 
 /// Deletes the oldest `<file_name>.acxs-backup-*` files beyond [`KEEP_BACKUPS`]. Only ACXS makes
 /// these. Their names sort by time, and a failure here must not stop the race.
-fn prune_backups(cfg_dir: &Path, file_name: &str) {
+pub(crate) fn prune_backups(cfg_dir: &Path, file_name: &str) {
     let prefix = format!("{file_name}.acxs-backup-");
     let Ok(entries) = fs::read_dir(cfg_dir) else { return };
     let mut backups: Vec<String> = entries
@@ -949,5 +966,41 @@ mod join_parity_tests {
         fs::remove_dir_all(&dir).ok();
         assert_eq!(names.iter().filter(|n| n.contains("acxs-backup")).count(), KEEP_BACKUPS);
         assert!(!names.iter().any(|n| n.ends_with("-000000")), "the oldest go first");
+    }
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::*;
+    use crate::race_options::RaceMode;
+
+    fn session_of(mode: RaceMode) -> String {
+        let mut race = QuickRace { ai_count: 5, ..QuickRace::default() };
+        race.extras.mode = mode;
+        let ini = race.to_race_ini();
+        assert!(ini.contains("CARS=1\r\n"), "{mode:?} is driven alone");
+        assert!(!ini.contains("[CAR_1]"));
+        assert!(!ini.contains("[SESSION_1]"));
+        ini[ini.find("[SESSION_0]").unwrap()..].split("\r\n\r\n").next().unwrap().to_string()
+    }
+
+    /// The values of the game's own Special Events.
+    #[test]
+    fn modes_write_what_the_games_events_write() {
+        let hotlap = session_of(RaceMode::Hotlap);
+        assert!(hotlap.contains("NAME=Hotlap") && hotlap.contains("TYPE=4") && hotlap.contains("SPAWN_SET=HOTLAP_START"));
+        let attack = session_of(RaceMode::TimeAttack);
+        assert!(attack.contains("TYPE=5") && attack.contains("SPAWN_SET=START"));
+        let drift = session_of(RaceMode::Drift);
+        assert!(drift.contains("TYPE=6") && drift.contains("SPAWN_SET=PIT"));
+    }
+
+    #[test]
+    fn a_mode_needs_no_session_switches() {
+        let mut race = QuickRace::default();
+        race.extras.race_enabled = false;
+        assert!(!race.extras.validate().is_empty());
+        race.extras.mode = RaceMode::Drift;
+        assert!(race.extras.validate().is_empty());
     }
 }

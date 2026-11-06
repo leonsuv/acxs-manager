@@ -8,10 +8,47 @@
 
 use serde::{Deserialize, Serialize};
 
+/// What kind of session Quick Race starts. The values are the game's own `[SESSION_0]` settings,
+/// as its Special Events write them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum RaceMode {
+    /// Practice, qualifying and race, with opponents.
+    #[default]
+    Weekend,
+    Hotlap,
+    TimeAttack,
+    Drift,
+}
+
+impl RaceMode {
+    pub const ALL: [RaceMode; 4] = [RaceMode::Weekend, RaceMode::Hotlap, RaceMode::TimeAttack, RaceMode::Drift];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RaceMode::Weekend => "Race weekend",
+            RaceMode::Hotlap => "Hotlap",
+            RaceMode::TimeAttack => "Time attack",
+            RaceMode::Drift => "Drift",
+        }
+    }
+
+    /// `(session name, session type, spawn set)`, or `None` for a weekend.
+    pub fn session(self) -> Option<(&'static str, u8, &'static str)> {
+        match self {
+            RaceMode::Weekend => None,
+            RaceMode::Hotlap => Some(("Hotlap", 4, "HOTLAP_START")),
+            RaceMode::TimeAttack => Some(("Time Attack", 5, "START")),
+            RaceMode::Drift => Some(("Drift Session", 6, "PIT")),
+        }
+    }
+}
+
 /// Sessions, conditions and rules of a quick race.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RaceExtras {
+    /// The kind of session; only a weekend has opponents and the session switches.
+    pub mode: RaceMode,
     /// Minutes of free practice before the rest. 0 leaves practice out.
     pub practice_minutes: u32,
     /// Minutes of qualifying before the race. 0 leaves qualifying out.
@@ -54,6 +91,7 @@ pub struct RaceExtras {
 impl Default for RaceExtras {
     fn default() -> Self {
         RaceExtras {
+            mode: RaceMode::Weekend,
             practice_minutes: 0,
             qualify_minutes: 0,
             race_enabled: true,
@@ -80,7 +118,7 @@ impl RaceExtras {
     /// Problems with these options, one sentence each.
     pub fn validate(&self) -> Vec<String> {
         let mut problems = Vec::new();
-        if self.practice_minutes == 0 && self.qualify_minutes == 0 && !self.race_enabled {
+        if self.mode == RaceMode::Weekend && self.practice_minutes == 0 && self.qualify_minutes == 0 && !self.race_enabled {
             problems.push("Turn on at least one session: practice, qualifying or the race.".to_string());
         }
         if self.practice_minutes > 600 || self.qualify_minutes > 600 || self.race_minutes > 1440 {

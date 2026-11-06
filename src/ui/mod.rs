@@ -476,6 +476,7 @@ impl App {
                 vec![
                     page("Home", Icon::Home, Page::Home),
                     tool("Quick Race", Icon::Play),
+                    tool("Events", Icon::Clock),
                     page("Servers", Icon::Globe, Page::Servers),
                 ],
             ),
@@ -495,6 +496,7 @@ impl App {
                 vec![
                     tool("CSP Config", Icon::Layers),
                     tool("Game Settings", Icon::Gear),
+                    tool("Game Options", Icon::Layers),
                     page("Lights Patch", Icon::Bulb, Page::Patches),
                 ],
             ),

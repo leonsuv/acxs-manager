@@ -12,6 +12,7 @@ use acxs_manager::content::{scan_cars, scan_tracks, CarEntry, TrackEntry};
 use acxs_manager::game;
 use acxs_manager::presets::{self, PresetStore};
 use acxs_manager::race::{self, QuickRace};
+use acxs_manager::race_options::RaceMode;
 use eframe::egui::{self, RichText};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -528,6 +529,18 @@ fn form_card(ui: &mut egui::Ui, page: &mut QuickRacePage, busy: bool) -> Option<
 
     let x = &mut form.extras;
 
+    card(ui, "Mode", "A race weekend has opponents. The other modes are driven alone.", |ui| {
+        ui.horizontal(|ui| {
+            for mode in RaceMode::ALL {
+                ui.selectable_value(&mut x.mode, mode, mode.label());
+            }
+        });
+    });
+    ui.add_space(14.0);
+
+    let weekend = x.mode == RaceMode::Weekend;
+
+    if weekend {
     card(ui, "Sessions", "Played in this order. Switch off what you do not want.", |ui| {
         let mut practice_on = x.practice_minutes > 0;
         setting(ui, "Practice", |ui| {
@@ -583,6 +596,7 @@ fn form_card(ui: &mut egui::Ui, page: &mut QuickRacePage, busy: bool) -> Option<
         ui.add_space(4.0);
         ui.label(RichText::new(parts.join("   →   ")).size(12.5).color(theme::ACCENT));
     });
+    }
 
     card(ui, "Conditions", "Weather, light and the track surface.", |ui| {
         setting(ui, "Weather", |ui| {
@@ -628,6 +642,7 @@ fn form_card(ui: &mut egui::Ui, page: &mut QuickRacePage, busy: bool) -> Option<
         });
     });
 
+    if weekend {
     card(ui, "Opponents", "AI drivers on the grid.", |ui| {
         let max_grid = form.ai_count.min(MAX_AI_COUNT);
         form.grid_position = form.grid_position.min(form.ai_count);
@@ -655,6 +670,7 @@ fn form_card(ui: &mut egui::Ui, page: &mut QuickRacePage, busy: bool) -> Option<
             }
         });
     });
+    }
 
     card(ui, "Rules", "", |ui| {
         setting(ui, "Driver name", |ui| {

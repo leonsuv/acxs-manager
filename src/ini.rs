@@ -194,7 +194,11 @@ impl Ini {
             };
             fs::rename(path, backup)?;
         }
-        fs::write(path, self.encoded())
+        fs::write(path, self.encoded())?;
+        if let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) {
+            crate::race::prune_backups(dir, name);
+        }
+        Ok(())
     }
 
     /// The CRLF text in the file's own encoding: Latin-1 when it was read that way
