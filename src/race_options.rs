@@ -32,6 +32,12 @@ impl RaceMode {
         }
     }
 
+    /// Time attack runs on the track's line: every layout the game uses it on has one, and drift
+    /// pads and freeroam maps do not.
+    pub fn needs_racing_line(self) -> bool {
+        self == RaceMode::TimeAttack
+    }
+
     /// `(session name, session type, spawn set)`, or `None` for a weekend.
     pub fn session(self) -> Option<(&'static str, u8, &'static str)> {
         match self {

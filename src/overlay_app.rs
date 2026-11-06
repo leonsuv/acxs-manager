@@ -314,6 +314,17 @@ mod tests {
     }
 
     #[test]
+    fn the_script_is_valid_lua_for_every_widget_and_odd_text() {
+        let mut layout = Layout::default_layout();
+        if let Some(widget) = layout.widgets.first_mut() {
+            widget.text = "it's \\ odd\ntext".to_string();
+        }
+        layout.speed_unit = SpeedUnit::Mph;
+        full_moon::parse(&script(&layout)).expect("valid Lua");
+        full_moon::parse(&script(&Layout::default())).expect("an empty layout is valid Lua too");
+    }
+
+    #[test]
     fn every_block_in_the_script_is_closed() {
         // Not a parser, but it catches a lost `end` or bracket: the script cannot be run here.
         let text = script(&Layout::default_layout());

@@ -311,6 +311,12 @@ impl QuickRacePage {
             {
                 problems.push(format!("Car \"{}\" is not installed.", self.form.car));
             }
+            if let Some(root) = &self.loaded_root
+                && self.form.extras.mode.needs_racing_line()
+                && !race::has_racing_line(root, &self.form.track, self.form.track_layout.as_deref())
+            {
+                problems.push("Time attack needs a track with a racing line. This layout has none.".to_string());
+            }
         }
         problems
     }

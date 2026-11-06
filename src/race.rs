@@ -1004,3 +1004,29 @@ mod mode_tests {
         assert!(race.extras.validate().is_empty());
     }
 }
+
+/// True when a track layout has `ai/fast_lane.ai`, the line Time Attack runs on.
+pub fn has_racing_line(ac_root: &Path, track: &str, layout: Option<&str>) -> bool {
+    let mut dir = ac_root.join("content").join("tracks").join(track);
+    if let Some(layout) = layout.filter(|l| !l.is_empty()) {
+        dir = dir.join(layout);
+    }
+    dir.join("ai").join("fast_lane.ai").is_file()
+}
+
+#[cfg(test)]
+mod racing_line_tests {
+    use super::*;
+
+    #[test]
+    fn the_line_is_looked_for_in_the_layout() {
+        let root = std::env::temp_dir().join(format!("acxs-line-{}", std::process::id()));
+        fs::create_dir_all(root.join("content/tracks/spa/ai")).unwrap();
+        fs::create_dir_all(root.join("content/tracks/la/freeroam")).unwrap();
+        fs::write(root.join("content/tracks/spa/ai/fast_lane.ai"), b"x").unwrap();
+        assert!(has_racing_line(&root, "spa", None));
+        assert!(has_racing_line(&root, "spa", Some("")));
+        assert!(!has_racing_line(&root, "la", Some("freeroam")));
+        fs::remove_dir_all(&root).ok();
+    }
+}

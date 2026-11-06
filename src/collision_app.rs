@@ -161,6 +161,11 @@ mod tests {
     }
 
     #[test]
+    fn the_script_is_valid_lua() {
+        full_moon::parse(SCRIPT).expect("valid Lua");
+    }
+
+    #[test]
     fn script_uses_the_window_form_csp_apps_use_and_writes_where_the_reader_looks() {
         assert!(SCRIPT.contains("function script.windowMain(dt)"));
         assert!(SCRIPT.contains(&format!("{APP_ID}/{LOG_FILE}")));
