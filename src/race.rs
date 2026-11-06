@@ -446,7 +446,12 @@ impl OnlineJoin {
         let remote = remote.trim_start_matches("\r\n");
 
         let offline = "[REMOTE]\r\nACTIVE=0\r\n";
-        base.replacen(offline, remote, 1)
+        // The server decides the weekend; like Content Manager, the one session here has no length.
+        base.replacen(offline, remote, 1).replacen(
+            "LAPS=0\r\nDURATION_MINUTES=30\r\nSPAWN_SET=PIT\r\n",
+            "DURATION_MINUTES=0\r\n",
+            1,
+        )
     }
 }
 
@@ -505,9 +510,42 @@ pub fn write_race_ini(cfg_dir: &Path, race: &QuickRace) -> io::Result<PathBuf> {
     write_ini_text(cfg_dir, &race.to_race_ini())
 }
 
-/// Writes `text` as `cfg_dir/race.ini`, renaming an existing file to a backup first.
+/// Writes `text` as `cfg_dir/race.ini`, renaming an existing file to a backup first. The driver's
+/// nationality is carried over from the file being replaced: the game logs an error without it.
 fn write_ini_text(cfg_dir: &Path, text: &str) -> io::Result<PathBuf> {
-    write_named_ini(cfg_dir, "race.ini", text)
+    let nation = fs::read(cfg_dir.join("race.ini"))
+        .ok()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .and_then(|old| old.lines().find_map(|l| l.trim().strip_prefix("NATION_CODE=").map(|v| v.trim().to_string())))
+        .unwrap_or_default();
+    write_named_ini(cfg_dir, "race.ini", &with_nation(text, &nation))
+}
+
+/// Adds the nationality keys to the player's car, just before `GRID_POSITION`.
+fn with_nation(text: &str, nation: &str) -> String {
+    let nation = one_line(nation);
+    let keys = format!("NATIONALITY={nation}\r\nNATION_CODE={nation}\r\nGRID_POSITION=");
+    text.replacen("GRID_POSITION=", &keys, 1)
+}
+
+/// Backups of one file kept in the config folder; a player starts many races.
+const KEEP_BACKUPS: usize = 10;
+
+/// Deletes the oldest `<file_name>.acxs-backup-*` files beyond [`KEEP_BACKUPS`]. Only ACXS makes
+/// these. Their names sort by time, and a failure here must not stop the race.
+fn prune_backups(cfg_dir: &Path, file_name: &str) {
+    let prefix = format!("{file_name}.acxs-backup-");
+    let Ok(entries) = fs::read_dir(cfg_dir) else { return };
+    let mut backups: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|name| name.starts_with(&prefix))
+        .collect();
+    backups.sort();
+    let excess = backups.len().saturating_sub(KEEP_BACKUPS);
+    for name in backups.into_iter().take(excess) {
+        let _ = fs::remove_file(cfg_dir.join(name));
+    }
 }
 
 /// Writes `text` as `cfg_dir/<file_name>`, renaming an existing file to
@@ -528,6 +566,7 @@ fn write_named_ini(cfg_dir: &Path, file_name: &str, text: &str) -> io::Result<Pa
         .create_new(true)
         .open(&target)?;
     file.write_all(text.as_bytes())?;
+    prune_backups(&cfg_dir, file_name);
     Ok(target)
 }
 
@@ -692,7 +731,7 @@ mod tests {
         let path = write_race_ini(&root.join("cfg"), &first).expect("first write");
         assert_eq!(path, cfg_dir.join("race.ini"));
         let first_text = fs::read_to_string(&path).expect("read first");
-        assert_eq!(first_text, first.to_race_ini());
+        assert_eq!(first_text, with_nation(&first.to_race_ini(), ""));
         assert!(backups_in(&cfg_dir).is_empty());
 
         let second = QuickRace {
@@ -708,7 +747,7 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(cfg_dir.join("race.ini")).expect("read new"),
-            second.to_race_ini()
+            with_nation(&second.to_race_ini(), "")
         );
 
         let _ = fs::remove_dir_all(&root);
@@ -855,5 +894,60 @@ mod session_tests {
             .count();
         assert_eq!(backups, 1);
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod join_parity_tests {
+    use super::*;
+
+    fn join() -> OnlineJoin {
+        OnlineJoin {
+            ip: "194.35.12.49".into(),
+            port: 9600,
+            http_port: 8081,
+            server_name: "Cruisin USA".into(),
+            track: "la_canyons".into(),
+            track_layout: Some("freeroam".into()),
+            car: "ks_lamborghini_aventador_sv".into(),
+            skin: "09_grigio_thalasso_metal".into(),
+            driver: "Driver".into(),
+            password: String::new(),
+            steam_id: "1".into(),
+            features: vec!["WEATHERFX_V1".into(), "STEAM_TICKET".into()],
+        }
+    }
+
+    /// The keys of a `race.ini` Content Manager wrote for a server the player really joined.
+    #[test]
+    fn a_join_has_the_keys_of_a_working_content_manager_file() {
+        let ini = join().to_race_ini();
+        for line in [
+            "[RACE]", "TRACK=la_canyons", "CONFIG_TRACK=freeroam", "CARS=1", "MODEL=ks_lamborghini_aventador_sv",
+            "[REMOTE]", "SERVER_IP=194.35.12.49", "SERVER_PORT=9600", "SERVER_HTTP_PORT=8081",
+            "REQUESTED_CAR=ks_lamborghini_aventador_sv", "ACTIVE=1", "__CM_EXTENDED=1",
+            "__FEATURES=WEATHERFX_V1,STEAM_TICKET", "SKIN=09_grigio_thalasso_metal", "MODEL=-",
+            "[SESSION_0]", "TYPE=1", "DURATION_MINUTES=0",
+        ] {
+            assert!(ini.lines().any(|l| l == line), "missing {line}");
+        }
+        assert!(!ini.contains("SPAWN_SET"));
+    }
+
+    #[test]
+    fn nationality_is_kept_and_old_backups_are_capped() {
+        let dir = std::env::temp_dir().join(format!("acxs-race-nation-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("race.ini"), "[CAR_0]\r\nNATION_CODE=ITA\r\n").unwrap();
+        for i in 0..15 {
+            fs::write(dir.join(format!("race.ini.acxs-backup-20260101-0000{i:02}")), "x").unwrap();
+        }
+        write_online_ini(&dir, &join()).unwrap();
+        let text = fs::read_to_string(dir.join("race.ini")).unwrap();
+        assert!(text.contains("NATIONALITY=ITA\r\nNATION_CODE=ITA\r\nGRID_POSITION=0"));
+        let names: Vec<String> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        fs::remove_dir_all(&dir).ok();
+        assert_eq!(names.iter().filter(|n| n.contains("acxs-backup")).count(), KEEP_BACKUPS);
+        assert!(!names.iter().any(|n| n.ends_with("-000000")), "the oldest go first");
     }
 }

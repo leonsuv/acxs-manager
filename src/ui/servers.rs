@@ -565,7 +565,14 @@ fn start_join(app: &mut App, sv: &Servers, request: JoinRequest, notices: &mut V
                 return Err("Assetto Corsa is already running. Close it before joining a server.".into());
             }
             // Whoever is signed in to Steam right now, as the game itself would send.
-            join.steam_id = lobby::current_steam_id64(&acxs_manager::steam::default_steam_roots()).unwrap_or_default();
+            join.steam_id = lobby::current_steam_id64(&acxs_manager::steam::default_steam_roots())
+                .ok_or("Steam is not signed in. Start Steam, then join again.")?;
+            // The panel may not have heard from the server yet; a server with features needs them in the file.
+            if join.features.is_empty()
+                && let Ok(status) = acxs_manager::server_status::fetch(&join.ip, join.http_port, std::time::Duration::from_secs(4))
+            {
+                join.features = status.features;
+            }
             let cfg = acxs_manager::settings::ac_user_cfg_dir().ok_or("The Documents folder was not found.")?;
             acxs_manager::race::write_online_ini(&cfg, &join).map_err(|e| format!("Could not write race.ini: {e}"))?;
             acxs_manager::game::launch_game(&ac_root).map_err(|e| format!("Assetto Corsa did not start: {e}"))?;
