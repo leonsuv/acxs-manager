@@ -35,7 +35,7 @@ Earlier in this cycle:
 
 - Sessions page: setup suggestions per car (understeer, oversteer, brake lock-ups, wheelspin) once enough driving is recorded, each with the number behind it.
 
-- Recorder also pins the trouble spots of each lap (100 slices of the track) and copies the game's fresh `.acreplay` into `%APPDATA%ACXSeplays` after a session (newest 20 kept) before the game overwrites it.
+- Recorder also pins the trouble spots of each lap (100 slices of the track) and copies the game's fresh `.acreplay` into `%APPDATA%\ACXS\replays\` after a session (newest 20 kept) before the game overwrites it.
 
 - Recorder adds understeer/oversteer share (steering gain learned from low-speed driving, no car data needed) and a Sessions page under Driving data listing every recorded session.
 
