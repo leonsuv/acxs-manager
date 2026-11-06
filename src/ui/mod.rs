@@ -487,6 +487,7 @@ impl App {
                     page("Tracks", Icon::Track, Page::Tracks),
                     page("Showroom", Icon::Camera, Page::Showroom),
                     tool("Skins", Icon::Paint),
+                    tool("Livery Painter", Icon::Paint),
                     tool("Setups", Icon::Sliders),
                     tool("Mods", Icon::Grid),
                 ],

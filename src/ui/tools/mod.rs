@@ -22,6 +22,7 @@ pub struct ToolContext {
 mod content_editor;
 mod car_specs;
 mod skins;
+mod livery_painter;
 mod screenshots;
 mod track_info;
 mod mods_manager;
@@ -95,6 +96,7 @@ pub fn registry() -> Vec<Box<dyn Tool>> {
         content_editor::tool(),
         car_specs::tool(),
         skins::tool(),
+        livery_painter::tool(),
         screenshots::tool(),
         track_info::tool(),
         mods_manager::tool(),

@@ -67,6 +67,25 @@ fn main() {
     }
     println!("csp config files {} settings {settings_total} unreadable {bad}; lights version {:?}", files.len(), lights_profile::detect_version(&ext));
     println!("lua apps: {}", lua_apps::list_all(&root).len());
+    let (mut read, mut failed, mut formats) = (0, 0, std::collections::BTreeMap::new());
+    for car in &cars {
+        for skin in skins::scan_skins(&root, &car.id).iter().take(1) {
+            for tex in acxs_manager::livery_paint::textures(&car.path.join("skins").join(&skin.skin_id)) {
+                match acxs_manager::livery_paint::load(&tex) {
+                    Ok(picture) => {
+                        read += 1;
+                        let again = acxs_manager::dds::decode(&acxs_manager::dds::encode(&picture)).unwrap();
+                        assert_eq!(again, picture);
+                    }
+                    Err(err) => {
+                        failed += 1;
+                        *formats.entry(err).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+    }
+    println!("skin textures read {read}, failed {failed} {formats:?}");
     let special = acxs_manager::events::special_events(&root);
     let career = acxs_manager::events::career_events(&root);
     let playable = special.iter().chain(&career).filter(|e| e.is_playable(&root)).count();
