@@ -231,6 +231,17 @@ Volltext in `docs/session-stats-plan.md`. Befund auf diesem PC:
 
 ## 10. Nächste Schritte und Fallen aus der letzten Runde
 
+Neu seit dem 6. November, gebaut und getestet, aber **noch nie im Spiel gelaufen und nicht angesehen**:
+Quick-Race-Modi (Werte aus den Kunos-`event.ini`), Seite Events (379 Events gelesen), Game Options, Replay-Bibliothek,
+Screenshots, Knopf "Open in the game" im Showroom (`acShowroom.exe`), Lap-Tabelle je Session, Overlay-App
+`ACXSOverlay` (`src/overlay_app.rs`), "Copy content to server", beigetretene Server bleiben in My servers.
+
+**Screenshots sind vom Nutzer verboten, bis er sie wieder erlaubt.** Das schließt `render_pages` in
+`src/ui/tools/mod.rs` ein (PNGs ohne Fenster). Erlaubt ist `every_page_draws_with_the_real_install`: zeichnet alle Seiten
+ohne Bilder. Windows-CI hat der Nutzer abgelehnt.
+
+Offen im Roadmap: Rest braucht Hardware, Dienste, Drittinhalte oder eine Entscheidung. AO-Werte gehen nur in eine CSV.
+
 - **Nie Quelltext über PowerShell `Get-Content | Set-Content` umschreiben.** Das hat `src/ui/mod.rs` zerstört
   (`…` wurde zu `â€¦`, dazu ein BOM) und ging bis in einen Commit. Danach prüfen:
   `grep -rnP 'â€|Â·' src` muss leer sein.

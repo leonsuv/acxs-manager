@@ -582,3 +582,86 @@ mod tests {
         assert!(!tmp.path().join(ENTRY_LIST).exists());
     }
 }
+
+/// What [`copy_content`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContentCopy {
+    pub copied: usize,
+    /// Cars and tracks that are not installed or have no files the server can use.
+    pub missing: Vec<String>,
+}
+
+fn copy_into(from: &Path, to: &Path) -> io::Result<()> {
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(from, to).map(|_| ())
+}
+
+/// Copies what the dedicated server checks clients against into `<AC root>/server/content`: each
+/// car's `data.acd`, and the track's `surfaces.ini` and model list. A car kept as a loose `data`
+/// folder has no `data.acd` and is reported as missing, because the server needs the packed file.
+pub fn copy_content(ac_root: &Path, cars: &[String], track: &str, layout: &str) -> io::Result<ContentCopy> {
+    let content = ac_root.join("content");
+    let server = ac_root.join("server").join("content");
+    let mut report = ContentCopy::default();
+    for car in cars.iter().map(|c| c.trim()).filter(|c| !c.is_empty()) {
+        let from = content.join("cars").join(car).join("data.acd");
+        if from.is_file() {
+            copy_into(&from, &server.join("cars").join(car).join("data.acd"))?;
+            report.copied += 1;
+        } else {
+            report.missing.push(car.to_string());
+        }
+    }
+    let track = track.trim();
+    if track.is_empty() {
+        return Ok(report);
+    }
+    let layout = layout.trim();
+    let from_track = content.join("tracks").join(track);
+    let to_track = server.join("tracks").join(track);
+    let surfaces = Path::new("data").join("surfaces.ini");
+    let (from_surfaces, to_surfaces, models) = if layout.is_empty() {
+        (from_track.join(&surfaces), to_track.join(&surfaces), "models.ini".to_string())
+    } else {
+        (from_track.join(layout).join(&surfaces), to_track.join(layout).join(&surfaces), format!("models_{layout}.ini"))
+    };
+    if from_surfaces.is_file() {
+        copy_into(&from_surfaces, &to_surfaces)?;
+        report.copied += 1;
+    } else {
+        report.missing.push(track.to_string());
+    }
+    if from_track.join(&models).is_file() {
+        copy_into(&from_track.join(&models), &to_track.join(&models))?;
+        report.copied += 1;
+    }
+    Ok(report)
+}
+
+#[cfg(test)]
+mod content_copy_tests {
+    use super::*;
+
+    #[test]
+    fn the_server_gets_what_it_checks_and_gaps_are_named() {
+        let root = std::env::temp_dir().join(format!("acxs-server-copy-{}", std::process::id()));
+        let car = root.join("content/cars/a_car");
+        let track = root.join("content/tracks/spa");
+        std::fs::create_dir_all(&car).unwrap();
+        std::fs::create_dir_all(track.join("gp/data")).unwrap();
+        std::fs::write(car.join("data.acd"), b"x").unwrap();
+        std::fs::write(track.join("gp/data/surfaces.ini"), b"x").unwrap();
+        std::fs::write(track.join("models_gp.ini"), b"x").unwrap();
+        let cars = vec!["a_car".to_string(), "no_car".to_string(), " ".to_string()];
+        let report = copy_content(&root, &cars, "spa", "gp").unwrap();
+        assert_eq!(report.copied, 3);
+        assert_eq!(report.missing, ["no_car"]);
+        let server = root.join("server/content");
+        assert!(server.join("cars/a_car/data.acd").is_file());
+        assert!(server.join("tracks/spa/gp/data/surfaces.ini").is_file());
+        assert!(server.join("tracks/spa/models_gp.ini").is_file());
+        std::fs::remove_dir_all(&root).ok();
+    }
+}

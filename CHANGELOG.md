@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+New:
+
+- Quick Race modes: Hotlap, Time Attack and Drift beside the race weekend, written the way the game's own events write them.
+- Events: all Special Events and Career races with goals, filters and a Start button.
+- Game Options: audio, force feedback, gameplay, the post-processing filter and Python apps.
+- Replay library in the Replay Viewer: saved, autosaved and archived replays with Open and Keep.
+- In-game overlay from HUD Layout, as a CSP app: ACXS Dash draws your layout with shift lights, ACXS Delta shows the gain or loss on the best lap, ACXS Session has the session timer and a speed trap. Not yet run in the game.
+- Screenshots page, Open in the game for the showroom, a lap table per session.
+- A server you joined stays in My servers.
+
 Checked against real drives, a live game session and a working Content Manager `race.ini`:
 
 - Quick Race and server joins confirmed on the real game: three Quick Races and a 75-car server session started from files ACXS wrote. The join file now has the same keys as Content Manager's, and the race port, feature list and Steam id matched exactly on a live server.

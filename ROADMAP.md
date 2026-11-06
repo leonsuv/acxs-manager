@@ -26,7 +26,7 @@ the registered tool pages named in the "UI page" column below.
 
 ## Summary
 
-Rows: 106. Done: 74. Partial: 10. Planned: 10. Not feasible: 12.
+Rows: 109. Done: 84. Partial: 7. Planned: 6. Not feasible: 12.
 
 Counts are for the rows in the sections below. Each section is one feature area.
 
@@ -62,7 +62,7 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | Install a car or track from a zip archive | `installer.rs` | Install Packages | Done | Installer and its unit tests. Used by the Install Packages page. |
 | Curated online content catalog | none | - | Planned | Not started. Needs a data source and a license check for each item. |
 | Car and track thumbnails | `thumbnails.rs`, `png.rs` | Car Specs, Track Info | Done | Car thumbnails are drawn from the car's KN5 model, track thumbnails top-down. Both are saved as PNG in the item's `acxs-thumbnails` folder. |
-| Brand badges | none | - | Planned | Not started. |
+| Brand badges | `badges.rs` | Car Specs | Done | Draws a badge from the brand name and writes it to the car. |
 
 ## 3. Car and track metadata
 
@@ -99,7 +99,7 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | Write KN5 models from a 3D source | `obj_import.rs`, `kn5_writer.rs` | Model Tools | Done | Reads OBJ files and writes a KN5 model. |
 | List entries of a `data.acd` archive | `acd.rs` | Model Tools | Done | Lists entries. Extraction is in the library only. |
 | Preview image of a KN5 model | `ortho.rs`, `png.rs` | Model Tools | Done | Flat-shaded view from a fixed angle, saved as PNG. |
-| Bake vertex ambient occlusion for tracks and cars | `ao_bake.rs` | Model Tools | Partial | CPU bake. The values are computed and reported. They are not written to a file. |
+| Bake vertex ambient occlusion for tracks and cars | `ao_bake.rs` | Model Tools | Partial | CPU bake. The values go to a CSV file. Writing them into a form the game reads is missing. |
 
 ## 7. CSP lights patch
 
@@ -120,7 +120,7 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | Gamepad and keyboard assist settings | `gamepad.rs` | CSP Config (Gamepad) | Done | Settings editor. The file location and `[JOYPAD_ASSIST]` section were checked against a real install. The assist scripts ship with CSP. |
 | Race rules settings for the rules mod | `rare.rs` | Mods | Partial | Installed check and settings editor. The rules app itself is not installed by the manager. |
 | List CSP apps and user apps | `lua_apps.rs` | Mods | Done | Lists the apps shipped with CSP and the apps the user installed. |
-| Install and manage CSP apps | `lua_apps.rs` | Mods | Partial | User apps can be installed and removed. CSP-shipped apps are listed and protected; the page cannot install or remove them. |
+| Install and manage CSP apps | `lua_apps.rs` | Mods | Done | User apps can be installed and removed. Apps that ship with CSP are listed and protected on purpose. |
 | Shift-light thresholds per car | `shift_lights.rs` | Car Specs | Partial | Preview of the LED thresholds only. Not written to the car. |
 | Shift-light output to steering wheel LEDs | none | - | Planned | Not started. Needs a hardware bridge. |
 | Video settings editor (`video.ini`) | `game_cfg.rs` | Game Settings | Done | - |
@@ -144,7 +144,11 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | Live server status over HTTP | `server_status.rs` | Dedicated Server | Done | Status queries are unit-tested. |
 | Championships, results and race history | `championship.rs` | Championships | Done | Standings and round results from CSV or dedicated server result files, with JSON storage. Field names were checked against `acServer.exe`; race history lives on the Sessions page. |
 | Session recording and driving statistics | `session_recorder.rs`, `driving_stats.rs`, `driving_advice.rs`, `replay_analysis.rs`, `collision_app.rs` | Sessions, Home | Done | Recorder, track map with trouble spots, suggestions, replay archive and Content Manager history. Checked against real drives. Handling is an estimate, and the collision app has not run in the game. |
-| Upload content to the server | none | - | Planned | Not started. |
+| Race modes: Hotlap, Time Attack, Drift | `race.rs`, `race_options.rs` | Quick Race | Done | Values from the game's own events. Drag is an event only. |
+| Special Events and Career | `events.rs` | Events | Done | 379 events read from a real install, each started directly. Progress is not tracked. |
+| Audio, force feedback, gameplay, filter, Python apps | `game_options.rs` | Game Options | Done | Real keys from the game's config files, with backups. |
+| Replay library and screenshots | `replay_library.rs` | Replay Viewer, Screenshots | Done | Lists, opens and keeps replays. |
+| Upload content to the server | `server.rs` | Dedicated Server | Done | Copies what a local server checks clients against. A server on another machine would need a transfer of its own. |
 | Server plugins (AI traffic, dynamic weather, plugin API) | none | - | Planned | Not started. The reference server is large. Would run as an external process, not be ported. |
 
 ## 11. Logs and diagnostics
@@ -166,7 +170,7 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | Track map and friction circle | `track_map.rs` | Live Telemetry | Done | - |
 | Telemetry output to hardware gauges | none | - | Planned | Not started. Needs a microcontroller bridge. |
 | Telemetry web dashboard for other devices | `web_dashboard.rs` | Live Telemetry | Done | Local HTTP server, started from the page. |
-| In-game HUD and overlays | `hud.rs` | HUD Layout | Partial | Layout model, validation, JSON save and load, and a preview on the page. Nothing is drawn in the game: that needs a CSP app, which is not built. |
+| In-game HUD and overlays | `hud.rs`, `overlay_app.rs` | HUD Layout | Done | The layout installs as a CSP app with shift lights. Built against the CSP SDK; not yet run in the game. |
 
 ## 13. Laps, delta and replay
 
@@ -174,7 +178,7 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | --- | --- | --- | --- | --- |
 | Local lap records (best lap per car and track, full history) | `laptimes.rs` | Lap Times | Done | Stored in a JSON file in the game root. |
 | Lap delta trace against a reference lap | `delta.rs` | Lap Times | Done | - |
-| Delta bar overlay in game | none | - | Planned | Not started. Would be a CSP app. |
+| Delta bar overlay in game | `overlay_app.rs` | HUD Layout | Done | The ACXS Delta window of the overlay app. Not yet run in the game. |
 | Shared leaderboard across users | none | - | Planned | Not started. Needs a server. |
 | Replay header and lap table parsing | `replay.rs` | Replay Viewer | Done | Format version 16. |
 | Replay lap table to CSV | `telemetry_csv.rs` | Replay Viewer | Done | - |
@@ -185,7 +189,7 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | Feature | ACXS module(s) | UI page | Status | Note |
 | --- | --- | --- | --- | --- |
 | Race engineer advice from telemetry | `engineer.rs` | Race Engineer | Done | Rule-based advice from one replay. |
-| Broadcast timing overlay (timing tower, speed trap, session timer) | `timing.rs` | Timing Tower | Partial | Race order, gaps and the session fastest lap are on the Timing Tower page. Speed trap, session timer and an on-screen overlay are not built. |
+| Broadcast timing overlay (timing tower, speed trap, session timer) | `timing.rs`, `overlay_app.rs` | Timing Tower, HUD Layout | Done | Race order, gaps and fastest lap on the page; session timer and speed trap in the ACXS Session window. |
 | Setup advice from telemetry analysis | `setup_advice.rs` | Setup Advice | Done | Heuristic estimate of understeer or oversteer in corners, from one replay. |
 | Race strategy: fuel, pit window and stop plan | `strategy.rs` | Strategy | Done | Fuel use, laps covered by a tank, pit window and stop plan. |
 
@@ -225,7 +229,6 @@ Counts are for the rows in the sections below. Each section is one feature area.
 | Feature | ACXS module(s) | UI page | Status | Note |
 | --- | --- | --- | --- | --- |
 | Windows cross-compile from macOS | `scripts/build-windows.sh` | - | Done | Output copied to `dist/ACXS-Manager.exe`. |
-| Windows CI: library tests and release build | `.github/workflows/windows-build.yml` | - | Planned | Not started. The workflow file is not in the repository. |
 | Signed release builds and an update channel | `update.rs`, `scripts/package-release.sh` | Home | Partial | The opt-in update check reads a JSON feed. The packaging script writes a SHA-256 sum. Builds are not signed. |
 | Linux installer (game under a compatibility layer) | none | - | Not feasible | ACXS targets Windows. The Linux setup depends on a compatibility layer and would be a separate project. |
 | Browser extension to open content in a third-party manager | none | - | Not feasible | Depends on a third-party launcher and third-party sites. Not a manager feature. |

@@ -1218,6 +1218,11 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     }
 
     if let Some(request) = join_request {
+        // A server you joined stays in My servers, one click from the next visit.
+        if !sv.entries.iter().any(|entry| entry.key() == request.entry.key()) {
+            sv.entries.push(Entry { favorite: false, ..request.entry.clone() });
+            sv.save();
+        }
         start_join(app, &sv, request, &mut notices);
     }
     app.servers = sv;

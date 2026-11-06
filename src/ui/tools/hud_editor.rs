@@ -8,6 +8,7 @@
 
 use super::{Tool, ToolContext};
 use crate::ui::{theme, widgets, Notice};
+use acxs_manager::overlay_app;
 use acxs_manager::hud::{
     self, Anchor, Color, DrawItem, Layout, Rect as HudRect, SpeedUnit, Telemetry, Widget, WidgetKind,
 };
@@ -144,6 +145,27 @@ impl Tool for HudEditor {
             "HUD Layout",
             "Place and style the HUD widgets, preview them with sample telemetry, and save the layout file.",
         );
+        if let Some(root) = self.root.clone() {
+            ui.horizontal(|ui| {
+                let label = if overlay_app::is_installed(&root) { "Update in-game overlay" } else { "Install in-game overlay" };
+                let button = ui.add_enabled(!ctx.game_running, widgets::primary_button(label)).on_hover_text(
+                    "Puts this layout in the game as a CSP app, with a delta bar and a session panel with a speed trap.",
+                );
+                if button.clicked() {
+                    match overlay_app::install(&root, &self.layout, ctx.game_running) {
+                        Ok(_) => notices.push(Notice {
+                            text: "Overlay installed. Open ACXS Dash, ACXS Delta or ACXS Session from the app bar in the game.".into(),
+                            ok: true,
+                        }),
+                        Err(err) => notices.push(Notice { text: format!("Could not install the overlay: {err}"), ok: false }),
+                    }
+                }
+                if ctx.game_running {
+                    ui.label(RichText::new("Close the game to install it.").color(theme::MUTED));
+                }
+            });
+            ui.add_space(8.0);
+        }
         let egui_ctx = ui.ctx().clone();
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])

@@ -56,6 +56,7 @@ pub mod lua_apps;
 pub mod mods;
 pub mod obj_import;
 pub mod ortho;
+pub mod overlay_app;
 pub mod plugin_manifest;
 pub mod png;
 pub mod presets;

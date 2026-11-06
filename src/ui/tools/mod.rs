@@ -165,6 +165,13 @@ mod headless_tests {
         }
     }
 
+    /// Against the real install, read only: `cargo test --bin acxs-manager real_install -- --ignored`.
+    #[test]
+    #[ignore = "needs an Assetto Corsa install"]
+    fn every_page_draws_with_the_real_install() {
+        draw_every_tool(acxs_manager::settings::detect_ac_root(), false);
+    }
+
     #[test]
     fn every_page_draws_without_a_game_folder() {
         draw_every_tool(None, false);

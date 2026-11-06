@@ -125,6 +125,7 @@ enum Action {
     Validate,
     Save,
     SaveEntries,
+    CopyContent,
     /// Fills the server form from a preset. Nothing is written until Save.
     Preset(&'static str),
 }
@@ -211,6 +212,23 @@ impl Tool for ServerPage {
                     } else {
                         self.problems = problems;
                         notices.push(fail("Not saved: fix the problems listed above."));
+                    }
+                }
+            },
+            Action::CopyContent => match ctx.ac_root.as_deref() {
+                None => notices.push(fail("Set your Assetto Corsa folder in Settings first.")),
+                Some(root) => {
+                    let cfg = self.current_config();
+                    match acxs_manager::server::copy_content(root, &cfg.cars, &cfg.track, &cfg.config_track) {
+                        Ok(report) if report.missing.is_empty() => {
+                            notices.push(ok(format!("Copied {} files to the server content folder.", report.copied)));
+                        }
+                        Ok(report) => notices.push(fail(format!(
+                            "Copied {} files. Not found: {}.",
+                            report.copied,
+                            report.missing.join(", ")
+                        ))),
+                        Err(err) => notices.push(fail(format!("Could not copy the content: {err}"))),
                     }
                 }
             },
@@ -620,6 +638,13 @@ impl ServerPage {
             }
             if ui.add_enabled(!self.busy, widgets::primary_button("Save server config")).clicked() {
                 *action = Action::Save;
+            }
+            if ui
+                .add_enabled(!self.busy, egui::Button::new("Copy content to server"))
+                .on_hover_text("Copies the data the server checks clients against for these cars and this track.")
+                .clicked()
+            {
+                *action = Action::CopyContent;
             }
             if self.busy {
                 ui.spinner();

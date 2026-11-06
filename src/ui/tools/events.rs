@@ -126,7 +126,7 @@ impl Tool for Events {
             ui.selectable_value(&mut self.career, true, "Career");
             ui.add_space(12.0);
             ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("Search name, car or track").desired_width(240.0));
-            for kind in ["All", "Hotlap", "Race", "Drift", "Time attack", "Drag"] {
+            for kind in ["All", "Hotlap", "Race", "Practice", "Drift", "Time attack", "Drag"] {
                 ui.selectable_value(&mut self.kind, kind.to_string(), kind);
             }
             ui.checkbox(&mut self.playable_only, "Installed only");

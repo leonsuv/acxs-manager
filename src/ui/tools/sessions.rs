@@ -247,6 +247,7 @@ fn session_card(ui: &mut egui::Ui, s: &RecordedSession, names: &Names, confirm: 
                 ui.add_space(10.0);
                 balance_bar(ui, s);
                 trouble_spots(ui, s);
+                lap_table(ui, s);
             });
         });
     });
@@ -366,6 +367,31 @@ fn trouble_spots(ui: &mut egui::Ui, s: &RecordedSession) {
     }
 }
 
+/// Every lap with its gap to the session's best.
+fn lap_table(ui: &mut egui::Ui, s: &RecordedSession) {
+    if s.laps.is_empty() {
+        return;
+    }
+    let best = s.laps.iter().map(|lap| lap.time_ms).min().unwrap_or(0);
+    ui.add_space(6.0);
+    egui::CollapsingHeader::new(format!("Laps ({})", s.laps.len())).id_salt(("session-laps", &s.started_at)).show(ui, |ui| {
+        egui::Grid::new(("session-lap-rows", &s.started_at)).num_columns(3).spacing([24.0, 4.0]).show(ui, |ui| {
+            for lap in &s.laps {
+                ui.label(RichText::new(format!("Lap {}", lap.number)).size(12.5).color(theme::MUTED));
+                let text = RichText::new(format_lap(lap.time_ms.max(0) as u32)).size(12.5);
+                if lap.time_ms == best {
+                    ui.label(text.color(theme::OK));
+                    ui.label(RichText::new("best").size(12.5).color(theme::OK));
+                } else {
+                    ui.label(text);
+                    ui.label(RichText::new(format!("+{:.3}", f64::from(lap.time_ms - best) / 1000.0)).size(12.5).color(theme::MUTED));
+                }
+                ui.end_row();
+            }
+        });
+    });
+}
+
 /// The kinds that appear in this session, as coloured chips under the map.
 fn legend(ui: &mut egui::Ui, s: &RecordedSession) {
     let mut kinds: Vec<EventKind> = if s.path.len() >= 20 {
@@ -380,9 +406,12 @@ fn legend(ui: &mut egui::Ui, s: &RecordedSession) {
         ui.set_max_width(MAP_SIZE);
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
         for kind in kinds {
-            let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 14.0), egui::Sense::hover());
-            ui.painter().circle_filled(dot.center(), 4.0, kind_color(kind));
-            ui.label(RichText::new(kind.label()).size(11.5).color(theme::MUTED));
+            // One group, so a wrapped line never parts a dot from its name.
+            ui.horizontal(|ui| {
+                let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 14.0), egui::Sense::hover());
+                ui.painter().circle_filled(dot.center(), 4.0, kind_color(kind));
+                ui.label(RichText::new(kind.label()).size(11.5).color(theme::MUTED));
+            });
             ui.add_space(4.0);
         }
     });

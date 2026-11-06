@@ -1,7 +1,7 @@
 //! Runs the read-only library code over a real install and reports what looks wrong:
 //! `cargo run --example smoke_real`. Writes nothing.
 
-use acxs_manager::{ac_log, cardata, content, content_repair, csp, csp_config, game_cfg, graphics_profiles, lights_profile, lua_apps, mods, settings, setups, skins, track_surfaces, weather};
+use acxs_manager::{ac_log, game_options, cardata, content, content_repair, csp, csp_config, game_cfg, graphics_profiles, lights_profile, lua_apps, mods, settings, setups, skins, track_surfaces, weather};
 use std::time::Instant;
 
 fn main() {
@@ -9,6 +9,7 @@ fn main() {
     let root = cfg.ac_root_path().or_else(settings::detect_ac_root).expect("no AC folder");
     println!("root {}", root.display());
     let t = Instant::now();
+    let user_cfg_dir = settings::ac_user_cfg_dir().expect("cfg");
     let cars = content::scan_cars(&root);
     let tracks = content::scan_tracks(&root);
     println!("cars {} tracks {} in {:?}", cars.len(), tracks.len(), t.elapsed());
@@ -66,6 +67,18 @@ fn main() {
     }
     println!("csp config files {} settings {settings_total} unreadable {bad}; lights version {:?}", files.len(), lights_profile::detect_version(&ext));
     println!("lua apps: {}", lua_apps::list_all(&root).len());
+    let special = acxs_manager::events::special_events(&root);
+    let career = acxs_manager::events::career_events(&root);
+    let playable = special.iter().chain(&career).filter(|e| e.is_playable(&root)).count();
+    println!("events: {} special, {} career, {playable} playable", special.len(), career.len());
+    let mut kinds = std::collections::BTreeMap::new();
+    for e in special.iter().chain(&career) {
+        *kinds.entry(e.kind.clone()).or_insert(0) += 1;
+    }
+    println!("  kinds {kinds:?}; without goals {}", special.iter().chain(&career).filter(|e| e.goals.is_empty()).count());
+    println!("python apps {:?}", game_options::python_apps(&root, &user_cfg_dir).iter().map(|a| (a.id.clone(), a.active)).collect::<Vec<_>>());
+    println!("filters {:?} active {:?}", game_options::pp_filters(&root, &user_cfg_dir).len(), game_options::active_filter(&user_cfg_dir));
+    println!("options read {}/{}", game_options::load(&user_cfg_dir).iter().flatten().count(), game_options::OPTIONS.len());
     println!("weather presets {} controllers {}", weather::list_presets(&root).len(), weather::list_controllers(&root).len());
     println!("weather fx: {:?}", weather::read_weather_fx(&root).map(|v| v.len()));
     println!("disabled mods: {}", mods::list_disabled(&root).len());
