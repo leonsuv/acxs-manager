@@ -30,8 +30,11 @@ const AIRBORNE_LOAD: f32 = 1.0;
 /// All four wheels must stay light this long before a jump counts.
 const MIN_AIRBORNE: f64 = 0.25;
 /// Peak g and speed loss that together make a crash.
-const CRASH_G: f32 = 4.5;
-const CRASH_SPEED_LOSS: f32 = 25.0;
+const CRASH_G: f32 = 2.5;
+/// Spike needed when the brake is pressed at least [`CRASH_BRAKE`].
+const CRASH_G_BRAKING: f32 = 4.5;
+const CRASH_BRAKE: f32 = 0.5;
+const CRASH_SPEED_LOSS: f32 = 15.0;
 const CRASH_WINDOW: usize = 10;
 /// Seconds between two crashes of the same kind that count separately.
 const EVENT_GAP: f64 = 3.0;
@@ -123,6 +126,9 @@ pub struct RecordedSession {
     pub skin: String,
     pub track_id: String,
     pub track_layout: String,
+    /// Practice, Qualify, Race and so on.
+    #[serde(default)]
+    pub session_type: String,
     /// Local start, `YYYY-MM-DDTHH:MM:SS`.
     pub started_at: String,
     pub seconds: f64,
@@ -206,6 +212,8 @@ impl RecordedSession {
 
 /// Lateral g above which a corner is judged for balance.
 const BALANCE_MIN_G: f32 = 0.7;
+/// Beyond this no tyre is cornering: it is an impact or a physics spike.
+const BALANCE_MAX_G: f32 = 5.0;
 /// Speed band, km/h, for learning the steering-to-yaw gain at low load.
 const CAL_SPEED: (f32, f32) = (15.0, 120.0);
 /// Lateral g below which the car is assumed to steer neutrally while calibrating.
@@ -256,7 +264,7 @@ impl Balance {
             self.sum_xx += x * x;
             self.samples = self.samples.saturating_add(1);
         }
-        if self.samples < CAL_SAMPLES || self.sum_xx <= 0.0 || speed_kmh < 60.0 || lateral_g.abs() < BALANCE_MIN_G {
+        if self.samples < CAL_SAMPLES || self.sum_xx <= 0.0 || speed_kmh < 60.0 || !(BALANCE_MIN_G..=BALANCE_MAX_G).contains(&lateral_g.abs()) {
             return None;
         }
         let gain = self.sum_xy / self.sum_xx;
@@ -264,10 +272,11 @@ impl Balance {
             return None;
         }
         let ratio = y / (gain * x);
-        Some(if ratio < UNDERSTEER_RATIO {
-            Handling::Understeer
-        } else if ratio > OVERSTEER_RATIO {
+        // Yaw against the steering is counter-steering: the rear has already stepped out.
+        Some(if ratio < 0.0 || ratio > OVERSTEER_RATIO {
             Handling::Oversteer
+        } else if ratio < UNDERSTEER_RATIO {
+            Handling::Understeer
         } else {
             Handling::Neutral
         })
@@ -296,7 +305,8 @@ impl Debounce {
 pub struct SessionAggregator {
     session: RecordedSession,
     clock: f64,
-    speeds: VecDeque<f32>,
+    /// Recent `(speed, horizontal g, brake)` samples.
+    speeds: VecDeque<(f32, f32, f32)>,
     crash: Debounce,
     front_lock: Debounce,
     rear_lock: Debounce,
@@ -312,6 +322,7 @@ pub struct SessionAggregator {
     last_xz: Option<(f32, f32)>,
     points: std::collections::BTreeMap<(EventKind, i32, i32), (f32, f32, f64)>,
     started: bool,
+    kind: Option<sharedmem::SessionType>,
 }
 
 impl SessionAggregator {
@@ -320,9 +331,12 @@ impl SessionAggregator {
         Self { session: RecordedSession { started_at, started_unix, ..RecordedSession::default() }, ..Self::default() }
     }
 
-    /// Car and track this aggregator was opened for, `None` until the first live sample.
-    pub fn identity(&self) -> Option<(&str, &str)> {
-        self.started.then_some((self.session.car_id.as_str(), self.session.track_id.as_str()))
+    /// True when `snap` belongs to another session than the one being recorded.
+    pub fn other_session(&self, snap: &Snapshot) -> bool {
+        self.started
+            && (self.session.car_id != snap.static_page.car_model
+                || self.session.track_id != snap.static_page.track
+                || self.kind != Some(snap.graphics.session))
     }
 
     pub fn seconds(&self) -> f64 {
@@ -342,6 +356,8 @@ impl SessionAggregator {
             self.session.skin = s.car_skin.clone();
             self.session.track_id = s.track.clone();
             self.session.track_layout = s.track_configuration.clone();
+            self.session.session_type = session_label(g.session);
+            self.kind = Some(g.session);
         }
         self.clock += dt;
         let speed = f64::from(p.speed_kmh.max(0.0));
@@ -353,7 +369,7 @@ impl SessionAggregator {
         self.track_laps(g.completed_laps, g.last_lap_ms, g.best_lap_ms);
         self.track_tyres_out(p.number_of_tyres_out);
         self.track_airborne(&p.wheel_load, dt);
-        self.track_crash(p.speed_kmh, &p.g_forces);
+        self.track_crash(p.speed_kmh, &p.g_forces, p.brake);
         self.track_slip(p, s.tyre_radius, speed);
         let handling = self.balance.sample(p.speed_kmh, p.steer_angle, p.local_angular_velocity[1], p.g_forces[0]);
         let segment = (g.normalized_car_position.clamp(0.0, 0.9999) * SEGMENTS as f32) as u8;
@@ -377,7 +393,9 @@ impl SessionAggregator {
         }
         self.session.max_steer = self.session.max_steer.max(p.steer_angle.abs());
         self.session.max_yaw = self.session.max_yaw.max(p.local_angular_velocity[1].abs());
-        self.session.max_lateral_g = self.session.max_lateral_g.max(p.g_forces[0].abs());
+        if p.g_forces[0].abs() <= BALANCE_MAX_G {
+            self.session.max_lateral_g = self.session.max_lateral_g.max(p.g_forces[0].abs());
+        }
         self.session.balance_samples = self.balance.samples();
         if let Some(h) = handling {
             self.session.cornering_seconds += dt;
@@ -456,14 +474,20 @@ impl SessionAggregator {
         }
     }
 
-    fn track_crash(&mut self, speed: f32, g_forces: &[f32; 3]) {
+    /// An impact shows as a horizontal g spike first and the lost speed just after, so both are
+    /// looked for across the window. Kerbs and landings are vertical and do not count. With the
+    /// brake pressed a far higher spike is needed, because hard braking alone reaches about 3 g.
+    fn track_crash(&mut self, speed: f32, g_forces: &[f32; 3], brake: f32) {
         if self.speeds.len() == CRASH_WINDOW {
             self.speeds.pop_front();
         }
-        self.speeds.push_back(speed);
-        let peak_g = g_forces.iter().fold(0.0_f32, |m, g| m.max(g.abs()));
-        let top = self.speeds.iter().copied().fold(0.0_f32, f32::max);
-        if peak_g >= CRASH_G && top - speed >= CRASH_SPEED_LOSS && self.crash.fire(self.clock) {
+        let horizontal = g_forces[0].hypot(g_forces[2]);
+        self.speeds.push_back((speed, if horizontal.is_finite() { horizontal } else { 0.0 }, brake));
+        let top = self.speeds.iter().fold(0.0_f32, |m, s| m.max(s.0));
+        let peak_g = self.speeds.iter().fold(0.0_f32, |m, s| m.max(s.1));
+        let braked = self.speeds.iter().any(|s| s.2 >= CRASH_BRAKE);
+        let needed_g = if braked { CRASH_G_BRAKING } else { CRASH_G };
+        if peak_g >= needed_g && top - speed >= CRASH_SPEED_LOSS && self.crash.fire(self.clock) {
             self.session.crashes += 1;
         }
     }
@@ -526,7 +550,7 @@ pub fn save(dir: &Path, session: &RecordedSession) -> std::io::Result<PathBuf> {
     let stamp: String = session.started_at.chars().filter(char::is_ascii_digit).collect();
     let car: String = session.car_id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
     let path = dir.join(format!("{stamp}-{car}.json"));
-    let json = serde_json::to_string_pretty(session).map_err(std::io::Error::other)?;
+    let json = serde_json::to_string(session).map_err(std::io::Error::other)?;
     std::fs::write(&path, json)?;
     Ok(path)
 }
@@ -631,9 +655,7 @@ fn run(control: &RecorderControl, on_saved: &dyn Fn()) {
         last = now;
         let driving = watch.observe(snap.as_ref(), dt);
         if let Some(snap) = &snap {
-            let changed = agg.as_ref().and_then(SessionAggregator::identity).is_some_and(|(car, track)| {
-                car != snap.static_page.car_model || track != snap.static_page.track
-            });
+            let changed = agg.as_ref().is_some_and(|a| a.other_session(snap));
             if changed {
                 close(agg.take(), &dir, on_saved);
             }
@@ -698,7 +720,10 @@ fn close(agg: Option<SessionAggregator>, dir: &Path, on_saved: &dyn Fn()) {
     if let Some(mut session) = agg.and_then(SessionAggregator::finish) {
         session.ended_unix = chrono::Utc::now().timestamp();
         log_line(&format!("session ended: {} on {}, {:.0} s", session.car_id, session.track_id, session.seconds));
-        let hits = crate::collision_app::collisions_between(session.started_unix - 1, session.ended_unix + 5);
+        let hits = crate::settings::Settings::load(&crate::settings::settings_path())
+            .ac_root_path()
+            .map(|root| crate::collision_app::collisions_between(&root, session.started_unix - 1, session.ended_unix + 5))
+            .unwrap_or_default();
         attach_collisions(&mut session, &hits);
         if save(dir, &session).is_ok() {
             if let Some(docs) = crate::settings::ac_documents_dir() {
@@ -797,9 +822,10 @@ mod tests {
         for _ in 0..400 {
             agg.feed(&s, 0.1);
         }
-        // Hard braking alone: speed loss without a spike.
+        // Hard braking: speed loss with a spike below the braking limit.
         s.physics.speed_kmh = 100.0;
-        s.physics.g_forces = [0.0, 0.0, 2.0];
+        s.physics.brake = 1.0;
+        s.physics.g_forces = [0.0, 0.0, 3.0];
         agg.feed(&s, 0.1);
         assert_eq!(agg.session.crashes, 0);
         // Wall: a g spike with the speed collapsing, twice within the gap.
@@ -1168,5 +1194,109 @@ pub fn log_line(text: &str) {
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         use std::io::Write;
         let _ = file.write_all(line.as_bytes());
+    }
+}
+
+fn session_label(kind: sharedmem::SessionType) -> String {
+    use sharedmem::SessionType as S;
+    match kind {
+        S::Practice => "Practice",
+        S::Qualify => "Qualifying",
+        S::Race => "Race",
+        S::Hotlap => "Hotlap",
+        S::TimeAttack => "Time attack",
+        S::Drift => "Drift",
+        S::Drag => "Drag",
+        S::Unknown(_) => "",
+    }
+    .to_string()
+}
+
+#[cfg(test)]
+mod real_drive_tests {
+    use super::*;
+
+    fn snap() -> Snapshot {
+        let mut physics = sharedmem::parse_physics(&[0u8; sharedmem::PHYSICS_PAGE_LEN]).unwrap();
+        physics.wheel_load = [3000.0; 4];
+        let mut graphics = sharedmem::parse_graphics(&[0u8; sharedmem::GRAPHICS_PAGE_LEN]).unwrap();
+        graphics.status = AcStatus::Live;
+        let mut static_page = sharedmem::parse_static(&[0u8; sharedmem::STATIC_PAGE_LEN]).unwrap();
+        static_page.tyre_radius = [0.3; 4];
+        static_page.car_model = "car".into();
+        static_page.track = "track".into();
+        Snapshot { physics, graphics, static_page }
+    }
+
+    /// The slow crash from the Ferrari replay: 29 to 8 km/h, coasting. The spike comes first and
+    /// the speed follows a few samples later.
+    #[test]
+    fn a_slow_impact_counts_when_the_spike_comes_before_the_speed_loss() {
+        let mut agg = SessionAggregator::new(String::new());
+        let mut s = snap();
+        s.physics.speed_kmh = 29.0;
+        for _ in 0..20 {
+            agg.feed(&s, 0.033);
+        }
+        s.physics.g_forces = [3.5, 0.0, 0.0];
+        agg.feed(&s, 0.033);
+        s.physics.g_forces = [0.2, 0.0, 0.0];
+        for speed in [24.0, 18.0, 12.0, 8.0] {
+            s.physics.speed_kmh = speed;
+            agg.feed(&s, 0.033);
+        }
+        assert_eq!(agg.session.crashes, 1);
+    }
+
+    #[test]
+    fn hard_braking_kerbs_and_landings_are_not_crashes() {
+        let mut agg = SessionAggregator::new(String::new());
+        let mut s = snap();
+        s.physics.speed_kmh = 250.0;
+        for _ in 0..20 {
+            agg.feed(&s, 0.033);
+        }
+        // Three g on the brakes loses speed fast but is only a stop.
+        s.physics.brake = 1.0;
+        s.physics.g_forces = [0.0, 0.0, -3.0];
+        for i in 0..30 {
+            s.physics.speed_kmh = 250.0 - i as f32 * 3.5;
+            agg.feed(&s, 0.033);
+        }
+        // A vertical spike from a landing, while slowing down off the throttle.
+        s.physics.brake = 0.0;
+        s.physics.g_forces = [0.0, 9.0, 0.0];
+        for i in 0..10 {
+            s.physics.speed_kmh = 140.0 - i as f32 * 2.0;
+            agg.feed(&s, 0.033);
+        }
+        assert_eq!(agg.session.crashes, 0);
+    }
+
+    #[test]
+    fn counter_steering_is_oversteer_and_spikes_are_not_judged() {
+        let mut b = Balance::default();
+        for _ in 0..200 {
+            let yaw = 0.1 * 0.2 * (50.0 / 3.6);
+            b.sample(50.0, 0.2, yaw, 0.1);
+        }
+        let v = 100.0_f32;
+        let ideal = 0.1 * 0.3 * (v / 3.6);
+        assert_eq!(b.sample(v, 0.3, -ideal, 1.2), Some(Handling::Oversteer));
+        assert_eq!(b.sample(v, 0.3, ideal, 40.0), None);
+    }
+
+    #[test]
+    fn a_new_session_type_or_car_is_another_session() {
+        let mut agg = SessionAggregator::new(String::new());
+        let mut s = snap();
+        assert!(!agg.other_session(&s));
+        agg.feed(&s, 0.1);
+        assert!(!agg.other_session(&s));
+        let mut race = snap();
+        race.graphics.session = sharedmem::SessionType::Race;
+        assert!(agg.other_session(&race));
+        s.static_page.car_model = "other".into();
+        assert!(agg.other_session(&s));
     }
 }

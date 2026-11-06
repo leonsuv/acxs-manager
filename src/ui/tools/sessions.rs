@@ -82,11 +82,11 @@ impl Tool for Sessions {
                 let installed = collision_app::is_installed(root);
                 let label = if installed { "Reinstall collision app" } else { "Install collision app" };
                 let response = ui.add_enabled(!ctx.game_running, egui::Button::new(label)).on_hover_text(
-                    "A small CSP Lua app that tells wall hits from car hits. After installing, switch on \"ACXS Collisions\" once in the in-game app bar. The game must be closed.",
+                    "A small CSP Lua app that tells wall hits from car hits. It needs Custom Shaders Patch, and the game must be closed to install it.",
                 );
                 if response.clicked() {
                     match collision_app::install(root, ctx.game_running) {
-                        Ok(_) => notices.push(Notice { text: "Installed ACXS Collisions. Enable it once in the in-game app bar.".into(), ok: true }),
+                        Ok(_) => notices.push(Notice { text: "Installed ACXS Collisions. It runs by itself from the next start of the game.".into(), ok: true }),
                         Err(err) => notices.push(Notice { text: format!("Could not install the collision app: {err}"), ok: false }),
                     }
                 }
@@ -169,6 +169,9 @@ fn session_card(ui: &mut egui::Ui, s: &RecordedSession) {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(pretty_id(&s.car_id)).font(theme::bold(18.0)));
                     widgets::pill(ui, &pretty_id(&s.full_track_id()), theme::MUTED);
+                    if !s.session_type.is_empty() {
+                        widgets::pill(ui, &s.session_type, theme::INFO);
+                    }
                 });
                 ui.label(RichText::new(pretty_date(&s.started_at)).size(12.5).color(theme::MUTED));
                 ui.add_space(10.0);

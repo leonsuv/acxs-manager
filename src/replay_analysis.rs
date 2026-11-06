@@ -7,13 +7,15 @@
 use crate::replay::Sample;
 
 /// Speed in km/h lost within [`IMPACT_WINDOW_S`] that counts as an impact, from at least [`IMPACT_MIN_SPEED`].
-const IMPACT_LOSS: f32 = 60.0;
-const IMPACT_MIN_SPEED: f32 = 80.0;
+const IMPACT_LOSS: f32 = 18.0;
+const IMPACT_MIN_SPEED: f32 = 25.0;
 const IMPACT_WINDOW_S: f64 = 0.4;
 /// Seconds between two impacts that count separately.
 const EVENT_GAP_S: f64 = 3.0;
 /// Brake level and speed loss over the same window for a hard stop (not an impact).
 const HARD_BRAKE: f32 = 0.9;
+/// An impact only counts with the brake below this, else the driver may simply be stopping.
+const IMPACT_BRAKE: f32 = 0.5;
 /// Height lost in metres within a second that counts as a drop.
 const DROP_M: f32 = 3.0;
 
@@ -68,7 +70,7 @@ pub fn analyze(samples: &[Sample]) -> ReplayAnalysis {
         }
         if top >= IMPACT_MIN_SPEED
             && top - b.speed_kmh >= IMPACT_LOSS
-            && b.brake < HARD_BRAKE
+            && b.brake < IMPACT_BRAKE
             && b.time_s - last_impact > EVENT_GAP_S
         {
             out.impacts += 1;
@@ -127,5 +129,22 @@ mod tests {
         let samples: Vec<Sample> = (0..40).map(|i| s(f64::from(i) * 0.1, 100.0, 0.0, if i < 20 { 10.0 } else { 2.0 })).collect();
         assert_eq!(analyze(&samples).drops, 1);
         assert_eq!(analyze(&[]), ReplayAnalysis::default());
+    }
+}
+
+#[cfg(test)]
+mod real_replay_tests {
+    use super::*;
+
+    /// The two crashes in a real Ferrari replay: 29 to 8 and 180 to 75 km/h, no brake. A brake
+    /// zone from the same drive, 150 to 130 at 94% brake, stays out.
+    #[test]
+    fn figures_from_a_real_drive() {
+        let s = |t: f64, speed: f32, brake: f32| Sample { time_s: t, speed_kmh: speed, rpm: 0.0, gear: 3, throttle: 0.0, brake, x: 0.0, y: 0.0, z: 0.0 };
+        let crash = |top: f32, low: f32| vec![s(0.0, top, 0.0), s(0.2, (top + low) / 2.0, 0.0), s(0.36, low, 0.0)];
+        assert_eq!(analyze(&crash(29.0, 8.0)).impacts, 1);
+        assert_eq!(analyze(&crash(180.0, 75.0)).impacts, 1);
+        let braking = vec![s(0.0, 150.0, 0.94), s(0.2, 140.0, 0.94), s(0.36, 130.0, 0.94)];
+        assert_eq!(analyze(&braking).impacts, 0);
     }
 }
