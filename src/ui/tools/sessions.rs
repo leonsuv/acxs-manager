@@ -3,15 +3,43 @@
 use super::{Tool, ToolContext};
 use crate::ui::{theme, widgets, Notice};
 use acxs_manager::collision_app;
+use acxs_manager::content;
 use acxs_manager::driving_advice;
 use acxs_manager::laptimes::format_lap;
 use acxs_manager::session_recorder::{self, EventKind, RecordedSession};
 use acxs_manager::track_map::project_lap;
 use eframe::egui::{self, RichText};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 pub fn tool() -> Box<dyn Tool> {
-    Box::new(Sessions { sessions: Arc::new(Mutex::new(None)), loading: false, goto: None, last_seen: None, seen_saved: 0 })
+    Box::new(Sessions {
+        sessions: Arc::new(Mutex::new(None)),
+        names: Arc::new(Mutex::new(Names::default())),
+        loading: false,
+        goto: None,
+        last_seen: None,
+        seen_saved: 0,
+        confirm_delete: None,
+    })
+}
+
+/// Display names of installed content by folder id.
+#[derive(Default)]
+struct Names {
+    cars: BTreeMap<String, String>,
+    tracks: BTreeMap<String, String>,
+}
+
+impl Names {
+    fn car(&self, id: &str) -> String {
+        self.cars.get(id).cloned().unwrap_or_else(|| pretty_id(id))
+    }
+
+    fn track(&self, s: &RecordedSession) -> String {
+        let name = self.tracks.get(&s.track_id).cloned().unwrap_or_else(|| pretty_id(&s.track_id));
+        if s.track_layout.is_empty() { name } else { format!("{name}  \u{00B7}  {}", pretty_id(&s.track_layout)) }
+    }
 }
 
 struct Sessions {
@@ -22,14 +50,24 @@ struct Sessions {
     /// When the page was last drawn; coming back after a pause reloads the list.
     last_seen: Option<std::time::Instant>,
     seen_saved: usize,
+    names: Arc<Mutex<Names>>,
+    /// `started_at` of the session waiting for a second click on Delete.
+    confirm_delete: Option<String>,
 }
 
 impl Sessions {
-    fn reload(&mut self, ctx: &egui::Context) {
+    fn reload(&mut self, ctx: &egui::Context, root: Option<std::path::PathBuf>) {
         self.loading = true;
         let slot = Arc::clone(&self.sessions);
+        let names = Arc::clone(&self.names);
         let ctx = ctx.clone();
         std::thread::spawn(move || {
+            if let Some(root) = root
+                && let Ok(mut guard) = names.lock()
+            {
+                guard.cars = content::scan_cars(&root).into_iter().map(|c| (c.id, c.name)).collect();
+                guard.tracks = content::scan_tracks(&root).into_iter().map(|t| (t.id, t.name)).collect();
+            }
             let mut list = session_recorder::load_all(&session_recorder::sessions_dir());
             list.reverse();
             if let Ok(mut guard) = slot.lock() {
@@ -62,11 +100,11 @@ impl Tool for Sessions {
         self.last_seen = Some(std::time::Instant::now());
         let ready = self.sessions.lock().ok().is_some_and(|g| g.is_some());
         if (!ready || away) && !self.loading {
-            self.reload(ui.ctx());
+            self.reload(ui.ctx(), ctx.ac_root.clone());
         }
         ui.horizontal(|ui| {
             if ui.button("Reload").clicked() {
-                self.reload(ui.ctx());
+                self.reload(ui.ctx(), ctx.ac_root.clone());
             }
             if ui
                 .button("Keep more game replays")
@@ -104,6 +142,9 @@ impl Tool for Sessions {
             return;
         };
         self.loading = false;
+        let names_guard = self.names.lock().ok();
+        let no_names = Names::default();
+        let names = names_guard.as_deref().unwrap_or(&no_names);
         if list.is_empty() {
             widgets::empty_state(ui, "Nothing recorded yet. Drive a session with ACXS Manager open and it shows up here.");
             return;
@@ -120,18 +161,30 @@ impl Tool for Sessions {
                 });
                 for a in &advice {
                     ui.add_space(4.0);
-                    ui.label(RichText::new(format!("{}: {}", a.car_id, a.finding)).size(13.0));
+                    ui.label(RichText::new(format!("{}: {}", names.car(&a.car_id), a.finding)).size(13.0));
                     ui.label(RichText::new(&a.suggestion).size(12.5).color(theme::MUTED));
                 }
             });
             ui.add_space(8.0);
         }
+        let mut to_delete = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             for s in list {
-                session_card(ui, s);
+                if session_card(ui, s, names, &mut self.confirm_delete) {
+                    to_delete = Some(s.clone());
+                }
                 ui.add_space(10.0);
             }
         });
+        drop(guard);
+        drop(names_guard);
+        if let Some(session) = to_delete {
+            match session_recorder::delete(&session_recorder::sessions_dir(), &session) {
+                Ok(()) => notices.push(Notice { text: "Session deleted.".into(), ok: true }),
+                Err(err) => notices.push(Notice { text: format!("Could not delete the session: {err}"), ok: false }),
+            }
+            self.reload(ui.ctx(), ctx.ac_root.clone());
+        }
     }
 }
 
@@ -154,7 +207,9 @@ fn pretty_date(stamp: &str) -> String {
         .map_or_else(|_| stamp.replace('T', " "), |t| t.format("%-d %b %Y, %H:%M").to_string())
 }
 
-fn session_card(ui: &mut egui::Ui, s: &RecordedSession) {
+/// Draws one session. Returns true when the driver confirmed deleting it.
+fn session_card(ui: &mut egui::Ui, s: &RecordedSession, names: &Names, confirm: &mut Option<String>) -> bool {
+    let mut delete = false;
     theme::card().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal_top(|ui| {
@@ -167,11 +222,24 @@ fn session_card(ui: &mut egui::Ui, s: &RecordedSession) {
             }
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(pretty_id(&s.car_id)).font(theme::bold(18.0)));
-                    widgets::pill(ui, &pretty_id(&s.full_track_id()), theme::MUTED);
+                    ui.label(RichText::new(names.car(&s.car_id)).font(theme::bold(18.0)));
+                    widgets::pill(ui, &names.track(s), theme::MUTED);
                     if !s.session_type.is_empty() {
                         widgets::pill(ui, &s.session_type, theme::INFO);
                     }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if confirm.as_deref() == Some(s.started_at.as_str()) {
+                            if ui.small_button("Keep").clicked() {
+                                *confirm = None;
+                            }
+                            if ui.small_button(RichText::new("Delete for good").color(theme::DANGER)).clicked() {
+                                *confirm = None;
+                                delete = true;
+                            }
+                        } else if ui.small_button("Delete").clicked() {
+                            *confirm = Some(s.started_at.clone());
+                        }
+                    });
                 });
                 ui.label(RichText::new(pretty_date(&s.started_at)).size(12.5).color(theme::MUTED));
                 ui.add_space(10.0);
@@ -182,6 +250,7 @@ fn session_card(ui: &mut egui::Ui, s: &RecordedSession) {
             });
         });
     });
+    delete
 }
 
 fn stat_grid(ui: &mut egui::Ui, s: &RecordedSession) {
@@ -230,7 +299,8 @@ fn balance_bar(ui: &mut egui::Ui, s: &RecordedSession) {
     let under = (s.understeer_seconds / s.cornering_seconds).clamp(0.0, 1.0) as f32;
     let over = (s.oversteer_seconds / s.cornering_seconds).clamp(0.0, 1.0) as f32;
     let neutral = (1.0 - under - over).max(0.0);
-    ui.label(RichText::new("Handling in hard corners").size(11.5).color(theme::MUTED));
+    ui.label(RichText::new("Handling in hard corners (estimate)").size(11.5).color(theme::MUTED))
+        .on_hover_text("Compares how fast the car turned with how far the wheel was turned, while holding a corner. Good for comparing your own drives, not an exact measure.");
     let width = ui.available_width().min(420.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 10.0), egui::Sense::hover());
     let painter = ui.painter();
@@ -298,7 +368,11 @@ fn trouble_spots(ui: &mut egui::Ui, s: &RecordedSession) {
 
 /// The kinds that appear in this session, as coloured chips under the map.
 fn legend(ui: &mut egui::Ui, s: &RecordedSession) {
-    let mut kinds: Vec<EventKind> = s.hotspots.iter().map(|h| h.kind).collect();
+    let mut kinds: Vec<EventKind> = if s.path.len() >= 20 {
+        s.hotspots.iter().map(|h| h.kind).collect()
+    } else {
+        s.map_points(40).iter().map(|p| p.kind).collect()
+    };
     kinds.sort();
     kinds.dedup();
     ui.add_space(6.0);
@@ -355,17 +429,8 @@ fn track_map(ui: &mut egui::Ui, s: &RecordedSession) {
             last = Some(segment);
         }
     } else {
-        // The trace is sampled every few metres; a step far beyond the usual one means the car was
-        // moved (pits, reset), so the line is cut there.
-        let mut steps: Vec<f32> = s.trace.windows(2).map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1)).collect();
-        steps.sort_by(f32::total_cmp);
-        let limit = (steps.get(steps.len() / 2).copied().unwrap_or(0.0) * 6.0).max(60.0);
-        let mut last: Option<(f32, f32)> = None;
-        for &(x, z) in &s.trace {
-            breaks.push(last.is_none_or(|(lx, lz)| (x - lx).hypot(z - lz) > limit));
-            world.push([x, z]);
-            last = Some((x, z));
-        }
+        breaks = session_recorder::trace_breaks(&s.trace);
+        world.extend(s.trace.iter().map(|&(x, z)| [x, z]));
     }
     let line_len = world.len();
     if sliced {
@@ -379,7 +444,7 @@ fn track_map(ui: &mut egui::Ui, s: &RecordedSession) {
             ));
         }
     } else {
-        for p in &s.event_points {
+        for p in s.map_points(40) {
             world.push([p.x, p.z]);
             dots_meta.push((p.kind, format!("{} {}", p.kind.label(), amount_text(p.kind, p.count))));
         }

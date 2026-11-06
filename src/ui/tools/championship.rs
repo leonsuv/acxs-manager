@@ -28,6 +28,8 @@ pub fn tool() -> Box<dyn Tool> {
 
 /// Sent back by the file-dialog threads once they finish.
 enum Msg {
+    /// A server result file was read into the round form.
+    Results(championship::ServerRace),
     Done {
         loaded: Option<Championship>,
         notice: Option<Notice>,
@@ -39,6 +41,7 @@ enum Action {
     Select(usize),
     Create,
     AddRound,
+    LoadServerResults,
     SetCustomPoints,
     OpenFile,
     SaveSelected,
@@ -195,6 +198,7 @@ impl ChampionshipsPage {
             Action::Create => report(notices, self.create_championship()),
             Action::AddRound => report(notices, self.add_round()),
             Action::SetCustomPoints => report(notices, self.set_custom_points()),
+            Action::LoadServerResults => self.spawn_server_results(ctx),
             Action::OpenFile => self.spawn_open(ctx),
             Action::SaveSelected => {
                 if let Some(champ) = self.selected.and_then(|i| self.championships.get(i)).cloned() {
@@ -247,6 +251,31 @@ impl ChampionshipsPage {
         Ok(format!("Added round {number} at {track}."))
     }
 
+    fn spawn_server_results(&mut self, ctx: &egui::Context) {
+        self.dialog_open = true;
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            let message = match rfd::FileDialog::new().add_filter("Server result", &["json"]).pick_file() {
+                None => Msg::Done { loaded: None, notice: None },
+                Some(path) => {
+                    let race = std::fs::read_to_string(&path)
+                        .map_err(|e| e.to_string())
+                        .and_then(|text| championship::import_server_results(&text).map_err(|e| e.to_string()));
+                    match race {
+                        Ok(race) => Msg::Results(race),
+                        Err(e) => {
+                            let text = format!("Could not read {}: {e}", path.display());
+                            Msg::Done { loaded: None, notice: Some(Notice { text, ok: false }) }
+                        }
+                    }
+                }
+            };
+            let _ = tx.send(message);
+            ctx.request_repaint();
+        });
+    }
+
     fn spawn_open(&mut self, ctx: &egui::Context) {
         self.dialog_open = true;
         let tx = self.tx.clone();
@@ -292,8 +321,16 @@ impl ChampionshipsPage {
     }
 
     fn poll(&mut self, notices: &mut Vec<Notice>) {
-        while let Ok(Msg::Done { loaded, notice }) = self.rx.try_recv() {
+        while let Ok(message) = self.rx.try_recv() {
             self.dialog_open = false;
+            let (loaded, notice) = match message {
+                Msg::Done { loaded, notice } => (loaded, notice),
+                Msg::Results(race) => {
+                    let text = format!("Read the race at {}. Check it, then add the round.", race.track);
+                    self.round = RoundForm { track: race.track, layout: race.layout, csv: race.csv };
+                    (None, Some(Notice { text, ok: true }))
+                }
+            };
             if let Some(champ) = loaded {
                 self.championships.push(champ);
                 self.selected = Some(self.championships.len() - 1);
@@ -403,9 +440,18 @@ fn detail(ui: &mut egui::Ui, champ: &Championship, form: &mut RoundForm, actions
             .desired_rows(6)
             .desired_width(520.0),
     );
-    if ui.add(widgets::primary_button("Add round")).clicked() {
-        actions.push(Action::AddRound);
-    }
+    ui.horizontal(|ui| {
+        if ui.add(widgets::primary_button("Add round")).clicked() {
+            actions.push(Action::AddRound);
+        }
+        if ui
+            .button("Load server result file")
+            .on_hover_text("Fills the form from a results\*.json of a dedicated server.")
+            .clicked()
+        {
+            actions.push(Action::LoadServerResults);
+        }
+    });
 }
 
 fn standings_grid(ui: &mut egui::Ui, rows: &[Standing]) {

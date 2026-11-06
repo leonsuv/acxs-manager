@@ -728,3 +728,93 @@ mod tests {
         assert!(matches!(import_results_csv("driver,position\n\n"), Err(ChampionshipError::Invalid(_))));
     }
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ServerResultFile {
+    #[serde(default)]
+    track_name: String,
+    #[serde(default)]
+    track_config: String,
+    #[serde(default)]
+    result: Vec<ServerResultRow>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ServerResultRow {
+    #[serde(default)]
+    driver_name: String,
+    #[serde(default)]
+    best_lap: u64,
+    #[serde(default)]
+    total_time: u64,
+}
+
+/// A race from a dedicated server's `results\*.json`, as the page's form takes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerRace {
+    pub track: String,
+    pub layout: String,
+    /// Rows for [`import_results_csv`].
+    pub csv: String,
+}
+
+/// `BestLap` of a driver who never set a lap.
+const NO_LAP: u64 = 999_999_999;
+
+/// Reads a dedicated server result file. Its `Result` list is in finishing order. Empty grid
+/// slots have no driver name; a driver with no total time did not finish.
+pub fn import_server_results(json: &str) -> Result<ServerRace, ChampionshipError> {
+    let file: ServerResultFile = serde_json::from_str(json)
+        .map_err(|e| ChampionshipError::Invalid(format!("not a server result file: {e}")))?;
+    let mut seen = HashSet::new();
+    let rows: Vec<&ServerResultRow> = file
+        .result
+        .iter()
+        .filter(|row| !row.driver_name.trim().is_empty() && seen.insert(row.driver_name.trim()))
+        .collect();
+    if rows.is_empty() {
+        return Err(ChampionshipError::Invalid("the result file has no drivers".into()));
+    }
+    let set_lap = |row: &&&ServerResultRow| row.best_lap > 0 && row.best_lap < NO_LAP;
+    let fastest = rows.iter().filter(set_lap).map(|row| row.best_lap).min();
+    let mut csv = String::from("driver,position,fastest_lap,dnf\n");
+    for (index, row) in rows.iter().enumerate() {
+        let name = row.driver_name.trim().replace(',', " ");
+        let quickest = if set_lap(&row) && Some(row.best_lap) == fastest { "yes" } else { "no" };
+        let dnf = if row.total_time == 0 { "yes" } else { "no" };
+        csv.push_str(&format!("{name},{},{quickest},{dnf}\n", index + 1));
+    }
+    Ok(ServerRace { track: file.track_name, layout: file.track_config, csv })
+}
+
+#[cfg(test)]
+mod server_result_tests {
+    use super::*;
+
+    const FILE: &str = r#"{"TrackName":"monza","TrackConfig":"","Type":"RACE","Result":[
+        {"DriverName":"Ann, A.","DriverGuid":"1","CarId":0,"CarModel":"c","BestLap":90000,"TotalTime":600000,"BallastKG":0},
+        {"DriverName":"Bob","DriverGuid":"2","CarId":1,"CarModel":"c","BestLap":89000,"TotalTime":601000,"BallastKG":0},
+        {"DriverName":"Cid","DriverGuid":"3","CarId":2,"CarModel":"c","BestLap":999999999,"TotalTime":0,"BallastKG":0},
+        {"DriverName":"","DriverGuid":"","CarId":3,"CarModel":"c","BestLap":999999999,"TotalTime":0,"BallastKG":0}
+    ],"Laps":[],"Events":[]}"#;
+
+    #[test]
+    fn a_server_result_file_becomes_a_scored_round() {
+        let race = import_server_results(FILE).unwrap();
+        assert_eq!(race.track, "monza");
+        let round = import_results_csv(&race.csv).unwrap();
+        assert_eq!(round.results.len(), 3);
+        assert_eq!(round.results[0].driver, "Ann  A.");
+        assert_eq!(round.results[0].position, 1);
+        assert!(round.results[1].fastest_lap && !round.results[0].fastest_lap);
+        assert!(round.results[2].dnf && !round.results[2].fastest_lap);
+    }
+
+    #[test]
+    fn other_json_is_refused() {
+        assert!(import_server_results("{}").is_err());
+        assert!(import_server_results("not json").is_err());
+    }
+}

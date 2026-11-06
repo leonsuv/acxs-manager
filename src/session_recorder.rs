@@ -214,6 +214,8 @@ impl RecordedSession {
 const BALANCE_MIN_G: f32 = 0.7;
 /// Beyond this no tyre is cornering: it is an impact or a physics spike.
 const BALANCE_MAX_G: f32 = 5.0;
+/// Largest steering change per sample (about 30 Hz) that still counts as holding a corner.
+const STEADY_STEER_STEP: f32 = 0.03;
 /// Speed band, km/h, for learning the steering-to-yaw gain at low load.
 const CAL_SPEED: (f32, f32) = (15.0, 120.0);
 /// Lateral g below which the car is assumed to steer neutrally while calibrating.
@@ -236,6 +238,7 @@ pub struct Balance {
     sum_xy: f64,
     sum_xx: f64,
     samples: u32,
+    last_steer: Option<f32>,
 }
 
 /// Verdict for one sample.
@@ -258,13 +261,16 @@ impl Balance {
         if v < 1.0 || steer.abs() < 1e-3 {
             return None;
         }
+        // While the wheel is moving the car has not caught up yet; that says nothing about balance.
+        let steady = self.last_steer.is_some_and(|last| (last - steer).abs() <= STEADY_STEER_STEP);
+        self.last_steer = Some(steer);
         let (x, y) = (f64::from(steer), f64::from(yaw_rate) / v);
         if (CAL_SPEED.0..=CAL_SPEED.1).contains(&speed_kmh) && lateral_g.abs() < CAL_MAX_G && steer.abs() > 0.01 {
             self.sum_xy += x * y;
             self.sum_xx += x * x;
             self.samples = self.samples.saturating_add(1);
         }
-        if self.samples < CAL_SAMPLES || self.sum_xx <= 0.0 || speed_kmh < 60.0 || !(BALANCE_MIN_G..=BALANCE_MAX_G).contains(&lateral_g.abs()) {
+        if !steady || self.samples < CAL_SAMPLES || self.sum_xx <= 0.0 || speed_kmh < 60.0 || !(BALANCE_MIN_G..=BALANCE_MAX_G).contains(&lateral_g.abs()) {
             return None;
         }
         let gain = self.sum_xy / self.sum_xx;
@@ -319,6 +325,7 @@ pub struct SessionAggregator {
     hot: std::collections::BTreeMap<(u8, EventKind), f64>,
     path_sum: Vec<[f64; 3]>,
     trace_gap: f64,
+    trace_step: f64,
     last_xz: Option<(f32, f32)>,
     points: std::collections::BTreeMap<(EventKind, i32, i32), (f32, f32, f64)>,
     started: bool,
@@ -419,7 +426,17 @@ impl SessionAggregator {
     fn add_trace(&mut self, here: Option<(f32, f32)>, metres: f64) {
         let Some(here) = here else { return };
         self.trace_gap += metres;
-        if (self.last_xz.is_none() || self.trace_gap >= TRACE_STEP_M) && self.session.trace.len() < TRACE_MAX {
+        let step = self.trace_step.max(TRACE_STEP_M);
+        if self.last_xz.is_none() || self.trace_gap >= step {
+            // A long drive thins the trace instead of ending it, so the whole drive stays on the map.
+            if self.session.trace.len() >= TRACE_MAX {
+                let mut keep = false;
+                self.session.trace.retain(|_| {
+                    keep = !keep;
+                    keep
+                });
+                self.trace_step = step * 2.0;
+            }
             self.session.trace.push(here);
             self.trace_gap = 0.0;
         }
@@ -544,15 +561,37 @@ pub fn sessions_dir() -> PathBuf {
     crate::settings::settings_path().parent().map_or_else(|| PathBuf::from("sessions"), |dir| dir.join("sessions"))
 }
 
+fn session_file(dir: &Path, session: &RecordedSession) -> PathBuf {
+    let stamp: String = session.started_at.chars().filter(char::is_ascii_digit).collect();
+    let car: String = session.car_id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+    dir.join(format!("{stamp}-{car}.json"))
+}
+
 /// Writes the session as `<started_at>-<car>.json` and returns the path.
 pub fn save(dir: &Path, session: &RecordedSession) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
-    let stamp: String = session.started_at.chars().filter(char::is_ascii_digit).collect();
-    let car: String = session.car_id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
-    let path = dir.join(format!("{stamp}-{car}.json"));
+    let path = session_file(dir, session);
     let json = serde_json::to_string(session).map_err(std::io::Error::other)?;
     std::fs::write(&path, json)?;
     Ok(path)
+}
+
+/// Removes the file of a saved session.
+pub fn delete(dir: &Path, session: &RecordedSession) -> std::io::Result<()> {
+    std::fs::remove_file(session_file(dir, session))
+}
+
+/// For each point of a trace, whether the line starts anew there. The trace is sampled by
+/// distance, so a step far beyond the usual one means the car was moved (pits, reset).
+pub fn trace_breaks(trace: &[(f32, f32)]) -> Vec<bool> {
+    let step = |a: (f32, f32), b: (f32, f32)| (b.0 - a.0).hypot(b.1 - a.1);
+    let mut steps: Vec<f32> = trace.windows(2).map(|w| step(w[0], w[1])).collect();
+    steps.sort_by(f32::total_cmp);
+    let limit = (steps.get(steps.len() / 2).copied().unwrap_or(0.0) * 6.0).max(60.0);
+    let mut breaks = vec![true];
+    breaks.extend(trace.windows(2).map(|w| step(w[0], w[1]) > limit));
+    breaks.truncate(trace.len());
+    breaks
 }
 
 /// Loads every readable session file in `dir`, oldest first. Unreadable files are skipped.
@@ -584,6 +623,11 @@ pub fn spawn(control: Arc<RecorderControl>, on_saved: impl Fn() + Send + 'static
     std::thread::Builder::new()
         .name("session-recorder".into())
         .spawn(move || {
+            // Drives made while ACXS was closed: their replays may still be in the game's folder.
+            if let Some(docs) = crate::settings::ac_documents_dir() {
+                let month = std::time::SystemTime::now() - Duration::from_secs(30 * 24 * 3600);
+                let _ = archive_replays(&docs.join("replay").join("temp"), &replay_archive_dir(), month);
+            }
             let counter = Arc::clone(&control);
             run(&control, &|| {
                 counter.saved.fetch_add(1, Ordering::Relaxed);
@@ -904,6 +948,10 @@ mod tests {
         assert_eq!(b.sample(v, 0.3, ideal, 1.2), Some(Handling::Neutral));
         assert_eq!(b.sample(v, 0.3, ideal * 0.6, 1.2), Some(Handling::Understeer));
         assert_eq!(b.sample(v, 0.3, ideal * 1.5, 1.2), Some(Handling::Oversteer));
+        // A moving wheel is not judged, and neither is the first sample after it.
+        assert_eq!(b.sample(v, 0.5, ideal, 1.2), None);
+        assert_eq!(b.sample(v, 0.3, ideal, 1.2), None);
+        b.sample(v, 0.3, ideal, 1.2);
         // Too gentle a corner is not judged.
         assert_eq!(b.sample(v, 0.3, ideal * 0.6, 0.3), None);
     }
@@ -1186,9 +1234,12 @@ pub fn log_line(text: &str) {
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("recorder.log");
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > 64 * 1024)
-        && let Ok(old) = std::fs::read_to_string(&path)
+        && let Ok(old) = std::fs::read(&path)
     {
-        let _ = std::fs::write(&path, &old[old.len() / 2..]);
+        // Cut as bytes at a line start: car names need not be ASCII.
+        let half = &old[old.len() / 2..];
+        let start = half.iter().position(|b| *b == b'\n').map_or(0, |i| i + 1);
+        let _ = std::fs::write(&path, &half[start..]);
     }
     let line = format!("{}  {text}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
@@ -1282,6 +1333,7 @@ mod real_drive_tests {
         }
         let v = 100.0_f32;
         let ideal = 0.1 * 0.3 * (v / 3.6);
+        b.sample(v, 0.3, ideal, 0.1);
         assert_eq!(b.sample(v, 0.3, -ideal, 1.2), Some(Handling::Oversteer));
         assert_eq!(b.sample(v, 0.3, ideal, 40.0), None);
     }
@@ -1298,5 +1350,80 @@ mod real_drive_tests {
         assert!(agg.other_session(&race));
         s.static_page.car_model = "other".into();
         assert!(agg.other_session(&s));
+    }
+}
+
+#[cfg(test)]
+mod trace_tests {
+    use super::*;
+
+    #[test]
+    fn a_long_drive_stays_on_the_map_whole() {
+        let mut agg = SessionAggregator::new(String::new());
+        // Three times as long as the plain trace can hold, ten metres at a time.
+        for i in 0..(TRACE_MAX * 3) {
+            agg.add_trace(Some((i as f32 * 10.0, 0.0)), 10.0);
+        }
+        let trace = &agg.session.trace;
+        assert!(trace.len() <= TRACE_MAX + 1);
+        assert!(trace.last().unwrap().0 >= (TRACE_MAX * 3 - 100) as f32 * 10.0, "the end of the drive is there");
+        assert_eq!(trace[0].0, 0.0);
+    }
+
+    #[test]
+    fn a_reset_cuts_the_line_and_normal_steps_do_not() {
+        let trace: Vec<(f32, f32)> = (0..50).map(|i| (i as f32 * 8.0, 0.0)).chain([(5000.0, 5000.0), (5008.0, 5000.0)]).collect();
+        let breaks = trace_breaks(&trace);
+        assert_eq!(breaks.len(), trace.len());
+        assert_eq!(breaks.iter().filter(|b| **b).count(), 2);
+        assert!(breaks[0] && breaks[50]);
+        assert!(trace_breaks(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_saved_session_can_be_deleted() {
+        let dir = std::env::temp_dir().join(format!("acxs-del-{}", std::process::id()));
+        let session = RecordedSession { car_id: "c".into(), started_at: "2026-11-01T10:00:00".into(), ..RecordedSession::default() };
+        save(&dir, &session).unwrap();
+        assert_eq!(load_all(&dir).len(), 1);
+        delete(&dir, &session).unwrap();
+        assert!(load_all(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+/// Understeer or oversteer shorter than this in one place, in tenths of a second, is a flicker.
+const MIN_TIMED_SPOT: u32 = 5;
+
+impl RecordedSession {
+    /// The events worth a dot on a trace map, strongest first. Single events always qualify;
+    /// understeer and oversteer only when they lasted in one place.
+    pub fn map_points(&self, limit: usize) -> Vec<EventPoint> {
+        let score = |p: &EventPoint| if p.kind.is_timed() { p.count } else { p.count.saturating_mul(20) };
+        let mut points: Vec<EventPoint> =
+            self.event_points.iter().copied().filter(|p| !p.kind.is_timed() || p.count >= MIN_TIMED_SPOT).collect();
+        points.sort_by_key(|p| std::cmp::Reverse(score(p)));
+        points.truncate(limit);
+        points
+    }
+}
+
+#[cfg(test)]
+mod map_point_tests {
+    use super::*;
+
+    #[test]
+    fn flickers_stay_off_the_map_and_crashes_stay_on() {
+        let point = |kind, count| EventPoint { kind, x: 0.0, z: 0.0, count };
+        let mut event_points = vec![point(EventKind::Oversteer, 2); 800];
+        event_points.push(point(EventKind::Crash, 1));
+        event_points.push(point(EventKind::Oversteer, 30));
+        event_points.push(point(EventKind::Understeer, 5));
+        let s = RecordedSession { event_points, ..RecordedSession::default() };
+        let shown = s.map_points(40);
+        assert_eq!(shown.len(), 3);
+        assert_eq!(shown[0].count, 30);
+        assert_eq!(shown[1].kind, EventKind::Crash);
+        assert_eq!(s.map_points(1).len(), 1);
     }
 }

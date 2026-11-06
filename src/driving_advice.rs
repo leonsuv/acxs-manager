@@ -11,8 +11,9 @@ use crate::session_recorder::RecordedSession;
 const MIN_CORNERING_S: f64 = 60.0;
 /// Driving minutes needed per car before lock-up and wheelspin advice is given.
 const MIN_MINUTES: f64 = 15.0;
-/// Share of judged cornering time in under- or oversteer that triggers advice.
-const BALANCE_SHARE: f64 = 0.25;
+/// Share of judged cornering time in under- or oversteer that triggers advice. Normal driving on
+/// real roads measured 18 to 36%, so only a clear lean counts.
+const BALANCE_SHARE: f64 = 0.35;
 /// Events per 10 driving minutes that trigger advice.
 const LOCKUPS_PER_10_MIN: f64 = 3.0;
 const WHEELSPINS_PER_10_MIN: f64 = 4.0;
