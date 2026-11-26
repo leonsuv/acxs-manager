@@ -212,8 +212,8 @@ pub(super) fn show(ui: &mut egui::Ui, input: &DetailIn, edit: &mut Edit) -> Vec<
         }
         if !problems.is_empty() {
             ui.add_space(6.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(6.0, 5.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
                 for (problem, color) in &problems {
                     status_badge(ui, problem, *color);
                 }

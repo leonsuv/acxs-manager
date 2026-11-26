@@ -1202,64 +1202,82 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     let mut sort_click: Option<usize> = None;
     let mut join_request: Option<JoinRequest> = None;
 
-    // Detail panel for the selected server — rendered FIRST so egui reserves the exact right-pane
-    // width before the server list table lays out in the remaining space.
+    // Explicit, zero-overlap 2-pane split: server list on the left, detail panel on the right.
+    // Both panes are strictly clipped and bounded to their exact allocated rects so columns can
+    // never bleed across the divider at any window width.
     let selected = sv.selected.clone();
     let mut panel_edit: Option<(String, Option<String>, Option<String>, String, String, String, bool)> = None;
     let mut panel_actions: Vec<detail::Action> = Vec::new();
     let mut panel_key = String::new();
-    let detail_resp = egui::Panel::right("server_detail_panel")
-        .resizable(true)
-        .default_size(420.0)
-        .size_range(340.0..=540.0)
-        .frame(
+    let full = ui.available_rect_before_wrap();
+    let gap = 14.0;
+    let detail_w = (full.width() * 0.33)
+        .clamp(360.0, 480.0)
+        .min((full.width() - 320.0).max(260.0));
+    let table_w = (full.width() - detail_w - gap).max(200.0);
+    let table_rect = Rect::from_min_size(full.min, vec2(table_w, full.height().max(1.0)));
+    let detail_rect = Rect::from_min_size(
+        egui::pos2(table_rect.max.x + gap, full.min.y),
+        vec2(detail_w, full.height().max(1.0)),
+    );
+
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(detail_rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+        |ui| {
+            ui.set_clip_rect(ui.clip_rect().intersect(detail_rect));
             egui::Frame::new()
                 .fill(theme::SIDEBAR)
                 .stroke(egui::Stroke::new(1.0, theme::BORDER))
                 .corner_radius(CornerRadius::same(theme::RADIUS))
-                .inner_margin(egui::Margin::same(14)),
-        )
-        .show(ui, |ui| {
-            let Some(entry) = selected.as_ref().and_then(|key| sv.entry_for(key)) else {
-                widgets::empty_state(ui, "Select a server to see its cars and join it.");
-                return;
-            };
-            let key = entry.key();
-            let watching_slot = sv.slot_watch.as_ref().is_some_and(|w| w.entry.key() == key);
-            let download_progress = sv
-                .download_ui
-                .as_ref()
-                .and_then(|d| d.progress.lock().ok().map(|s| s.clone()));
-            let booking_status = sv.booking_status.get(&key).cloned();
-            let input = detail::DetailIn {
-                entry: &entry,
-                live: sv.live.get(&key).cloned().unwrap_or_default(),
-                lobby: sv.lobby.get(&key),
-                in_list: sv.entries.iter().any(|e| e.key() == key),
-                tracks: &tracks,
-                cars: &cars_local,
-                installed_csp_build,
-                game_running: app.snapshot.game_running,
-                watching_slot,
-                download_progress,
-                booking_status,
-            };
-            let (mut pick_model, mut pick_skin) = (sv.pick_model.clone(), sv.pick_skin.clone());
-            let (mut driver, mut password, mut car_query) = (sv.driver.clone(), sv.password.clone(), sv.car_query.clone());
-            let mut installed_only = sv.installed_only;
-            let mut edit = detail::Edit {
-                pick_model: &mut pick_model,
-                pick_skin: &mut pick_skin,
-                driver: &mut driver,
-                password: &mut password,
-                car_query: &mut car_query,
-                installed_only: &mut installed_only,
-            };
-            panel_actions = detail::show(ui, &input, &mut edit);
-            panel_key = key;
-            panel_edit = Some((String::new(), pick_model, pick_skin, driver, password, car_query, installed_only));
-        });
-    let detail_rect = detail_resp.response.rect;
+                .inner_margin(egui::Margin::same(14))
+                .show(ui, |ui| {
+                    let inner_w = (detail_w - 28.0).max(160.0);
+                    ui.set_width(inner_w);
+                    ui.set_max_width(inner_w);
+                    ui.set_min_height((detail_rect.height() - 28.0).max(120.0));
+                    let Some(entry) = selected.as_ref().and_then(|key| sv.entry_for(key)) else {
+                        widgets::empty_state(ui, "Select a server to see its cars and join it.");
+                        return;
+                    };
+                    let key = entry.key();
+                    let watching_slot = sv.slot_watch.as_ref().is_some_and(|w| w.entry.key() == key);
+                    let download_progress = sv
+                        .download_ui
+                        .as_ref()
+                        .and_then(|d| d.progress.lock().ok().map(|s| s.clone()));
+                    let booking_status = sv.booking_status.get(&key).cloned();
+                    let input = detail::DetailIn {
+                        entry: &entry,
+                        live: sv.live.get(&key).cloned().unwrap_or_default(),
+                        lobby: sv.lobby.get(&key),
+                        in_list: sv.entries.iter().any(|e| e.key() == key),
+                        tracks: &tracks,
+                        cars: &cars_local,
+                        installed_csp_build,
+                        game_running: app.snapshot.game_running,
+                        watching_slot,
+                        download_progress,
+                        booking_status,
+                    };
+                    let (mut pick_model, mut pick_skin) = (sv.pick_model.clone(), sv.pick_skin.clone());
+                    let (mut driver, mut password, mut car_query) = (sv.driver.clone(), sv.password.clone(), sv.car_query.clone());
+                    let mut installed_only = sv.installed_only;
+                    let mut edit = detail::Edit {
+                        pick_model: &mut pick_model,
+                        pick_skin: &mut pick_skin,
+                        driver: &mut driver,
+                        password: &mut password,
+                        car_query: &mut car_query,
+                        installed_only: &mut installed_only,
+                    };
+                    panel_actions = detail::show(ui, &input, &mut edit);
+                    panel_key = key;
+                    panel_edit = Some((String::new(), pick_model, pick_skin, driver, password, car_query, installed_only));
+                });
+        },
+    );
     if let Some((_, pick_model, pick_skin, driver, password, car_query, installed_only)) = panel_edit {
         if let Some(model) = &pick_model {
             sv.picks.insert(panel_key.clone(), (model.clone(), pick_skin.clone().unwrap_or_default()));
@@ -1390,16 +1408,17 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         }
     }
 
-    // The table — strictly isolated to the remaining area left of `detail_rect` and clipped so
+    // The table — strictly isolated to `table_rect` left of `detail_rect` and clipped so
     // PLAYERS / PING can NEVER bleed over the right-hand detail panel at any window width.
     let current = sv.selected.clone();
     let live_map = &sv.live;
     let live_map_lobby = &sv.lobby;
-    let avail = ui.available_rect_before_wrap();
-    let right_limit = (detail_rect.left() - 10.0).min(avail.max.x);
-    let table_rect = Rect::from_min_max(avail.min, egui::pos2(right_limit.max(avail.min.x + 1.0), avail.max.y));
 
-    ui.scope_builder(egui::UiBuilder::new().max_rect(table_rect), |ui| {
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(table_rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+        |ui| {
         ui.set_clip_rect(ui.clip_rect().intersect(table_rect));
         let width = table_rect.width().max(1.0);
         let cols = compute_table_columns(width);

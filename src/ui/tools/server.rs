@@ -250,20 +250,28 @@ impl Tool for ServerPage {
                         let (left_w, right_w) = split_widths(ui, 0.52);
                         ui.horizontal_top(|ui| {
                             ui.spacing_mut().item_spacing.x = 16.0;
-                            ui.allocate_ui(egui::vec2(left_w, 0.0), |ui| {
-                                ui.set_width(left_w);
-                                self.server_card(ui, &mut action);
-                                self.extended_config_cards(ui, notices);
-                                self.problem_list(ui);
-                                ui.add_space(8.0);
-                                self.action_bar(ui, &mut action);
-                            });
-                            ui.allocate_ui(egui::vec2(right_w, 0.0), |ui| {
-                                ui.set_width(right_w);
-                                self.process_card(ui, &mut action);
-                                ui.add_space(10.0);
-                                self.live_card(ui, &egui_ctx);
-                            });
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(left_w, 0.0),
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| {
+                                    ui.set_width(left_w);
+                                    self.server_card(ui, &mut action);
+                                    self.extended_config_cards(ui, notices);
+                                    self.problem_list(ui);
+                                    ui.add_space(8.0);
+                                    self.action_bar(ui, &mut action);
+                                },
+                            );
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(right_w, 0.0),
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| {
+                                    ui.set_width(right_w);
+                                    self.process_card(ui, &mut action);
+                                    ui.add_space(10.0);
+                                    self.live_card(ui, &egui_ctx);
+                                },
+                            );
                         });
                     } else {
                         self.process_card(ui, &mut action);
@@ -1052,14 +1060,22 @@ impl ServerPage {
             let (left_w, right_w) = split_widths(ui, 0.5);
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 16.0;
-                ui.allocate_ui(egui::vec2(left_w, 0.0), |ui| {
-                    ui.set_width(left_w);
-                    self.csp_options_card(ui, notices);
-                });
-                ui.allocate_ui(egui::vec2(right_w, 0.0), |ui| {
-                    ui.set_width(right_w);
-                    self.extra_cfg_yml_card(ui, notices);
-                });
+                ui.allocate_ui_with_layout(
+                    egui::vec2(left_w, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(left_w);
+                        self.csp_options_card(ui, notices);
+                    },
+                );
+                ui.allocate_ui_with_layout(
+                    egui::vec2(right_w, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(right_w);
+                        self.extra_cfg_yml_card(ui, notices);
+                    },
+                );
             });
         } else {
             self.csp_options_card(ui, notices);
@@ -1258,16 +1274,24 @@ impl ServerPage {
             let (left_w, right_w) = split_widths(ui, 0.56);
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 16.0;
-                ui.allocate_ui(egui::vec2(left_w, 0.0), |ui| {
-                    ui.set_width(left_w);
-                    self.rcon_control_card(ui, ctx, notices);
-                });
-                ui.allocate_ui(egui::vec2(right_w, 0.0), |ui| {
-                    ui.set_width(right_w);
-                    self.spectator_card(ui, notices);
-                    ui.add_space(10.0);
-                    self.rcon_log_card(ui);
-                });
+                ui.allocate_ui_with_layout(
+                    egui::vec2(left_w, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(left_w);
+                        self.rcon_control_card(ui, ctx, notices);
+                    },
+                );
+                ui.allocate_ui_with_layout(
+                    egui::vec2(right_w, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(right_w);
+                        self.spectator_card(ui, notices);
+                        ui.add_space(10.0);
+                        self.rcon_log_card(ui);
+                    },
+                );
             });
         } else {
             self.rcon_control_card(ui, ctx, notices);
