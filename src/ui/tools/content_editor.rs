@@ -9,9 +9,13 @@ use super::{Tool, ToolContext};
 use crate::ui::theme::{self, DANGER, INFO, MUTED, OK, WARN};
 use crate::ui::{widgets, Notice};
 use acxs_manager::content::{filter_cars, filter_tracks, scan_cars, scan_tracks, CarEntry, TrackEntry};
-use acxs_manager::content_meta::{patch_car_meta, patch_track_meta, CarMeta, TrackMeta};
+use acxs_manager::content_meta::{
+    apply_track_patch, patch_car_meta, patch_track_meta, read_track_layout_meta,
+    save_track_layout_meta, CarMeta, TrackMeta,
+};
 use acxs_manager::content_repair::{
-    apply_repairs, check_all, plan_repairs, summary, Issue, Repair, RepairReport, Severity,
+    apply_repairs, check_all, plan_extended_repairs, summary, Issue, Repair, RepairAction,
+    RepairReport, Severity,
 };
 use eframe::egui::{self, Color32, RichText};
 use std::path::{Path, PathBuf};
@@ -60,16 +64,30 @@ impl Mode {
     }
 }
 
-/// Editable copy of the metadata. Cars use name/brand/class/year; tracks use name/city/country/description.
+/// Editable copy of the metadata. Exposes full CarMeta / TrackMeta fields.
 #[derive(Clone, Default)]
 struct Form {
     name: String,
     brand: String,
     class: String,
     year: String,
+    tags: String,
+    spec_bhp: String,
+    spec_torque: String,
+    spec_weight: String,
+    spec_topspeed: String,
+    spec_accel: String,
+    spec_pwratio: String,
     city: String,
     country: String,
+    author: String,
+    version: String,
+    length_m: String,
+    pitboxes: String,
     description: String,
+    /// Selected track layout (None = root `ui/ui_track.json`).
+    layout: Option<String>,
+    layouts: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -429,11 +447,50 @@ impl MetadataChecks {
                         field(ui, "Brand", &mut form.brand);
                         field(ui, "Class", &mut form.class);
                         field(ui, "Year", &mut form.year);
+                        field(ui, "Tags (comma-separated)", &mut form.tags);
+                        text_area(ui, "Description", &mut form.description);
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("Specs").small().strong().color(MUTED));
+                        ui.columns(2, |cols| {
+                            field(&mut cols[0], "Power (bhp)", &mut form.spec_bhp);
+                            field(&mut cols[1], "Torque (Nm)", &mut form.spec_torque);
+                            field(&mut cols[0], "Weight (kg)", &mut form.spec_weight);
+                            field(&mut cols[1], "Top speed", &mut form.spec_topspeed);
+                            field(&mut cols[0], "0-100 km/h", &mut form.spec_accel);
+                            field(&mut cols[1], "Weight/power", &mut form.spec_pwratio);
+                        });
                     }
                     Mode::Tracks => {
+                        if !form.layouts.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Layout").small().color(MUTED));
+                                let current = form.layout.as_deref().unwrap_or("(main)");
+                                egui::ComboBox::from_id_salt("meta_track_layout")
+                                    .selected_text(current)
+                                    .show_ui(ui, |ui| {
+                                        if ui.selectable_label(form.layout.is_none(), "(main)").clicked() {
+                                            form.layout = None;
+                                        }
+                                        for l in &form.layouts {
+                                            let selected = form.layout.as_deref() == Some(l.as_str());
+                                            if ui.selectable_label(selected, l).clicked() {
+                                                form.layout = Some(l.clone());
+                                            }
+                                        }
+                                    });
+                            });
+                            ui.add_space(6.0);
+                        }
                         field(ui, "Name", &mut form.name);
-                        field(ui, "City", &mut form.city);
-                        field(ui, "Country", &mut form.country);
+                        ui.columns(2, |cols| {
+                            field(&mut cols[0], "City", &mut form.city);
+                            field(&mut cols[1], "Country", &mut form.country);
+                            field(&mut cols[0], "Author", &mut form.author);
+                            field(&mut cols[1], "Version", &mut form.version);
+                            field(&mut cols[0], "Length (m)", &mut form.length_m);
+                            field(&mut cols[1], "Pitboxes", &mut form.pitboxes);
+                        });
+                        field(ui, "Tags (comma-separated)", &mut form.tags);
                         text_area(ui, "Description", &mut form.description);
                     }
                 });
@@ -445,6 +502,26 @@ impl MetadataChecks {
                         .clicked()
                     {
                         save_clicked = true;
+                    }
+                    if sel.mode == Mode::Cars
+                        && ui
+                            .add_enabled(sel.ready && !saving, egui::Button::new("Recalculate specs from data/"))
+                            .clicked()
+                    {
+                        let repair = Repair {
+                            description: format!("Recalculate specs for {}", sel.id),
+                            path: sel.path.join("ui").join("ui_car.json"),
+                            action: RepairAction::RecalculateCarSpecs,
+                        };
+                        if let Some(root) = sel.path.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
+                            let rep = apply_repairs(root, &[repair]);
+                            notices.push(repair_notice(&rep));
+                            if rep.failed.is_empty()
+                                && let Ok(reloaded) = load(Mode::Cars, &sel.path)
+                            {
+                                *form = reloaded;
+                            }
+                        }
                     }
                     if saving {
                         ui.label(RichText::new("Saving...").color(MUTED));
@@ -485,30 +562,75 @@ impl MetadataChecks {
                         }
                     }
                 };
+                let tags: Vec<String> = form
+                    .tags
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let mut specs = std::collections::BTreeMap::new();
+                for (k, v) in [
+                    ("bhp", &form.spec_bhp),
+                    ("torque", &form.spec_torque),
+                    ("weight", &form.spec_weight),
+                    ("topspeed", &form.spec_topspeed),
+                    ("acceleration", &form.spec_accel),
+                    ("pwratio", &form.spec_pwratio),
+                ] {
+                    if !v.trim().is_empty() {
+                        specs.insert(k.to_string(), v.trim().to_string());
+                    }
+                }
                 Patch::Car(CarMeta {
                     name: Some(form.name.trim().to_string()),
                     brand: Some(form.brand.trim().to_string()),
                     class: Some(form.class.trim().to_string()),
                     year,
-                    ..CarMeta::default()
+                    tags: Some(tags),
+                    description: Some(form.description.trim().to_string()),
+                    specs: (!specs.is_empty()).then_some(specs),
                 })
             }
-            Mode::Tracks => Patch::Track(TrackMeta {
-                name: Some(form.name.trim().to_string()),
-                city: Some(form.city.trim().to_string()),
-                country: Some(form.country.trim().to_string()),
-                description: Some(form.description.trim().to_string()),
-                ..TrackMeta::default()
-            }),
+            Mode::Tracks => {
+                let tags: Vec<String> = form
+                    .tags
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let length_m = form.length_m.trim().parse::<f64>().ok();
+                let pitboxes = form.pitboxes.trim().parse::<u32>().ok();
+                Patch::Track(TrackMeta {
+                    name: Some(form.name.trim().to_string()),
+                    city: Some(form.city.trim().to_string()),
+                    country: Some(form.country.trim().to_string()),
+                    author: (!form.author.trim().is_empty()).then(|| form.author.trim().to_string()),
+                    version: (!form.version.trim().is_empty()).then(|| form.version.trim().to_string()),
+                    length_m,
+                    pitboxes,
+                    tags: Some(tags),
+                    description: Some(form.description.trim().to_string()),
+                })
+            }
         };
 
         self.saving = true;
         let path = sel.path;
         let id = sel.id;
+        let layout = form.layout;
         spawn(&self.tx, ectx, move || {
             let result = match patch {
                 Patch::Car(p) => patch_car_meta(&path, &p),
-                Patch::Track(p) => patch_track_meta(&path, &p),
+                Patch::Track(p) => match layout {
+                    Some(l) => {
+                        let layout_ui = path.join("ui").join(l);
+                        read_track_layout_meta(&layout_ui).and_then(|mut map| {
+                            apply_track_patch(&mut map, &p);
+                            save_track_layout_meta(&layout_ui, &map)
+                        })
+                    }
+                    None => patch_track_meta(&path, &p),
+                },
             };
             Msg::Saved {
                 id,
@@ -603,7 +725,7 @@ impl MetadataChecks {
         self.planning = true;
         let root = root.to_path_buf();
         spawn(&self.tx, ectx, move || {
-            let repairs = plan_repairs(&root);
+            let repairs = plan_extended_repairs(&root);
             Msg::Planned { root, repairs }
         });
     }
@@ -703,23 +825,50 @@ fn spawn(tx: &Sender<Msg>, ectx: &egui::Context, work: impl FnOnce() -> Msg + Se
 fn load(mode: Mode, dir: &Path) -> Result<Form, String> {
     match mode {
         Mode::Cars => CarMeta::read(dir)
-            .map(|m| Form {
-                name: m.name.unwrap_or_default(),
-                brand: m.brand.unwrap_or_default(),
-                class: m.class.unwrap_or_default(),
-                year: m.year.map(|y| y.to_string()).unwrap_or_default(),
-                ..Form::default()
+            .map(|m| {
+                let spec = |k: &str| {
+                    m.specs
+                        .as_ref()
+                        .and_then(|s| s.get(k))
+                        .cloned()
+                        .unwrap_or_default()
+                };
+                Form {
+                    name: m.name.unwrap_or_default(),
+                    brand: m.brand.unwrap_or_default(),
+                    class: m.class.unwrap_or_default(),
+                    year: m.year.map(|y| y.to_string()).unwrap_or_default(),
+                    tags: m.tags.unwrap_or_default().join(", "),
+                    description: m.description.unwrap_or_default(),
+                    spec_bhp: spec("bhp"),
+                    spec_torque: spec("torque"),
+                    spec_weight: spec("weight"),
+                    spec_topspeed: spec("topspeed"),
+                    spec_accel: spec("acceleration"),
+                    spec_pwratio: spec("pwratio"),
+                    ..Form::default()
+                }
             })
             .map_err(|e| format!("Could not read ui/ui_car.json: {e}")),
-        Mode::Tracks => TrackMeta::read(dir)
-            .map(|m| Form {
-                name: m.name.unwrap_or_default(),
-                city: m.city.unwrap_or_default(),
-                country: m.country.unwrap_or_default(),
-                description: m.description.unwrap_or_default(),
-                ..Form::default()
-            })
-            .map_err(|e| format!("Could not read ui/ui_track.json: {e}")),
+        Mode::Tracks => {
+            let layouts = acxs_manager::content::track_layouts(dir);
+            TrackMeta::read(dir)
+                .map(|m| Form {
+                    name: m.name.unwrap_or_default(),
+                    city: m.city.unwrap_or_default(),
+                    country: m.country.unwrap_or_default(),
+                    author: m.author.unwrap_or_default(),
+                    version: m.version.unwrap_or_default(),
+                    length_m: m.length_m.map(|v| format!("{v:.0}")).unwrap_or_default(),
+                    pitboxes: m.pitboxes.map(|v| v.to_string()).unwrap_or_default(),
+                    tags: m.tags.unwrap_or_default().join(", "),
+                    description: m.description.unwrap_or_default(),
+                    layout: None,
+                    layouts,
+                    ..Form::default()
+                })
+                .map_err(|e| format!("Could not read ui/ui_track.json: {e}"))
+        }
     }
 }
 

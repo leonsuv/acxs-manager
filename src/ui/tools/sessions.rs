@@ -4,9 +4,13 @@ use super::names::Names;
 use super::{Tool, ToolContext};
 use crate::ui::{theme, widgets, Notice};
 use acxs_manager::collision_app;
+use acxs_manager::corner_coach;
+use acxs_manager::delta;
 use acxs_manager::driving_advice;
 use acxs_manager::laptimes::format_lap;
+use acxs_manager::overlay_app::{self, CoachState};
 use acxs_manager::session_recorder::{self, EventKind, RecordedSession};
+use acxs_manager::settings;
 use acxs_manager::track_map::project_lap;
 use eframe::egui::{self, RichText};
 use std::sync::{Arc, Mutex};
@@ -242,11 +246,11 @@ fn session_row(ui: &mut egui::Ui, s: &RecordedSession, names: &Names, selected: 
 }
 
 fn stat_tile(ui: &mut egui::Ui, label: &str, value: &str) {
-    theme::card().inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
+    theme::card_elevated().inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = 2.0;
         ui.label(RichText::new(label).size(11.5).color(theme::MUTED));
-        ui.add(egui::Label::new(RichText::new(value).font(theme::bold(18.0))).truncate());
+        ui.add(egui::Label::new(RichText::new(value).font(theme::mono(17.5)).color(theme::CH_SPEED)).truncate());
     });
 }
 
@@ -347,6 +351,69 @@ fn detail(
             }
             if ui.button("Open Setups").clicked() {
                 *goto = Some("Setups");
+            }
+        });
+        ui.add_space(12.0);
+    }
+
+    // Corner-by-corner coaching & PB vs Last delta trace (Pit-Wall coach).
+    let tdir = session_recorder::traces_dir();
+    let track_key = s.full_track_id();
+    let pb_trace = session_recorder::load_trace(&tdir, &s.car_id, &track_key, "pb");
+    let last_trace = session_recorder::load_trace(&tdir, &s.car_id, &track_key, "last");
+    if let (Some(pb), Some(last)) = (pb_trace, last_trace) {
+        let coaching = corner_coach::analyze_corners(&pb, &last, &s.hotspots);
+        let delta_ok = delta::Lap::from_trace(&pb).is_ok() && delta::Lap::from_trace(&last).is_ok();
+        let delta_summary = delta_ok.then_some((pb.lap_time_ms, last.lap_time_ms));
+        section_card(ui, "Corner Coach (Last Lap vs PB)", |ui| {
+            if let Some((pb_ms, cur_ms)) = delta_summary {
+                let diff = cur_ms as i64 - pb_ms as i64;
+                let color = if diff <= 0 { theme::CH_THROTTLE } else { theme::CH_BRAKE };
+                ui.horizontal_wrapped(|ui| {
+                    widgets::pill(ui, &format!("PB {}", format_lap(pb_ms)), theme::CH_SPEED);
+                    widgets::pill(ui, &format!("Last {}", format_lap(cur_ms)), theme::TEXT);
+                    widgets::pill(ui, &format!("Delta {diff:+} ms"), color);
+                    if ui.button("Push top tip to ACXS Coach overlay").clicked()
+                        && let Some(cfg) = settings::ac_user_cfg_dir()
+                    {
+                        let worst = coaching
+                            .iter()
+                            .max_by(|a, b| a.time_delta_ms.total_cmp(&b.time_delta_ms));
+                        let state = CoachState {
+                            target_lap_ms: pb_ms,
+                            streak_clean_laps: s.laps.len() as u32,
+                            std_dev_ms: 0,
+                            tip_corner: worst.map_or(0, |c| c.corner.number as u32),
+                            tip_text: worst.map(|c| c.advice.clone()).unwrap_or_default(),
+                        };
+                        let _ = overlay_app::write_coach_state(&cfg, &state);
+                    }
+                });
+                ui.add_space(6.0);
+            }
+            if coaching.is_empty() {
+                ui.label(RichText::new("No corners segmented in trace yet.").color(theme::MUTED));
+            } else {
+                for c in coaching.iter().take(8) {
+                    let delta_col = if c.time_delta_ms <= 0.0 { theme::CH_THROTTLE } else { theme::CH_BRAKE };
+                    theme::card_elevated().show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            widgets::pill(ui, &format!("T{}", c.corner.number), theme::CH_STEER);
+                            ui.label(
+                                RichText::new(format!("{:+.0} ms", c.time_delta_ms))
+                                    .font(theme::mono(12.5))
+                                    .color(delta_col),
+                            );
+                            ui.label(
+                                RichText::new(format!("Apex {:+.1} km/h", c.apex_speed_delta_kmh))
+                                    .font(theme::mono(12.0))
+                                    .color(theme::CH_SPEED),
+                            );
+                        });
+                        ui.label(RichText::new(&c.advice).size(12.5).color(theme::TEXT));
+                    });
+                    ui.add_space(4.0);
+                }
             }
         });
     }

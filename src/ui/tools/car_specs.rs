@@ -9,8 +9,10 @@ use super::{Tool, ToolContext};
 use crate::ui::{theme, widgets, Notice};
 use acxs_manager::car_compare::{self, IniChange, SpecDiff};
 use acxs_manager::badges;
-use acxs_manager::cardata::{self, CarSpecs};
+use acxs_manager::cardata::{self, AeroData, CarSpecs, DrivetrainData, DynoCurve, TyreCompound};
 use acxs_manager::content::{self, CarEntry};
+use acxs_manager::game;
+use acxs_manager::sfx::{self, SfxInfo};
 use acxs_manager::shift_lights::{self, ShiftProfile};
 use acxs_manager::thumbnails;
 use eframe::egui::{self, Align2, Color32, FontId, RichText};
@@ -51,6 +53,9 @@ pub fn tool() -> Box<dyn Tool> {
         pending_compare: None,
         thumb_busy: false,
         badge_busy: false,
+        detail_tab: 0,
+        donor_car: None,
+        aero_speed_kmh: 200.0,
         tx,
         rx,
     })
@@ -59,7 +64,16 @@ pub fn tool() -> Box<dyn Tool> {
 /// Result of a background job.
 enum Msg {
     Cars { root: PathBuf, cars: Vec<CarEntry> },
-    Specs { id: String, specs: CarSpecs, rev_limit: Option<f64> },
+    Specs {
+        id: String,
+        specs: CarSpecs,
+        rev_limit: Option<f64>,
+        dyno: Option<DynoCurve>,
+        drivetrain: Option<DrivetrainData>,
+        aero: Option<AeroData>,
+        tyres: Vec<TyreCompound>,
+        sfx: SfxInfo,
+    },
     Compare { left: String, right: String, diffs: Vec<SpecDiff>, changes: Result<Vec<IniChange>, String> },
     /// A thumbnail was made or found in the cache: its file path and size in bytes.
     Thumbnail { result: Result<(PathBuf, usize), String> },
@@ -72,6 +86,11 @@ struct Loaded {
     id: String,
     specs: CarSpecs,
     rev_limit: Option<f64>,
+    dyno: Option<DynoCurve>,
+    drivetrain: Option<DrivetrainData>,
+    aero: Option<AeroData>,
+    tyres: Vec<TyreCompound>,
+    sfx: SfxInfo,
 }
 
 /// Comparison of two cars, once read.
@@ -102,6 +121,10 @@ struct CarSpecsPage {
     thumb_busy: bool,
     /// A make badge is being written for the selected car.
     badge_busy: bool,
+    /// Detail sub-tab: 0 = Overview & Compare, 1 = Dyno/Gearing/Aero/Tyres, 2 = SFX & Sound Swap.
+    detail_tab: usize,
+    donor_car: Option<String>,
+    aero_speed_kmh: f64,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
 }
@@ -138,7 +161,21 @@ impl CarSpecsPage {
         spawn_job(egui_ctx, &self.tx, move || {
             let specs = cardata::read_specs(&path);
             let rev_limit = shift_lights::read_rev_limit(&path);
-            Msg::Specs { id, specs, rev_limit }
+            let dyno = cardata::read_dyno(&path);
+            let drivetrain = cardata::read_drivetrain(&path);
+            let aero = cardata::read_aero(&path);
+            let tyres = cardata::read_tyre_curves(&path);
+            let sfx = sfx::inspect_car_sfx(&path);
+            Msg::Specs {
+                id,
+                specs,
+                rev_limit,
+                dyno,
+                drivetrain,
+                aero,
+                tyres,
+                sfx,
+            }
         });
     }
 
@@ -197,7 +234,16 @@ impl CarSpecsPage {
                         self.scanning = false;
                     }
                 }
-                Msg::Specs { id, specs, rev_limit } => {
+                Msg::Specs {
+                    id,
+                    specs,
+                    rev_limit,
+                    dyno,
+                    drivetrain,
+                    aero,
+                    tyres,
+                    sfx,
+                } => {
                     if self.pending_specs.as_deref() == Some(id.as_str()) {
                         self.pending_specs = None;
                     }
@@ -205,7 +251,16 @@ impl CarSpecsPage {
                         if let Some(limit) = rev_limit {
                             self.rpm = self.rpm.min(limit);
                         }
-                        self.loaded = Some(Loaded { id, specs, rev_limit });
+                        self.loaded = Some(Loaded {
+                            id,
+                            specs,
+                            rev_limit,
+                            dyno,
+                            drivetrain,
+                            aero,
+                            tyres,
+                            sfx,
+                        });
                     }
                 }
                 Msg::Compare { left, right, diffs, changes } => {
@@ -335,6 +390,28 @@ impl CarSpecsPage {
             return None;
         };
         car_header(ui, &car);
+        ui.add_space(8.0);
+        widgets::animated_tabs(
+            ui,
+            "car_specs_detail_tabs",
+            &mut self.detail_tab,
+            &[
+                (0usize, "Specs & Compare", None),
+                (1usize, "Dyno / Aero / Tyres", None),
+                (2usize, "SFX & Sound Swap", None),
+            ],
+        );
+        ui.add_space(10.0);
+
+        if self.detail_tab == 1 {
+            self.draw_curves_tab(ui, &selected);
+            return None;
+        }
+        if self.detail_tab == 2 {
+            self.draw_sfx_tab(ui, &car, notices);
+            return None;
+        }
+
         self.thumbnail_section(ui, &car, notices);
 
         let loaded = self.loaded.as_ref().filter(|l| l.id == selected);
@@ -421,6 +498,232 @@ impl CarSpecsPage {
         }
         picked
     }
+
+    fn draw_curves_tab(&mut self, ui: &mut egui::Ui, selected: &str) {
+        let Some(loaded) = self.loaded.as_ref().filter(|l| l.id == selected) else {
+            ui.label(RichText::new("Reading physics curves from data...").color(theme::MUTED));
+            return;
+        };
+
+        widgets::section_title(ui, "Engine Dyno (Power & Torque)");
+        theme::card_elevated().show(ui, |ui| {
+            if let Some(dyno) = &loaded.dyno {
+                ui.horizontal_wrapped(|ui| {
+                    widgets::pill(
+                        ui,
+                        &format!("Peak {:.0} kW / {:.0} hp", dyno.peak_power_kw, dyno.peak_power_kw * 1.341_022_1),
+                        theme::CH_SPEED,
+                    );
+                    widgets::pill(ui, &format!("Peak {:.0} Nm", dyno.peak_torque_nm), theme::CH_THROTTLE);
+                    if let Some(lim) = dyno.limiter_rpm {
+                        widgets::pill(ui, &format!("Limiter {:.0} rpm", lim), theme::WARN);
+                    }
+                });
+                ui.add_space(6.0);
+                draw_dyno_plot(ui, dyno);
+            } else {
+                ui.label(RichText::new("No power.lut / engine.ini dyno curve found.").color(theme::MUTED));
+            }
+        });
+
+        ui.add_space(12.0);
+        widgets::section_title(ui, "Drivetrain & Gear Speeds");
+        theme::card().show(ui, |ui| {
+            if let Some(dt) = &loaded.drivetrain {
+                let top_speeds = dt.gear_top_speeds_kmh();
+                widgets::key_value(ui, "Traction", dt.traction.as_deref().unwrap_or("—"));
+                widgets::key_value(ui, "Final drive", &format!("{:.3}", dt.final_ratio));
+                ui.add_space(4.0);
+                for (i, (ratio, speed)) in dt.gears.iter().zip(top_speeds.iter()).enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("G{}", i + 1)).font(theme::mono(12.5)).strong());
+                        ui.label(RichText::new(format!("ratio {:.3}", ratio)).font(theme::mono(12.0)).color(theme::MUTED));
+                        ui.label(RichText::new(format!("-> {:.0} km/h @ {:.0} rpm", speed, dt.limiter_rpm)).font(theme::mono(12.0)).color(theme::CH_SPEED));
+                    });
+                }
+            } else {
+                ui.label(RichText::new("No drivetrain.ini gear data found.").color(theme::MUTED));
+            }
+        });
+
+        ui.add_space(12.0);
+        widgets::section_title(ui, "Aerodynamics");
+        theme::card().show(ui, |ui| {
+            if let Some(aero) = &loaded.aero {
+                ui.horizontal(|ui| {
+                    ui.label("Airspeed (km/h)");
+                    ui.add(egui::Slider::new(&mut self.aero_speed_kmh, 50.0..=380.0).fixed_decimals(0));
+                });
+                let f = aero.forces_at_speed(self.aero_speed_kmh);
+                widgets::key_value(ui, "Total downforce", &format!("{:.0} N ({:.0} kgf)", f.total_downforce_n, f.total_downforce_n / 9.80665));
+                widgets::key_value(ui, "Front / Rear", &format!("{:.0} N / {:.0} N ({:.1}% front)", f.front_downforce_n, f.rear_downforce_n, f.front_balance_pct));
+                widgets::key_value(ui, "Total drag", &format!("{:.0} N", f.total_drag_n));
+                widgets::key_value(ui, "Wings / elements", &aero.wings.len().to_string());
+            } else {
+                ui.label(RichText::new("No aero.ini wing data found.").color(theme::MUTED));
+            }
+        });
+
+        ui.add_space(12.0);
+        widgets::section_title(ui, "Tyre Compounds");
+        theme::card().show(ui, |ui| {
+            if loaded.tyres.is_empty() {
+                ui.label(RichText::new("No tyre compound curves found in tyres.ini.").color(theme::MUTED));
+            } else {
+                for comp in &loaded.tyres {
+                    ui.horizontal_wrapped(|ui| {
+                        widgets::pill(ui, &format!("#{}", comp.index), theme::INFO);
+                        ui.label(RichText::new(format!("F: {} / R: {}", comp.front_name, comp.rear_name)).strong());
+                        if let (Some(fp), Some(rp)) = (comp.front_ideal_psi, comp.rear_ideal_psi) {
+                            ui.label(
+                                RichText::new(format!("Ideal {:.0}/{:.0} psi", fp, rp))
+                                    .font(theme::mono(12.0))
+                                    .color(theme::MUTED),
+                            );
+                        }
+                    });
+                }
+            }
+        });
+    }
+
+    fn draw_sfx_tab(&mut self, ui: &mut egui::Ui, car: &CarEntry, notices: &mut Vec<Notice>) {
+        let Some(root) = self.root.clone() else { return };
+        let Some(info) = self
+            .loaded
+            .as_ref()
+            .filter(|l| l.id == car.id)
+            .map(|l| l.sfx.clone())
+        else {
+            ui.label(RichText::new("Inspecting sfx/...").color(theme::MUTED));
+            return;
+        };
+
+        widgets::section_title(ui, "SFX Audit");
+        theme::card_elevated().show(ui, |ui| {
+            widgets::key_value(ui, "Bank files", &info.bank_files.len().to_string());
+            widgets::key_value(
+                ui,
+                "GUIDs.txt",
+                if info.guids_path.is_some() { "present" } else { "missing" },
+            );
+            if !info.referenced_car_ids.is_empty() {
+                widgets::key_value(ui, "Referenced car IDs", &info.referenced_car_ids.join(", "));
+            }
+            ui.add_space(6.0);
+            if info.issues.is_empty() {
+                ui.label(RichText::new("SFX bank and GUIDs.txt look healthy.").color(theme::OK));
+            } else {
+                for issue in &info.issues {
+                    ui.label(RichText::new(format!("• {issue}")).color(theme::WARN));
+                }
+                ui.add_space(6.0);
+                if ui.button("Auto-fix GUIDs.txt car ID mismatch").clicked() {
+                    let running = game::is_game_running();
+                    match sfx::fix_guids_mismatch(&car.path, running) {
+                        Ok(Some(backup)) => {
+                            self.loaded = None;
+                            notices.push(Notice {
+                                text: format!("Fixed GUIDs.txt (backup: {}).", backup.display()),
+                                ok: true,
+                            });
+                        }
+                        Ok(None) => notices.push(Notice {
+                            text: "No GUIDs.txt mismatch needed fixing.".into(),
+                            ok: true,
+                        }),
+                        Err(e) => notices.push(Notice {
+                            text: format!("Could not fix GUIDs.txt: {e}"),
+                            ok: false,
+                        }),
+                    }
+                }
+            }
+        });
+
+        ui.add_space(12.0);
+        widgets::section_title(ui, "Sound Swapper");
+        theme::card().show(ui, |ui| {
+            ui.label(
+                RichText::new(
+                    "Copy a donor car's .bank and rewritten GUIDs.txt into this car. \
+                     The current sfx/ folder is archived to sfx.acxs-backup-<stamp>/ first.",
+                )
+                .small()
+                .color(theme::MUTED),
+            );
+            ui.add_space(8.0);
+            let donor_label = self.donor_car.as_deref().unwrap_or("Choose donor car...");
+            egui::ComboBox::from_id_salt("sfx_donor_picker")
+                .selected_text(donor_label)
+                .width(320.0)
+                .show_ui(ui, |ui| {
+                    for c in &self.cars {
+                        if c.id == car.id {
+                            continue;
+                        }
+                        let selected = self.donor_car.as_deref() == Some(c.id.as_str());
+                        if ui
+                            .selectable_label(selected, format!("{} ({})", c.name, c.id))
+                            .clicked()
+                        {
+                            self.donor_car = Some(c.id.clone());
+                        }
+                    }
+                });
+            ui.add_space(8.0);
+            let can_swap = self.donor_car.as_deref().is_some_and(|d| d != car.id);
+            if ui
+                .add_enabled(can_swap, widgets::primary_button("Replace Sound from Donor"))
+                .clicked()
+                && let Some(donor) = self.donor_car.clone()
+            {
+                let running = game::is_game_running();
+                match sfx::swap_car_sound(&root, &car.id, &donor, running) {
+                    Ok(report) => {
+                        self.loaded = None;
+                        notices.push(Notice {
+                            text: format!(
+                                "Replaced {} sound with {} (previous sfx backed up).",
+                                report.target_car_id, report.donor_car_id
+                            ),
+                            ok: true,
+                        });
+                    }
+                    Err(e) => notices.push(Notice {
+                        text: format!("Sound swap failed: {e}"),
+                        ok: false,
+                    }),
+                }
+            }
+        });
+    }
+}
+
+fn draw_dyno_plot(ui: &mut egui::Ui, dyno: &DynoCurve) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width().max(200.0), 140.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 8.0, theme::SURFACE_BASE);
+    painter.rect_stroke(rect, 8.0, egui::Stroke::new(1.0, theme::BORDER), egui::StrokeKind::Inside);
+    if dyno.points.len() < 2 {
+        return;
+    }
+    let min_rpm = dyno.points.first().map(|p| p.rpm).unwrap_or(0.0);
+    let max_rpm = dyno.points.last().map(|p| p.rpm).unwrap_or(1.0).max(min_rpm + 1.0);
+    let max_kw = dyno.peak_power_kw.max(1.0);
+    let max_nm = dyno.peak_torque_nm.max(1.0);
+    let pad = 10.0;
+    let inner = rect.shrink(pad);
+
+    let to_pt = |rpm: f64, norm_y: f64| {
+        let x = inner.left() + ((rpm - min_rpm) / (max_rpm - min_rpm)) as f32 * inner.width();
+        let y = inner.bottom() - (norm_y.clamp(0.0, 1.0) as f32) * inner.height();
+        egui::pos2(x, y)
+    };
+    let power_pts: Vec<egui::Pos2> = dyno.points.iter().map(|p| to_pt(p.rpm, p.power_kw / max_kw)).collect();
+    let torque_pts: Vec<egui::Pos2> = dyno.points.iter().map(|p| to_pt(p.rpm, p.torque_nm / max_nm)).collect();
+    painter.add(egui::Shape::line(power_pts, egui::Stroke::new(2.0, theme::CH_SPEED)));
+    painter.add(egui::Shape::line(torque_pts, egui::Stroke::new(2.0, theme::CH_THROTTLE)));
 }
 
 impl Tool for CarSpecsPage {

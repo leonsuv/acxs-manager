@@ -3,13 +3,22 @@
 //! The game's skin is never written: saving copies the skin folder first.
 
 use super::{Tool, ToolContext};
+use crate::ui::viewport3d::{self, Camera3D, CpuSubMesh, DrawItem, MeshVertex, RenderMode, SceneFrame};
 use crate::ui::{theme, widgets, Notice};
 use acxs_manager::content::{self, CarEntry};
-use acxs_manager::dds::Rgba;
+use acxs_manager::dds::{self, Rgba};
+use acxs_manager::kn5_scene::{self, LoadOptions};
 use acxs_manager::livery_paint::{self, Canvas};
 use eframe::egui::{self, Color32, RichText, Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, pos2, vec2};
+use glam::Mat4;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DdsExportFormat {
+    Dxt1,
+    Dxt5,
+}
 
 pub fn tool() -> Box<dyn Tool> {
     let (tx, rx) = mpsc::channel();
@@ -36,6 +45,11 @@ pub fn tool() -> Box<dyn Tool> {
         last: None,
         drag_start: None,
         busy: false,
+        export_fmt: DdsExportFormat::Dxt5,
+        show_3d: false,
+        cam_3d: Camera3D::default(),
+        mesh_3d: None,
+        uploaded_3d: None,
     })
 }
 
@@ -51,6 +65,7 @@ enum Msg {
     Cars(Vec<CarEntry>),
     Texture(PathBuf, Result<Rgba, String>),
     Decal(Option<Result<Rgba, String>>),
+    Mesh3D(PathBuf, Result<Vec<CpuSubMesh>, String>),
 }
 
 struct Painter {
@@ -79,6 +94,11 @@ struct Painter {
     last: Option<(f32, f32)>,
     drag_start: Option<(i32, i32)>,
     busy: bool,
+    export_fmt: DdsExportFormat,
+    show_3d: bool,
+    cam_3d: Camera3D,
+    mesh_3d: Option<((PathBuf, u64), Vec<CpuSubMesh>)>,
+    uploaded_3d: Option<(PathBuf, u64)>,
 }
 
 fn folders(dir: &Path) -> Vec<String> {
@@ -148,6 +168,13 @@ impl Painter {
                     self.tool = Brush::Stamp;
                 }
                 Msg::Decal(Some(Err(err))) => notices.push(Notice { text: format!("Could not open the picture: {err}"), ok: false }),
+                Msg::Mesh3D(car_path, Ok(submeshes)) => {
+                    self.mesh_3d = Some(((car_path, 0), submeshes));
+                    self.uploaded_3d = None;
+                }
+                Msg::Mesh3D(_, Err(err)) => {
+                    notices.push(Notice { text: format!("Could not load 3D car mesh: {err}"), ok: false });
+                }
                 Msg::Decal(None) => {}
             }
         }
@@ -235,10 +262,79 @@ impl Painter {
             {
                 self.save(notices);
             }
+            ui.add_space(6.0);
+            ui.selectable_value(&mut self.export_fmt, DdsExportFormat::Dxt1, "DXT1");
+            ui.selectable_value(&mut self.export_fmt, DdsExportFormat::Dxt5, "DXT5");
+            if ui
+                .add_enabled(self.canvas.is_some(), egui::Button::new("Export DDS..."))
+                .on_hover_text("Write a compressed DXT1 or DXT5 DDS texture with full mip chain.")
+                .clicked()
+            {
+                self.export_compressed_dds(notices);
+            }
+            ui.add_space(6.0);
+            if ui.selectable_label(self.show_3d, "3D Preview").clicked() {
+                self.show_3d = !self.show_3d;
+                if self.show_3d
+                    && let Some(idx) = self.car
+                    && let Some(car) = self.cars.get(idx)
+                {
+                    let car_path = car.path.clone();
+                    let tx = self.tx.clone();
+                    let repaint = ui.ctx().clone();
+                    std::thread::spawn(move || {
+                        let res = load_painter_3d(&car_path);
+                        let _ = tx.send(Msg::Mesh3D(car_path, res));
+                        repaint.request_repaint();
+                    });
+                }
+            }
             if self.changed {
                 ui.label(RichText::new("Not saved").color(theme::WARN));
             }
         });
+    }
+
+    fn export_compressed_dds(&self, notices: &mut Vec<Notice>) {
+        let Some(canvas) = &self.canvas else { return };
+        let default_name = self
+            .texture
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map(|s| format!("{}_dxt.dds", s.to_string_lossy()))
+            .unwrap_or_else(|| "livery.dds".to_string());
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("DDS", &["dds"])
+            .set_file_name(&default_name)
+            .save_file()
+        else {
+            return;
+        };
+        if path.exists() {
+            notices.push(Notice {
+                text: format!("{} already exists. Choose another name.", path.display()),
+                ok: false,
+            });
+            return;
+        }
+        let bytes = match self.export_fmt {
+            DdsExportFormat::Dxt1 => dds::encode_dxt1(&canvas.image),
+            DdsExportFormat::Dxt5 => dds::encode_dxt5(&canvas.image),
+        };
+        let label = match self.export_fmt {
+            DdsExportFormat::Dxt1 => "DXT1",
+            DdsExportFormat::Dxt5 => "DXT5",
+        };
+        match std::fs::write(&path, &bytes) {
+            Ok(()) => notices.push(Notice {
+                text: format!("Exported {label} DDS ({} KB) to {}", bytes.len() / 1024, path.display()),
+                ok: true,
+            }),
+            Err(e) => notices.push(Notice {
+                text: format!("Could not export DDS: {e}"),
+                ok: false,
+            }),
+        }
     }
 
     fn save(&mut self, notices: &mut Vec<Notice>) {
@@ -383,9 +479,97 @@ impl Tool for Painter {
             ui.spinner();
         } else if self.view.is_none() {
             widgets::empty_state(ui, "Choose a car, a skin and a texture to start painting.");
+        } else if self.show_3d {
+            if let (Some((key, subs)), Some(gl)) = (&self.mesh_3d, &ctx.gl)
+                && self.uploaded_3d.as_ref() != Some(key)
+                && let Ok(mut guard) = gl.lock()
+            {
+                guard.upload_mesh(key.clone(), subs);
+                self.uploaded_3d = Some(key.clone());
+            }
+            let avail = ui.available_size();
+            let half_w = (avail.x * 0.5 - 8.0).max(240.0);
+            let h = avail.y.max(320.0);
+            ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(vec2(half_w, h), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    self.paint_area(ui);
+                });
+                let mut frame = SceneFrame {
+                    camera: self.cam_3d,
+                    render_mode: RenderMode::Shaded,
+                    ..SceneFrame::default()
+                };
+                if let Some((key, _)) = &self.mesh_3d {
+                    frame.items.push(DrawItem {
+                        mesh_key: key.clone(),
+                        model: Mat4::IDENTITY,
+                        tint_override: None,
+                        texture_override: None,
+                    });
+                }
+                let dt = ui.input(|i| i.stable_dt);
+                let gl = ctx.gl.clone();
+                widgets::viewport_3d_frame(
+                    ui,
+                    vec2(half_w, h),
+                    |ui| {
+                        widgets::pill(ui, "3D CAR PREVIEW", theme::CH_SPEED);
+                    },
+                    |ui, rect| {
+                        let resp = ui.interact(rect, ui.scope_id().with("lp_3d"), Sense::click_and_drag());
+                        ui.input(|i| {
+                            if self.cam_3d.handle_input(&resp, i, dt) {
+                                ui.ctx().request_repaint();
+                            }
+                        });
+                        frame.camera = self.cam_3d;
+                        viewport3d::paint_viewport_3d(ui, rect, gl, frame, |ui, r| {
+                            ui.painter().rect_filled(r, 0, theme::SURFACE_VOID);
+                            ui.painter().text(
+                                r.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "3D Livery Preview (2D fallback in headless mode)",
+                                egui::FontId::proportional(13.0),
+                                theme::MUTED,
+                            );
+                        });
+                    },
+                );
+            });
         } else {
             ui.allocate_space(vec2(0.0, 0.0));
             self.paint_area(ui);
         }
     }
+}
+
+fn load_painter_3d(car_path: &Path) -> Result<Vec<CpuSubMesh>, String> {
+    let opts = LoadOptions {
+        load_textures: false,
+        skip_ac_helpers: true,
+        max_vertices: 1_000_000,
+        max_triangles: 1_000_000,
+    };
+    let car = kn5_scene::load_car_lod(car_path, None, 0, &opts).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for m in &car.scene.meshes {
+        if m.name.starts_with("AC_") || m.indices.len() < 3 {
+            continue;
+        }
+        let vertices: Vec<MeshVertex> = (0..m.positions.len())
+            .map(|i| MeshVertex {
+                pos: kn5_scene::mat4_transform(&m.transform, &m.positions[i], true),
+                normal: kn5_scene::mat4_transform(&m.transform, &m.normals[i], false),
+                uv: m.uvs.get(i).copied().unwrap_or([0.0, 0.0]),
+            })
+            .collect();
+        let indices = m.indices.iter().map(|&idx| u32::from(idx)).collect();
+        out.push(CpuSubMesh {
+            vertices,
+            indices,
+            texture_key: None,
+            tint: [0.85, 0.88, 0.92, 1.0],
+        });
+    }
+    Ok(out)
 }

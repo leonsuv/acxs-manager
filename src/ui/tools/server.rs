@@ -8,16 +8,26 @@ use crate::ui::theme::{self, DANGER, INFO, MUTED, OK, WARN};
 use crate::ui::{widgets, Notice};
 use acxs_manager::ini::Ini;
 use acxs_manager::server::{
-    preset, preset_names, read_server_config, validate, write_entry_list, write_server_config, Entry,
-    ServerConfig,
+    Entry, RaceSessionCfg, RealismConfig, ServerConfig, SessionCfg, VotingPluginsConfig,
+    WeatherSlot, list_preset_dirs, preset, preset_names, read_server_config, save_preset_dir,
+    validate, validate_multi_instance_ports, write_entry_list, write_server_config,
+};
+use acxs_manager::server_csp::{
+    CspExtraOptions, ExtraCfgYml, read_csp_extra_options, read_extra_cfg_yml,
+    write_csp_extra_options, write_extra_cfg_yml,
 };
 use acxs_manager::server_process::{
-    find_server_executable, parse_log_line, LaunchArgs, LogKind, ServerProcess, Status,
+    LaunchArgs, LogKind, ServerProcess, Status, find_server_executable, parse_log_line,
 };
-use acxs_manager::server_status::{fetch, ServerStatus, StatusError};
+use acxs_manager::server_rcon::{AdminCmd, RconClient, ServerEvent};
+use acxs_manager::server_status::{ServerStatus, StatusError, fetch};
+use acxs_manager::web_dashboard::{Dashboard, RaceState, SpectatorCar};
 use eframe::egui::{self, Color32, RichText};
+use std::collections::BTreeMap;
 use std::io;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread;
@@ -35,11 +45,35 @@ const AUTO_REFRESH: Duration = Duration::from_secs(10);
 /// Result of one live status query.
 type LiveResult = Result<ServerStatus, StatusError>;
 
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum ServerPageTab {
+    #[default]
+    Config,
+    CspExtra,
+    Rcon,
+}
+
+#[derive(Clone, Default)]
+struct RconDriver {
+    car_id: u8,
+    driver: String,
+    model: String,
+    guid: String,
+    lap: u32,
+    best_lap_ms: u32,
+    last_lap_ms: u32,
+    speed_kmh: f32,
+    gear: i32,
+    spline_pos: f32,
+    connected: bool,
+}
+
 pub fn tool() -> Box<dyn Tool> {
     let (tx, rx) = mpsc::channel();
     let (live_tx, live_rx) = mpsc::channel();
     let cfg = ServerConfig::default();
     Box::new(ServerPage {
+        tab: ServerPageTab::Config,
         dir_input: String::new(),
         default_dir: None,
         cars_text: join_cars(&cfg.cars),
@@ -62,10 +96,25 @@ pub fn tool() -> Box<dyn Tool> {
         live: None,
         live_tx,
         live_rx,
+        preset_slug: String::new(),
+        saved_presets: Vec::new(),
+        csp_opts: CspExtraOptions::default(),
+        extra_yml: ExtraCfgYml::default(),
+        rcon_local_port: 12000,
+        rcon_server_addr: "127.0.0.1:11000".to_string(),
+        rcon_client: None,
+        rcon_stop: Arc::new(AtomicBool::new(false)),
+        rcon_rx: None,
+        rcon_drivers: BTreeMap::new(),
+        rcon_chat_log: Vec::new(),
+        rcon_broadcast: String::new(),
+        spectator_dash: None,
+        spectator_port: 8787,
     })
 }
 
 struct ServerPage {
+    tab: ServerPageTab,
     /// The server cfg folder, as typed by the user.
     dir_input: String,
     /// `<AC root>/server/cfg` for the current AC root, when one is set.
@@ -102,6 +151,24 @@ struct ServerPage {
     live: Option<LiveResult>,
     live_tx: Sender<LiveResult>,
     live_rx: Receiver<LiveResult>,
+    /// Multi-instance preset slug input & discovered presets.
+    preset_slug: String,
+    saved_presets: Vec<String>,
+    /// CSP `csp_extra_options.ini` and AssettoServer `extra_cfg.yml`.
+    csp_opts: CspExtraOptions,
+    extra_yml: ExtraCfgYml,
+    /// Live RCON / AC Server UDP Plugin state.
+    rcon_local_port: u16,
+    rcon_server_addr: String,
+    rcon_client: Option<Arc<RconClient>>,
+    rcon_stop: Arc<AtomicBool>,
+    rcon_rx: Option<Receiver<ServerEvent>>,
+    rcon_drivers: BTreeMap<u8, RconDriver>,
+    rcon_chat_log: Vec<String>,
+    rcon_broadcast: String,
+    /// Live Spectator Web Dashboard (`/spectator`).
+    spectator_dash: Option<Dashboard>,
+    spectator_port: u16,
 }
 
 /// Result of a background job, sent back to the page.
@@ -147,10 +214,11 @@ impl Tool for ServerPage {
         self.follow_ac_root(ctx.ac_root.as_deref());
         self.poll(notices);
         self.poll_live();
+        self.poll_rcon();
         self.refresh_process();
 
         let egui_ctx = ui.ctx().clone();
-        if self.status == Status::Running {
+        if self.status == Status::Running || self.rcon_client.is_some() {
             egui_ctx.request_repaint_after(Duration::from_millis(500));
         }
         self.live_tick(&egui_ctx);
@@ -158,18 +226,40 @@ impl Tool for ServerPage {
         widgets::heading(
             ui,
             "Dedicated Server",
-            "Edit server_cfg.ini and entry_list.ini in the server cfg folder.",
+            "Configure acServer, CSP extra_cfg, multi-instance presets, and live RCON / Spectator.",
         );
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            self.folder_card(ui);
-            self.process_card(ui, &mut action);
-            self.live_card(ui, &egui_ctx);
-            self.server_card(ui, &mut action);
-            self.problem_list(ui);
-            ui.add_space(8.0);
-            self.action_bar(ui, &mut action);
-            ui.add_space(16.0);
-            self.entries_card(ui, &mut action);
+        let rcon_badge = self.rcon_client.is_some().then_some("LIVE");
+        widgets::animated_tabs(
+            ui,
+            "server_page_tabs",
+            &mut self.tab,
+            &[
+                (ServerPageTab::Config, "Config & Process", None),
+                (ServerPageTab::CspExtra, "CSP extra_cfg", None),
+                (ServerPageTab::Rcon, "Live Admin / RCON", rcon_badge),
+            ],
+        );
+        ui.add_space(8.0);
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.tab {
+            ServerPageTab::Config => {
+                self.folder_card(ui);
+                self.process_card(ui, &mut action);
+                self.live_card(ui, &egui_ctx);
+                self.server_card(ui, &mut action);
+                self.extended_config_cards(ui, notices);
+                self.problem_list(ui);
+                ui.add_space(8.0);
+                self.action_bar(ui, &mut action);
+                ui.add_space(16.0);
+                self.entries_card(ui, &mut action);
+            }
+            ServerPageTab::CspExtra => {
+                self.folder_card(ui);
+                self.csp_extra_tab(ui, notices);
+            }
+            ServerPageTab::Rcon => {
+                self.rcon_tab(ui, &egui_ctx, notices);
+            }
         });
 
         match action {
@@ -718,6 +808,513 @@ impl ServerPage {
         if let Some(i) = remove {
             self.entries.remove(i);
         }
+    }
+
+    fn presets_root() -> PathBuf {
+        acxs_manager::settings::settings_path()
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("server-presets")
+    }
+
+    fn extended_config_cards(&mut self, ui: &mut egui::Ui, notices: &mut Vec<Notice>) {
+        ui.add_space(8.0);
+        egui::CollapsingHeader::new(RichText::new("Sessions ([BOOKING] / [PRACTICE] / [QUALIFY] / [RACE])").font(theme::bold(14.0)))
+            .id_salt("srv_sessions")
+            .show(ui, |ui| {
+                theme::card().show(ui, |ui| {
+                    let mut has_b = self.cfg.booking.is_some();
+                    if ui.checkbox(&mut has_b, "Enable [BOOKING]").changed() {
+                        self.cfg.booking = has_b.then(|| SessionCfg { name: "Booking".into(), time_min: 10, is_open: 1 });
+                    }
+                    if let Some(b) = &mut self.cfg.booking {
+                        ui.horizontal(|ui| {
+                            ui.label("Minutes");
+                            ui.add(egui::DragValue::new(&mut b.time_min).range(1..=180));
+                        });
+                    }
+                    let mut has_p = self.cfg.practice.is_some();
+                    if ui.checkbox(&mut has_p, "Enable [PRACTICE]").changed() {
+                        self.cfg.practice = has_p.then(|| SessionCfg { name: "Practice".into(), time_min: 20, is_open: 1 });
+                    }
+                    if let Some(p) = &mut self.cfg.practice {
+                        ui.horizontal(|ui| {
+                            ui.label("Minutes");
+                            ui.add(egui::DragValue::new(&mut p.time_min).range(1..=720));
+                        });
+                    }
+                    let mut has_q = self.cfg.qualify.is_some();
+                    if ui.checkbox(&mut has_q, "Enable [QUALIFY]").changed() {
+                        self.cfg.qualify = has_q.then(|| SessionCfg { name: "Qualify".into(), time_min: 15, is_open: 1 });
+                    }
+                    if let Some(q) = &mut self.cfg.qualify {
+                        ui.horizontal(|ui| {
+                            ui.label("Minutes");
+                            ui.add(egui::DragValue::new(&mut q.time_min).range(1..=180));
+                        });
+                    }
+                    let mut has_r = self.cfg.race.is_some();
+                    if ui.checkbox(&mut has_r, "Enable [RACE]").changed() {
+                        self.cfg.race = has_r.then(|| RaceSessionCfg {
+                            name: "Race".into(),
+                            laps: 10,
+                            time_min: 0,
+                            wait_time_sec: 60,
+                            is_open: 1,
+                            reversed_grid_positions: 0,
+                        });
+                    }
+                    if let Some(r) = &mut self.cfg.race {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("Laps");
+                            ui.add(egui::DragValue::new(&mut r.laps).range(0..=999));
+                            ui.label("Minutes");
+                            ui.add(egui::DragValue::new(&mut r.time_min).range(0..=1440));
+                            ui.label("Wait (s)");
+                            ui.add(egui::DragValue::new(&mut r.wait_time_sec).range(0..=600));
+                            ui.label("Reverse grid");
+                            ui.add(egui::DragValue::new(&mut r.reversed_grid_positions).range(-1..=64));
+                        });
+                    }
+                });
+            });
+
+        egui::CollapsingHeader::new(RichText::new(format!("Weather slots ({})", self.cfg.weather.len())).font(theme::bold(14.0)))
+            .id_salt("srv_weather")
+            .show(ui, |ui| {
+                theme::card().show(ui, |ui| {
+                    if ui.button("Add [WEATHER_n] slot").clicked() {
+                        self.cfg.weather.push(WeatherSlot::default());
+                    }
+                    let mut remove_idx = None;
+                    for (i, w) in self.cfg.weather.iter_mut().enumerate() {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new(format!("WEATHER_{i}")).font(theme::mono(12.0)));
+                            ui.add(egui::TextEdit::singleline(&mut w.graphics).desired_width(130.0));
+                            ui.label("Amb °C");
+                            ui.add(egui::DragValue::new(&mut w.base_temp_ambient).range(-10..=50));
+                            ui.label("Road Δ°C");
+                            ui.add(egui::DragValue::new(&mut w.base_temp_road).range(-10..=30));
+                            if ui.small_button("Remove").clicked() {
+                                remove_idx = Some(i);
+                            }
+                        });
+                    }
+                    if let Some(i) = remove_idx {
+                        self.cfg.weather.remove(i);
+                    }
+                });
+            });
+
+        egui::CollapsingHeader::new(RichText::new("Realism, Assists & Voting / UDP Plugins").font(theme::bold(14.0)))
+            .id_salt("srv_realism_voting")
+            .show(ui, |ui| {
+                theme::card().show(ui, |ui| {
+                    let mut has_realism = self.cfg.realism.is_some();
+                    if ui.checkbox(&mut has_realism, "Manage Realism & Assists keys").changed() {
+                        self.cfg.realism = has_realism.then(RealismConfig::default);
+                    }
+                    if let Some(r) = &mut self.cfg.realism {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("ABS (0/1/2)");
+                            ui.add(egui::DragValue::new(&mut r.abs_allowed).range(0..=2));
+                            ui.label("TC (0/1/2)");
+                            ui.add(egui::DragValue::new(&mut r.tc_allowed).range(0..=2));
+                            ui.label("Fuel %");
+                            ui.add(egui::DragValue::new(&mut r.fuel_rate).range(0..=500));
+                            ui.label("Damage %");
+                            ui.add(egui::DragValue::new(&mut r.damage_multiplier).range(0..=100));
+                            ui.label("Tyre wear %");
+                            ui.add(egui::DragValue::new(&mut r.tyre_wear_rate).range(0..=500));
+                            ui.checkbox(&mut r.tyre_blankets_allowed, "Tyre blankets");
+                            ui.checkbox(&mut r.force_virtual_mirror, "Force mirror");
+                        });
+                    }
+                    ui.add_space(6.0);
+                    let mut has_vp = self.cfg.voting_plugins.is_some();
+                    if ui.checkbox(&mut has_vp, "Manage Voting & UDP Plugin ports").changed() {
+                        self.cfg.voting_plugins = has_vp.then(VotingPluginsConfig::default);
+                    }
+                    if let Some(vp) = &mut self.cfg.voting_plugins {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("UDP Plugin Local Port");
+                            ui.add(egui::DragValue::new(&mut vp.udp_plugin_local_port).range(0..=65535));
+                            ui.label("UDP Plugin Address");
+                            ui.add(egui::TextEdit::singleline(&mut vp.udp_plugin_address).desired_width(160.0).hint_text("127.0.0.1:12000"));
+                            ui.checkbox(&mut vp.register_to_lobby, "Register to lobby");
+                        });
+                    }
+                });
+            });
+
+        egui::CollapsingHeader::new(RichText::new("Multi-Instance Presets & Port Validator").font(theme::bold(14.0)))
+            .id_salt("srv_presets_multi")
+            .show(ui, |ui| {
+                theme::card().show(ui, |ui| {
+                    let root = Self::presets_root();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.preset_slug).hint_text("preset-name").desired_width(180.0));
+                        if ui.button("Save Preset").clicked() {
+                            let cfg = self.current_config();
+                            match save_preset_dir(&root, &self.preset_slug, &cfg, &self.entries) {
+                                Ok(path) => {
+                                    self.saved_presets = list_preset_dirs(&root);
+                                    notices.push(ok(format!("Saved preset to {}", path.display())));
+                                }
+                                Err(e) => notices.push(fail(format!("Could not save preset: {e}"))),
+                            }
+                        }
+                        if ui.button("Refresh Presets").clicked() {
+                            self.saved_presets = list_preset_dirs(&root);
+                        }
+                        if ui.button("Check Port Collisions").clicked() {
+                            let presets = list_preset_dirs(&root);
+                            let mut loaded_cfgs: Vec<(String, ServerConfig)> = Vec::new();
+                            for slug in presets {
+                                if let Ok(c) = read_server_config(&root.join(&slug)) {
+                                    loaded_cfgs.push((slug, c));
+                                }
+                            }
+                            let refs: Vec<(&str, &ServerConfig)> = loaded_cfgs.iter().map(|(s, c)| (s.as_str(), c)).collect();
+                            let issues = validate_multi_instance_ports(&refs);
+                            if issues.is_empty() {
+                                notices.push(ok(format!("No port collisions across {} saved preset(s).", refs.len())));
+                            } else {
+                                for issue in issues {
+                                    notices.push(fail(issue));
+                                }
+                            }
+                        }
+                    });
+                    if !self.saved_presets.is_empty() {
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            for slug in self.saved_presets.clone() {
+                                if ui.button(format!("Load {slug}")).clicked() {
+                                    let pdir = root.join(&slug);
+                                    match load(&pdir) {
+                                        Ok(loaded) => {
+                                            self.cars_text = join_cars(&loaded.cfg.cars);
+                                            self.cfg = loaded.cfg;
+                                            self.entries = loaded.entries;
+                                            notices.push(ok(format!("Loaded preset {slug}.")));
+                                        }
+                                        Err(e) => notices.push(fail(e)),
+                                    }
+                                }
+                            }
+                        });
+                    }
+                });
+            });
+    }
+
+    fn csp_extra_tab(&mut self, ui: &mut egui::Ui, notices: &mut Vec<Notice>) {
+        widgets::section_title(ui, "CSP csp_extra_options.ini");
+        theme::card().show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Load csp_extra_options.ini").clicked()
+                    && let Some(dir) = self.dir()
+                {
+                    match read_csp_extra_options(&dir) {
+                        Ok(o) => {
+                            self.csp_opts = o;
+                            notices.push(ok("Loaded csp_extra_options.ini."));
+                        }
+                        Err(e) => notices.push(fail(format!("Could not load csp_extra_options.ini: {e}"))),
+                    }
+                }
+                if ui.add(widgets::primary_button("Save csp_extra_options.ini")).clicked()
+                    && let Some(dir) = self.dir()
+                {
+                    match write_csp_extra_options(&dir, &self.csp_opts) {
+                        Ok(()) => notices.push(ok("Saved csp_extra_options.ini (backup kept).")),
+                        Err(e) => notices.push(fail(format!("Save failed: {e}"))),
+                    }
+                }
+            });
+            ui.add_space(6.0);
+            ui.checkbox(&mut self.csp_opts.allow_wrong_way, "Allow wrong way");
+            ui.checkbox(&mut self.csp_opts.enforce_back_to_pits_penalty, "Enforce back-to-pits penalty");
+            ui.checkbox(&mut self.csp_opts.no_collisions, "Disable car-to-car collisions");
+            ui.checkbox(&mut self.csp_opts.use_custom_weather, "Use custom WeatherFX");
+            ui.checkbox(&mut self.csp_opts.force_rain, "Force rain");
+            ui.horizontal(|ui| {
+                ui.label("Pit speed limit (km/h)");
+                ui.add(egui::DragValue::new(&mut self.csp_opts.pits_speed_kmh).range(30..=160));
+                ui.label("Min CSP build");
+                ui.add(egui::DragValue::new(&mut self.csp_opts.minimum_csp_build).range(0..=99999));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Content URL");
+                ui.add(egui::TextEdit::singleline(&mut self.csp_opts.content_url).desired_width(360.0));
+            });
+        });
+
+        ui.add_space(12.0);
+        widgets::section_title(ui, "AssettoServer extra_cfg.yml");
+        theme::card().show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Load extra_cfg.yml").clicked()
+                    && let Some(dir) = self.dir()
+                {
+                    match read_extra_cfg_yml(&dir) {
+                        Ok(y) => {
+                            self.extra_yml = y;
+                            notices.push(ok("Loaded extra_cfg.yml."));
+                        }
+                        Err(e) => notices.push(fail(format!("Could not load extra_cfg.yml: {e}"))),
+                    }
+                }
+                if ui.add(widgets::primary_button("Save extra_cfg.yml")).clicked()
+                    && let Some(dir) = self.dir()
+                {
+                    match write_extra_cfg_yml(&dir, &self.extra_yml) {
+                        Ok(()) => notices.push(ok("Saved extra_cfg.yml (backup kept).")),
+                        Err(e) => notices.push(fail(format!("Save failed: {e}"))),
+                    }
+                }
+            });
+            ui.add_space(6.0);
+            ui.checkbox(&mut self.extra_yml.enable_ai, "Enable AI traffic");
+            ui.checkbox(&mut self.extra_yml.enable_client_messages, "Enable client messages");
+            ui.checkbox(&mut self.extra_yml.enable_real_penalty, "Enable RealPenalty");
+            ui.horizontal(|ui| {
+                ui.label("AI Max Density");
+                ui.add(egui::DragValue::new(&mut self.extra_yml.ai_max_density).range(1..=200));
+                ui.label("AI Max Speed (km/h)");
+                ui.add(egui::DragValue::new(&mut self.extra_yml.ai_max_speed_kph).range(30..=350));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Content URL");
+                ui.add(egui::TextEdit::singleline(&mut self.extra_yml.content_url).desired_width(360.0));
+            });
+        });
+    }
+
+    fn poll_rcon(&mut self) {
+        let mut changed = false;
+        if let Some(rx) = &self.rcon_rx {
+            while let Ok(ev) = rx.try_recv() {
+                changed = true;
+                match ev {
+                    ServerEvent::NewConnection(c) => {
+                        self.rcon_drivers.insert(
+                            c.car_id,
+                            RconDriver {
+                                car_id: c.car_id,
+                                driver: c.driver_name.clone(),
+                                model: c.car_model,
+                                guid: c.driver_guid,
+                                connected: true,
+                                ..RconDriver::default()
+                            },
+                        );
+                        self.rcon_chat_log.push(format!("+ {} joined (#{})", c.driver_name, c.car_id));
+                    }
+                    ServerEvent::ConnectionClosed(c) => {
+                        if let Some(d) = self.rcon_drivers.get_mut(&c.car_id) {
+                            d.connected = false;
+                        }
+                        self.rcon_chat_log.push(format!("- {} left (#{})", c.driver_name, c.car_id));
+                    }
+                    ServerEvent::CarInfo { car_id, is_connected, model, driver_name, driver_guid, .. } => {
+                        let d = self.rcon_drivers.entry(car_id).or_default();
+                        d.car_id = car_id;
+                        d.connected = is_connected;
+                        d.model = model;
+                        d.driver = driver_name;
+                        d.guid = driver_guid;
+                    }
+                    ServerEvent::CarUpdate { car_id, vel, gear, normalized_spline_pos, .. } => {
+                        let d = self.rcon_drivers.entry(car_id).or_default();
+                        d.car_id = car_id;
+                        d.connected = true;
+                        d.gear = i32::from(gear);
+                        d.spline_pos = normalized_spline_pos;
+                        d.speed_kmh = (vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]).sqrt() * 3.6;
+                    }
+                    ServerEvent::LapCompleted { car_id, lap_time_ms, .. } => {
+                        let d = self.rcon_drivers.entry(car_id).or_default();
+                        d.lap = d.lap.saturating_add(1);
+                        d.last_lap_ms = lap_time_ms;
+                        if d.best_lap_ms == 0 || lap_time_ms < d.best_lap_ms {
+                            d.best_lap_ms = lap_time_ms;
+                        }
+                    }
+                    ServerEvent::Chat { car_id, message } => {
+                        self.rcon_chat_log.push(format!("[#{car_id}] {message}"));
+                    }
+                    ServerEvent::CollisionWithCar { car_id, other_car_id, impact_speed, .. } => {
+                        self.rcon_chat_log.push(format!("Collision #{car_id} <-> #{other_car_id} ({impact_speed:.1} km/h)"));
+                    }
+                    ServerEvent::Error(e) => {
+                        self.rcon_chat_log.push(format!("Server error: {e}"));
+                    }
+                    _ => {}
+                }
+                if self.rcon_chat_log.len() > 100 {
+                    self.rcon_chat_log.drain(0..self.rcon_chat_log.len() - 100);
+                }
+            }
+        }
+        if changed && let Some(dash) = &self.spectator_dash {
+            let cars = self
+                .rcon_drivers
+                .values()
+                .map(|d| SpectatorCar {
+                    car_id: d.car_id,
+                    driver: d.driver.clone(),
+                    model: d.model.clone(),
+                    x: d.spline_pos,
+                    z: 0.5,
+                    spline_pos: d.spline_pos,
+                    speed_kmh: d.speed_kmh,
+                    gear: d.gear,
+                    lap: d.lap,
+                    best_lap_ms: d.best_lap_ms,
+                    last_lap_ms: d.last_lap_ms,
+                    gap_ms: 0,
+                    connected: d.connected,
+                })
+                .collect();
+            dash.publish_race(RaceState {
+                track: self.cfg.track.clone(),
+                session: "Live".into(),
+                elapsed_ms: 0,
+                track_outline: Vec::new(),
+                cars,
+                recent_events: self.rcon_chat_log.iter().rev().take(8).cloned().collect(),
+            });
+        }
+    }
+
+    fn rcon_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, notices: &mut Vec<Notice>) {
+        widgets::section_title(ui, "Live Admin / RCON (AC Server UDP Plugin v4)");
+        theme::card().show(ui, |ui| {
+            let connected = self.rcon_client.is_some();
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Local UDP Port");
+                ui.add_enabled(!connected, egui::DragValue::new(&mut self.rcon_local_port).range(1024..=65535));
+                ui.label("Server Plugin Addr");
+                ui.add_enabled(!connected, egui::TextEdit::singleline(&mut self.rcon_server_addr).desired_width(160.0));
+                if !connected {
+                    if ui.add(widgets::primary_button("Connect RCON")).clicked() {
+                        match self.rcon_server_addr.parse::<SocketAddr>() {
+                            Ok(server_addr) => {
+                                let local: SocketAddr = ([127, 0, 0, 1], self.rcon_local_port).into();
+                                match RconClient::bind(local, server_addr, Duration::from_millis(250)) {
+                                    Ok(client) => {
+                                        let client = Arc::new(client);
+                                        let _ = client.send_cmd(&AdminCmd::SetRealtimePosInterval(250));
+                                        let _ = client.send_cmd(&AdminCmd::GetSessionInfo(-1));
+                                        let stop = Arc::new(AtomicBool::new(false));
+                                        let (tx, rx) = mpsc::channel();
+                                        let c_bg = Arc::clone(&client);
+                                        let s_bg = Arc::clone(&stop);
+                                        let ctx_bg = ctx.clone();
+                                        thread::spawn(move || {
+                                            while !s_bg.load(Ordering::Acquire) {
+                                                if let Ok(ev) = c_bg.recv_event() {
+                                                    if tx.send(ev).is_err() {
+                                                        break;
+                                                    }
+                                                    ctx_bg.request_repaint();
+                                                }
+                                            }
+                                        });
+                                        self.rcon_stop = stop;
+                                        self.rcon_client = Some(client);
+                                        self.rcon_rx = Some(rx);
+                                        notices.push(ok("Connected RCON UDP plugin."));
+                                    }
+                                    Err(e) => notices.push(fail(format!("RCON bind failed: {e}"))),
+                                }
+                            }
+                            Err(_) => notices.push(fail("Invalid server address (expected ip:port).")),
+                        }
+                    }
+                } else if ui.button("Disconnect").clicked() {
+                    self.rcon_stop.store(true, Ordering::Release);
+                    self.rcon_client = None;
+                    self.rcon_rx = None;
+                }
+            });
+
+            if let Some(client) = self.rcon_client.clone() {
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.rcon_broadcast).hint_text("Broadcast message to all drivers…").desired_width(280.0));
+                    if ui.button("Broadcast").clicked() && !self.rcon_broadcast.trim().is_empty() {
+                        let msg = std::mem::take(&mut self.rcon_broadcast);
+                        let _ = client.send_cmd(&AdminCmd::BroadcastChat(msg));
+                    }
+                    if ui.button("Next Session").clicked() {
+                        let _ = client.send_cmd(&AdminCmd::NextSession);
+                    }
+                    if ui.button("Restart Session").clicked() {
+                        let _ = client.send_cmd(&AdminCmd::RestartSession);
+                    }
+                });
+                ui.add_space(8.0);
+                egui::Grid::new("rcon_drivers_grid").striped(true).spacing([12.0, 6.0]).show(ui, |ui| {
+                    for h in ["ID", "Driver", "Car", "Lap", "Speed", "Actions"] {
+                        ui.label(RichText::new(h).font(theme::mono(11.5)).color(MUTED));
+                    }
+                    ui.end_row();
+                    for d in self.rcon_drivers.values().filter(|d| d.connected) {
+                        ui.label(RichText::new(format!("#{}", d.car_id)).font(theme::mono(12.0)));
+                        ui.label(&d.driver);
+                        ui.label(&d.model);
+                        ui.label(format!("{}", d.lap));
+                        ui.label(format!("{:.0} km/h", d.speed_kmh));
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Kick").clicked() {
+                                let _ = client.send_cmd(&AdminCmd::KickUser(d.car_id));
+                            }
+                            if ui.small_button("Ban").clicked() {
+                                let _ = client.send_cmd(&AdminCmd::AdminCommand(format!("/ban_id {}", d.car_id)));
+                            }
+                            if ui.small_button("+20 kg").clicked() {
+                                let _ = client.send_cmd(&AdminCmd::AdminCommand(format!("/ballast {} 20", d.car_id)));
+                            }
+                        });
+                        ui.end_row();
+                    }
+                });
+            }
+        });
+
+        ui.add_space(12.0);
+        widgets::section_title(ui, "Live Spectator Web Dashboard (/spectator)");
+        theme::card().show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if let Some(dash) = &self.spectator_dash {
+                    let url = format!("http://{}/spectator", dash.local_addr());
+                    widgets::pill(ui, "RUNNING", OK);
+                    ui.label(RichText::new(&url).font(theme::mono(12.5)).color(INFO));
+                    if ui.button("Copy URL").clicked() {
+                        ui.ctx().copy_text(url);
+                        notices.push(ok("Spectator URL copied."));
+                    }
+                    if ui.button("Stop Dashboard").clicked() {
+                        self.spectator_dash = None;
+                    }
+                } else {
+                    ui.label("Port");
+                    ui.add(egui::DragValue::new(&mut self.spectator_port).range(1024..=65535));
+                    if ui.add(widgets::primary_button("Start Spectator Dashboard")).clicked() {
+                        match Dashboard::start(acxs_manager::web_dashboard::DEFAULT_BIND, self.spectator_port) {
+                            Ok(dash) => {
+                                notices.push(ok(format!("Spectator live at http://{}/spectator", dash.local_addr())));
+                                self.spectator_dash = Some(dash);
+                            }
+                            Err(e) => notices.push(fail(format!("Could not start dashboard: {e}"))),
+                        }
+                    }
+                }
+            });
+        });
     }
 }
 

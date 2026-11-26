@@ -6,8 +6,11 @@
 use super::{Tool, ToolContext};
 use crate::ui::theme::{self, MUTED};
 use crate::ui::{widgets, Notice};
-use acxs_manager::championship::{self, Championship, Standing};
+use acxs_manager::championship::{self, Championship, Round, Standing};
+use acxs_manager::race::{self, AiOpponent};
+use acxs_manager::{game, race_out, settings};
 use eframe::egui::{self, RichText, TextEdit};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
@@ -22,6 +25,12 @@ pub fn tool() -> Box<dyn Tool> {
         selected: None,
         create: CreateForm { points: DEFAULT_POINTS.to_string(), ..CreateForm::default() },
         round: RoundForm::default(),
+        ballast_input: "30, 20, 10".to_string(),
+        player_name: "Driver".to_string(),
+        new_opp_car: "ks_ferrari_488_gt3".to_string(),
+        new_opp_name: String::new(),
+        new_opp_ai: 92,
+        ac_root: None,
         dialog_open: false,
     })
 }
@@ -41,6 +50,12 @@ enum Action {
     Select(usize),
     Create,
     AddRound,
+    AddScheduledRound,
+    LaunchRound(usize),
+    ImportRaceOut(usize),
+    AddOpponent,
+    RemoveOpponent(usize),
+    ApplyBallast,
     LoadServerResults,
     SetCustomPoints,
     OpenFile,
@@ -61,6 +76,7 @@ struct RoundForm {
     track: String,
     layout: String,
     csv: String,
+    laps: u32,
 }
 
 struct ChampionshipsPage {
@@ -71,6 +87,12 @@ struct ChampionshipsPage {
     selected: Option<usize>,
     create: CreateForm,
     round: RoundForm,
+    ballast_input: String,
+    player_name: String,
+    new_opp_car: String,
+    new_opp_name: String,
+    new_opp_ai: u8,
+    ac_root: Option<PathBuf>,
     /// True while a file dialog is open on a background thread.
     dialog_open: bool,
 }
@@ -84,12 +106,13 @@ impl Tool for ChampionshipsPage {
         "Race"
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _ctx: &ToolContext, notices: &mut Vec<Notice>) {
+    fn ui(&mut self, ui: &mut egui::Ui, ctx: &ToolContext, notices: &mut Vec<Notice>) {
+        self.ac_root = if ctx.ac_valid { ctx.ac_root.clone() } else { None };
         self.poll(notices);
         widgets::heading(
             ui,
             "Championships",
-            "Build a series from round results and read the standings. Save and open files with the buttons.",
+            "Build playable AI seasons with success ballast, launch rounds, or import server/race_out.json results.",
         );
 
         let mut actions = Vec::new();
@@ -184,8 +207,18 @@ impl ChampionshipsPage {
             });
             ui.add_space(16.0);
             ui.vertical(|ui| {
-                match self.selected.and_then(|i| self.championships.get(i)) {
-                    Some(champ) => detail(ui, champ, &mut self.round, actions),
+                match self.selected.and_then(|i| self.championships.get_mut(i)) {
+                    Some(champ) => detail(
+                        ui,
+                        champ,
+                        &mut self.round,
+                        &mut self.ballast_input,
+                        &mut self.player_name,
+                        &mut self.new_opp_car,
+                        &mut self.new_opp_name,
+                        &mut self.new_opp_ai,
+                        actions,
+                    ),
                     None => widgets::empty_state(ui, "Select a championship to see its standings."),
                 }
             });
@@ -197,6 +230,18 @@ impl ChampionshipsPage {
             Action::Select(i) => self.selected = Some(i),
             Action::Create => report(notices, self.create_championship()),
             Action::AddRound => report(notices, self.add_round()),
+            Action::AddScheduledRound => report(notices, self.add_scheduled_round()),
+            Action::LaunchRound(round_idx) => report(notices, self.launch_round(round_idx)),
+            Action::ImportRaceOut(round_idx) => report(notices, self.import_race_out(round_idx)),
+            Action::AddOpponent => report(notices, self.add_opponent()),
+            Action::RemoveOpponent(idx) => {
+                if let Some(c) = self.selected.and_then(|i| self.championships.get_mut(i))
+                    && idx < c.opponents.len()
+                {
+                    c.opponents.remove(idx);
+                }
+            }
+            Action::ApplyBallast => report(notices, self.apply_ballast()),
             Action::SetCustomPoints => report(notices, self.set_custom_points()),
             Action::LoadServerResults => self.spawn_server_results(ctx),
             Action::OpenFile => self.spawn_open(ctx),
@@ -206,6 +251,85 @@ impl ChampionshipsPage {
                 }
             }
         }
+    }
+
+    fn add_scheduled_round(&mut self) -> Result<String, String> {
+        let index = self.selected.ok_or("Select a championship first.")?;
+        let track = self.round.track.trim().to_string();
+        if track.is_empty() {
+            return Err("Enter a track id for the scheduled round.".into());
+        }
+        let champ = &mut self.championships[index];
+        champ.rounds.push(Round {
+            track: track.clone(),
+            layout: Some(self.round.layout.trim().to_string()).filter(|s| !s.is_empty()),
+            results: Vec::new(),
+            laps: if self.round.laps == 0 { 5 } else { self.round.laps },
+            weather: "3_clear".into(),
+            time_of_day_hour: 13,
+            completed: false,
+        });
+        self.round.track.clear();
+        self.round.layout.clear();
+        Ok(format!("Scheduled round {} at {track}.", champ.rounds.len()))
+    }
+
+    fn launch_round(&self, round_idx: usize) -> Result<String, String> {
+        let index = self.selected.ok_or("Select a championship first.")?;
+        let root = self.ac_root.as_ref().ok_or("Set your Assetto Corsa folder in Settings first.")?;
+        if game::is_game_running() {
+            return Err("Assetto Corsa is already running. Close it first.".into());
+        }
+        let cfg = settings::ac_user_cfg_dir().ok_or("Could not find Documents/Assetto Corsa/cfg.")?;
+        let champ = &self.championships[index];
+        let qrace = champ
+            .build_round_race(round_idx, &self.player_name)
+            .map_err(|e| e.to_string())?;
+        race::write_race_ini(&cfg, &qrace).map_err(|e| e.to_string())?;
+        game::launch_game(root).map_err(|e| e.to_string())?;
+        Ok(format!("Launched Round {} at {} (ballast {} kg).", round_idx + 1, qrace.track, qrace.player_ballast))
+    }
+
+    fn import_race_out(&mut self, round_idx: usize) -> Result<String, String> {
+        let index = self.selected.ok_or("Select a championship first.")?;
+        let out_path = settings::ac_documents_dir()
+            .map(|d| d.join("out").join("race_out.json"))
+            .ok_or("Could not find Documents/Assetto Corsa.")?;
+        let summary = race_out::load_race_out(&out_path).map_err(|e| e.to_string())?;
+        let count = summary.results.len();
+        self.championships[index]
+            .record_round_results(round_idx, summary.results)
+            .map_err(|e| e.to_string())?;
+        Ok(format!("Recorded {count} results from race_out.json into Round {}.", round_idx + 1))
+    }
+
+    fn add_opponent(&mut self) -> Result<String, String> {
+        let index = self.selected.ok_or("Select a championship first.")?;
+        let car = self.new_opp_car.trim().to_string();
+        if car.is_empty() {
+            return Err("Enter an opponent car id.".into());
+        }
+        let champ = &mut self.championships[index];
+        let name = if self.new_opp_name.trim().is_empty() {
+            format!("AI {}", champ.opponents.len() + 1)
+        } else {
+            self.new_opp_name.trim().to_string()
+        };
+        champ.opponents.push(AiOpponent {
+            car,
+            driver_name: name.clone(),
+            ai_level: self.new_opp_ai,
+            ..Default::default()
+        });
+        self.new_opp_name.clear();
+        Ok(format!("Added opponent {name}."))
+    }
+
+    fn apply_ballast(&mut self) -> Result<String, String> {
+        let index = self.selected.ok_or("Select a championship first.")?;
+        let table = parse_points(&self.ballast_input)?;
+        self.championships[index].success_ballast_kg = table;
+        Ok("Updated success ballast table.".into())
     }
 
     fn set_custom_points(&mut self) -> Result<String, String> {
@@ -327,7 +451,7 @@ impl ChampionshipsPage {
                 Msg::Done { loaded, notice } => (loaded, notice),
                 Msg::Results(race) => {
                     let text = format!("Read the race at {}. Check it, then add the round.", race.track);
-                    self.round = RoundForm { track: race.track, layout: race.layout, csv: race.csv };
+                    self.round = RoundForm { track: race.track, layout: race.layout, csv: race.csv, laps: 5 };
                     (None, Some(Notice { text, ok: true }))
                 }
             };
@@ -375,9 +499,20 @@ fn file_stem(name: &str) -> String {
     if stem.is_empty() { "championship".to_string() } else { stem }
 }
 
-/// The details of one championship: standings, rounds and the form to add a round.
-fn detail(ui: &mut egui::Ui, champ: &Championship, form: &mut RoundForm, actions: &mut Vec<Action>) {
-    ui.label(RichText::new(champ.name.as_str()).size(20.0).strong());
+/// The details of one championship: standings, playable AI season config, rounds and add-round form.
+#[allow(clippy::too_many_arguments)]
+fn detail(
+    ui: &mut egui::Ui,
+    champ: &mut Championship,
+    form: &mut RoundForm,
+    ballast_input: &mut String,
+    player_name: &mut String,
+    new_opp_car: &mut String,
+    new_opp_name: &mut String,
+    new_opp_ai: &mut u8,
+    actions: &mut Vec<Action>,
+) {
+    ui.label(RichText::new(champ.name.as_str()).font(theme::display(22.0)));
     let table = if champ.points_table.is_empty() {
         "none".to_string()
     } else {
@@ -385,12 +520,61 @@ fn detail(ui: &mut egui::Ui, champ: &Championship, form: &mut RoundForm, actions
     };
     ui.label(RichText::new(format!("Points: {table}  ·  {} rounds", champ.rounds.len())).color(MUTED));
 
+    ui.add_space(8.0);
+    theme::card_elevated().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            widgets::toggle(ui, &mut champ.playable);
+            ui.label("Playable AI Season");
+            ui.add_space(12.0);
+            ui.label(RichText::new("Fastest lap bonus:").color(MUTED));
+            ui.add(egui::DragValue::new(&mut champ.scoring.fastest_lap_bonus).range(0..=5).suffix(" pts"));
+            ui.add_space(12.0);
+            ui.label(RichText::new("Success ballast (kg):").color(MUTED));
+            ui.add(TextEdit::singleline(ballast_input).desired_width(110.0));
+            if ui.small_button("Set").clicked() {
+                actions.push(Action::ApplyBallast);
+            }
+        });
+        if champ.playable {
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Driver:").color(MUTED));
+                ui.add(TextEdit::singleline(player_name).desired_width(120.0));
+                ui.label(RichText::new("Car ID:").color(MUTED));
+                ui.add(TextEdit::singleline(&mut champ.player_car).hint_text("ks_ferrari_488_gt3").desired_width(180.0));
+            });
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Add AI:").color(MUTED));
+                ui.add(TextEdit::singleline(new_opp_car).hint_text("car id").desired_width(150.0));
+                ui.add(TextEdit::singleline(new_opp_name).hint_text("driver name").desired_width(110.0));
+                ui.add(egui::DragValue::new(new_opp_ai).range(70..=100).suffix("%"));
+                if ui.small_button("+ Add").clicked() {
+                    actions.push(Action::AddOpponent);
+                }
+            });
+            if !champ.opponents.is_empty() {
+                ui.add_space(4.0);
+                for (idx, opp) in champ.opponents.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("{} · {} · AI {}%", opp.driver_name, opp.car, opp.ai_level)).font(theme::mono(12.0)));
+                        if ui.small_button("×").clicked() {
+                            actions.push(Action::RemoveOpponent(idx));
+                        }
+                    });
+                }
+            }
+        }
+    });
+
     ui.add_space(10.0);
     widgets::section_title(ui, "Standings");
-    if champ.rounds.is_empty() {
-        widgets::empty_state(ui, "No rounds yet. Add the first round below.");
+    let rows = championship::standings_with(champ, champ.scoring);
+    if rows.is_empty() {
+        widgets::empty_state(ui, "No completed rounds yet.");
     } else {
-        standings_grid(ui, &championship::standings(champ));
+        standings_grid(ui, &rows, &champ.success_ballast_kg);
     }
 
     ui.add_space(12.0);
@@ -407,18 +591,31 @@ fn detail(ui: &mut egui::Ui, champ: &Championship, form: &mut RoundForm, actions
             .results
             .iter()
             .find(|r| r.position == 1 && !r.dnf)
-            .map_or("no winner listed", |r| r.driver.as_str());
-        ui.label(format!(
-            "R{}  {place}  -  winner: {winner}  -  {} results",
-            i + 1,
-            round.results.len()
-        ));
+            .map_or("scheduled", |r| r.driver.as_str());
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!(
+                    "R{}  {place}  ·  {winner}  ·  {} results",
+                    i + 1,
+                    round.results.len()
+                ))
+                .font(theme::mono(12.5)),
+            );
+            if champ.playable {
+                if ui.small_button("Launch Round").clicked() {
+                    actions.push(Action::LaunchRound(i));
+                }
+                if ui.small_button("Import race_out.json").clicked() {
+                    actions.push(Action::ImportRaceOut(i));
+                }
+            }
+        });
     }
 
     ui.add_space(12.0);
     widgets::section_title(ui, "Add a round");
     ui.label(
-        RichText::new("Paste results as CSV: driver,position,fastest_lap,dnf. The last two columns are optional.")
+        RichText::new("Schedule a playable round or paste CSV results (driver,position,fastest_lap,dnf).")
             .small()
             .color(MUTED),
     );
@@ -426,22 +623,26 @@ fn detail(ui: &mut egui::Ui, champ: &Championship, form: &mut RoundForm, actions
         ui.add(
             TextEdit::singleline(&mut form.track)
                 .hint_text("Track")
-                .desired_width(240.0),
+                .desired_width(220.0),
         );
         ui.add(
             TextEdit::singleline(&mut form.layout)
                 .hint_text("Layout (optional)")
-                .desired_width(180.0),
+                .desired_width(160.0),
         );
+        ui.add(egui::DragValue::new(&mut form.laps).range(0..=200).suffix(" laps"));
+        if champ.playable && ui.button("Schedule round").clicked() {
+            actions.push(Action::AddScheduledRound);
+        }
     });
     ui.add(
         TextEdit::multiline(&mut form.csv)
             .hint_text("driver,position,fastest_lap,dnf\nAlice,1,yes,no\nBob,2,no,no")
-            .desired_rows(6)
+            .desired_rows(5)
             .desired_width(520.0),
     );
     ui.horizontal(|ui| {
-        if ui.add(widgets::primary_button("Add round")).clicked() {
+        if ui.add(widgets::primary_button("Add round from CSV")).clicked() {
             actions.push(Action::AddRound);
         }
         if ui
@@ -454,23 +655,25 @@ fn detail(ui: &mut egui::Ui, champ: &Championship, form: &mut RoundForm, actions
     });
 }
 
-fn standings_grid(ui: &mut egui::Ui, rows: &[Standing]) {
+fn standings_grid(ui: &mut egui::Ui, rows: &[Standing], ballast: &[u32]) {
     egui::Grid::new("championship_standings")
         .striped(true)
-        .num_columns(7)
+        .num_columns(8)
         .show(ui, |ui| {
-            for header in ["Pos", "Driver", "Points", "Wins", "Fastest laps", "Best finish", "Rounds"] {
+            for header in ["Pos", "Driver", "Points", "Wins", "Fastest laps", "Best", "Rounds", "Next Ballast"] {
                 ui.label(RichText::new(header).color(MUTED));
             }
             ui.end_row();
             for (i, row) in rows.iter().enumerate() {
-                ui.label((i + 1).to_string());
+                ui.label(RichText::new((i + 1).to_string()).font(theme::mono(12.5)));
                 ui.label(row.driver.as_str());
-                ui.label(row.points.to_string());
-                ui.label(row.wins.to_string());
-                ui.label(row.fastest_laps.to_string());
-                ui.label(row.best_position.map_or("-".to_string(), |p| format!("P{p}")));
-                ui.label(row.rounds_entered.to_string());
+                ui.label(RichText::new(row.points.to_string()).font(theme::mono(12.5)));
+                ui.label(RichText::new(row.wins.to_string()).font(theme::mono(12.5)));
+                ui.label(RichText::new(row.fastest_laps.to_string()).font(theme::mono(12.5)));
+                ui.label(RichText::new(row.best_position.map_or("-".to_string(), |p| format!("P{p}"))).font(theme::mono(12.5)));
+                ui.label(RichText::new(row.rounds_entered.to_string()).font(theme::mono(12.5)));
+                let kg = ballast.get(i).copied().unwrap_or(0);
+                ui.label(RichText::new(if kg > 0 { format!("+{kg} kg") } else { "-".into() }).font(theme::mono(12.5)));
                 ui.end_row();
             }
         });

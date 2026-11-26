@@ -9,7 +9,9 @@ use crate::ui::{theme, widgets, Notice};
 use acxs_manager::content::{scan_cars, scan_tracks, CarEntry, TrackEntry};
 use acxs_manager::game;
 use acxs_manager::lua_apps::{self, AppScope, LuaApp};
-use acxs_manager::mods::{self, ContentKind, DisabledItem, ModError};
+use acxs_manager::mods::{
+    self, ContentKind, DisabledItem, EnabledMod, ModConflict, ModError,
+};
 use acxs_manager::rare::{self, RareSettings};
 use eframe::egui::{self, RichText};
 use std::path::{Path, PathBuf};
@@ -33,12 +35,16 @@ pub fn tool() -> Box<dyn Tool> {
         rare_error: None,
         rare_disk: None,
         rare_edit: None,
+        jsgme_available: Vec::new(),
+        jsgme_enabled: Vec::new(),
+        jsgme_conflicts: std::collections::BTreeMap::new(),
     })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Section {
     Content,
+    Jsgme,
     Lua,
     Rare,
 }
@@ -49,6 +55,11 @@ enum Msg {
         cars: Vec<CarEntry>,
         tracks: Vec<TrackEntry>,
         disabled: Vec<DisabledItem>,
+    },
+    Jsgme {
+        available: Vec<String>,
+        enabled: Vec<EnabledMod>,
+        conflicts: std::collections::BTreeMap<String, Vec<ModConflict>>,
     },
     Apps(Vec<LuaApp>),
     Rare {
@@ -63,6 +74,8 @@ enum Msg {
 /// drawing code never needs to borrow the page mutably for a spawn.
 enum Action {
     Move { kind: ContentKind, id: String, disable: bool },
+    JsgmeEnable(String),
+    JsgmeDisable(String),
     SaveRare(RareSettings),
     InstallApp(PathBuf),
     RemoveApp(String),
@@ -89,6 +102,9 @@ struct ModsPage {
     rare_disk: Option<RareSettings>,
     /// The settings shown in the form, possibly with unsaved edits.
     rare_edit: Option<RareSettings>,
+    jsgme_available: Vec<String>,
+    jsgme_enabled: Vec<EnabledMod>,
+    jsgme_conflicts: std::collections::BTreeMap<String, Vec<ModConflict>>,
 }
 
 /// Sends `Finished` when dropped, so a job always ends the busy state.
@@ -109,6 +125,27 @@ fn load_content(root: &Path, tx: &Sender<Msg>) {
         cars: scan_cars(root),
         tracks: scan_tracks(root),
         disabled: mods::list_disabled(root),
+    });
+}
+
+fn load_jsgme(root: &Path, tx: &Sender<Msg>) {
+    let available = mods::list_jsgme_mods(root, None);
+    let enabled = mods::load_jsgme_state(root)
+        .map(|s| s.enabled)
+        .unwrap_or_default();
+    let mut conflicts = std::collections::BTreeMap::new();
+    for name in &available {
+        if !enabled.iter().any(|e| e.name.eq_ignore_ascii_case(name))
+            && let Ok(c) = mods::check_jsgme_conflicts(root, None, name)
+            && !c.is_empty()
+        {
+            conflicts.insert(name.clone(), c);
+        }
+    }
+    let _ = tx.send(Msg::Jsgme {
+        available,
+        enabled,
+        conflicts,
     });
 }
 
@@ -159,6 +196,8 @@ impl ModsPage {
         let dir = root.to_path_buf();
         self.spawn(ctx, move |tx| load_content(&dir, tx));
         let dir = root.to_path_buf();
+        self.spawn(ctx, move |tx| load_jsgme(&dir, tx));
+        let dir = root.to_path_buf();
         self.spawn(ctx, move |tx| load_apps(&dir, tx));
         let dir = root.to_path_buf();
         self.spawn(ctx, move |tx| load_rare(&dir, tx));
@@ -172,6 +211,15 @@ impl ModsPage {
                     self.cars = cars;
                     self.tracks = tracks;
                     self.disabled = disabled;
+                }
+                Msg::Jsgme {
+                    available,
+                    enabled,
+                    conflicts,
+                } => {
+                    self.jsgme_available = available;
+                    self.jsgme_enabled = enabled;
+                    self.jsgme_conflicts = conflicts;
                 }
                 Msg::Apps(apps) => self.apps = apps,
                 Msg::Rare { installed, settings } => {
@@ -212,6 +260,39 @@ impl ModsPage {
                     };
                     let _ = tx.send(Msg::Notice(notice));
                     load_content(&root, tx);
+                });
+            }
+            Action::JsgmeEnable(name) => {
+                self.spawn(ctx, move |tx| {
+                    let game_running = game::is_game_running();
+                    let notice = match mods::enable_jsgme_mod(&root, None, &name, game_running) {
+                        Ok(m) => Notice {
+                            text: format!(
+                                "Enabled JSGME mod {} ({} files, {} backed up).",
+                                m.name,
+                                m.files.len(),
+                                m.backed_up.len()
+                            ),
+                            ok: true,
+                        },
+                        Err(e) => Notice { text: e.to_string(), ok: false },
+                    };
+                    let _ = tx.send(Msg::Notice(notice));
+                    load_jsgme(&root, tx);
+                });
+            }
+            Action::JsgmeDisable(name) => {
+                self.spawn(ctx, move |tx| {
+                    let game_running = game::is_game_running();
+                    let notice = match mods::disable_jsgme_mod(&root, &name, game_running) {
+                        Ok(()) => Notice {
+                            text: format!("Disabled JSGME mod {name} and restored backed-up files."),
+                            ok: true,
+                        },
+                        Err(e) => Notice { text: e.to_string(), ok: false },
+                    };
+                    let _ = tx.send(Msg::Notice(notice));
+                    load_jsgme(&root, tx);
                 });
             }
             Action::SaveRare(settings) => {
@@ -333,6 +414,92 @@ impl ModsPage {
                 widgets::pill(ui, label, color);
             });
         }
+
+        action
+    }
+
+    fn draw_jsgme(&self, ui: &mut egui::Ui, game_running: bool, root: &Path) -> Option<Action> {
+        let mut action = None;
+        let locked = self.pending > 0 || game_running;
+
+        if game_running {
+            ui.label(
+                RichText::new("Assetto Corsa is running. Close it before toggling JSGME mods.")
+                    .color(theme::WARN),
+            );
+            ui.add_space(8.0);
+        }
+
+        ui.label(
+            RichText::new(format!(
+                "Generic file overlays in {}. Overwritten stock files are backed up to {} and restored on disable.",
+                mods::jsgme_mods_dir(root, None).display(),
+                root.join(mods::JSGME_BACKUP_DIR).display()
+            ))
+            .small()
+            .color(theme::MUTED),
+        );
+        ui.add_space(10.0);
+
+        ui.columns(2, |cols| {
+            cols[0].vertical(|ui| {
+                let available_inactive: Vec<&String> = self
+                    .jsgme_available
+                    .iter()
+                    .filter(|name| {
+                        !self
+                            .jsgme_enabled
+                            .iter()
+                            .any(|e| e.name.eq_ignore_ascii_case(name))
+                    })
+                    .collect();
+                widgets::section_title(ui, &format!("Available in MODS/ ({})", available_inactive.len()));
+                if available_inactive.is_empty() {
+                    ui.label(RichText::new("No inactive mod folders in MODS/.").color(theme::MUTED));
+                }
+                for name in available_inactive {
+                    let conflicts = self.jsgme_conflicts.get(name);
+                    let detail = match conflicts {
+                        Some(list) if !list.is_empty() => format!(
+                            "Overwrites {} file(s) from {}",
+                            list.len(),
+                            list[0].existing_mod
+                        ),
+                        _ => "No conflicts with active mods".into(),
+                    };
+                    item_row(ui, name, &detail, |ui| {
+                        if ui.add_enabled(!locked, egui::Button::new("Enable")).clicked() {
+                            action = Some(Action::JsgmeEnable(name.clone()));
+                        }
+                        if conflicts.is_some_and(|c| !c.is_empty()) {
+                            widgets::pill(ui, "Conflict", theme::WARN);
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
+            });
+
+            cols[1].vertical(|ui| {
+                widgets::section_title(ui, &format!("Enabled — Load Order ({})", self.jsgme_enabled.len()));
+                if self.jsgme_enabled.is_empty() {
+                    ui.label(RichText::new("No JSGME mods currently enabled.").color(theme::MUTED));
+                }
+                for (idx, m) in self.jsgme_enabled.iter().enumerate() {
+                    let detail = format!(
+                        "#{} · {} files · {} stock backups",
+                        idx + 1,
+                        m.files.len(),
+                        m.backed_up.len()
+                    );
+                    item_row(ui, &m.name, &detail, |ui| {
+                        if ui.add_enabled(!locked, egui::Button::new("Disable")).clicked() {
+                            action = Some(Action::JsgmeDisable(m.name.clone()));
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
+            });
+        });
 
         action
     }
@@ -487,6 +654,11 @@ impl Tool for ModsPage {
         let mut rescan = false;
         ui.horizontal(|ui| {
             ui.selectable_value(&mut section, Section::Content, "Content");
+            ui.selectable_value(
+                &mut section,
+                Section::Jsgme,
+                format!("JSGME MODS ({})", self.jsgme_enabled.len()),
+            );
             ui.selectable_value(&mut section, Section::Lua, "CSP apps");
             ui.selectable_value(&mut section, Section::Rare, "Race rules");
             ui.add_space(12.0);
@@ -509,6 +681,7 @@ impl Tool for ModsPage {
             .auto_shrink([false, false])
             .show(ui, |ui| match section {
                 Section::Content => self.draw_content(ui, game_running, &root),
+                Section::Jsgme => self.draw_jsgme(ui, game_running, &root),
                 Section::Lua => self.draw_apps(ui, busy, game_running),
                 Section::Rare => self.draw_rare(ui, busy || game_running),
             })

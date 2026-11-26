@@ -2,18 +2,38 @@
 //! two-track comparison. Scans and file reads run on background threads.
 
 use super::{Tool, ToolContext};
+use crate::ui::viewport3d::{self, Camera3D, CpuSubMesh, DrawItem, DrawLines, LineVertex, MeshVertex, RenderMode, SceneFrame};
 use crate::ui::{theme, widgets, Notice};
+use acxs_manager::ai_spline::{self, AiSpline};
 use acxs_manager::content::{filter_tracks, scan_tracks, TrackEntry};
+use acxs_manager::kn5_scene::{self, LoadOptions, NodeRole};
 use acxs_manager::thumbnails;
 use acxs_manager::track_compare::{compare_tracks, surface_changes, TrackDiff};
+use acxs_manager::track_files::{self, AiHint, DrsZone, TrackCamera, TrackSection};
 use acxs_manager::track_surfaces::{
     read_surfaces, set_friction, summarize, Surface, FRICTION_MAX, FRICTION_MIN,
 };
-use eframe::egui::{self, RichText};
+use eframe::egui::{self, Align2, Color32, Pos2, RichText, Sense, Stroke, pos2, vec2};
+use glam::{Mat4, Vec3};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InspectorView {
+    Map2D,
+    Mesh3D,
+}
+
+struct InspectorData {
+    fast_lane: Option<AiSpline>,
+    pit_lane: Option<AiSpline>,
+    drs_zones: Vec<DrsZone>,
+    cameras: Vec<TrackCamera>,
+    sections: Vec<TrackSection>,
+    ai_hints: Vec<AiHint>,
+}
 
 /// Upper bound for compare rows and surface-change lines shown at once.
 const MAX_LINES: usize = 200;
@@ -45,6 +65,13 @@ pub fn tool() -> Box<dyn Tool> {
         friction_owner: None,
         friction_draft: HashMap::new(),
         friction_busy: false,
+        inspector_view: InspectorView::Map2D,
+        inspector_key: None,
+        inspector_seq: 0,
+        inspector: Load::Idle,
+        mesh_3d: None,
+        uploaded_3d: None,
+        cam_3d: Camera3D::default(),
     })
 }
 
@@ -73,6 +100,10 @@ enum Msg {
     Batch { made: usize, failures: Vec<String> },
     /// A friction save finished: the surface name and the saved value or the error.
     Friction { surface: String, result: Result<f64, String> },
+    Inspector { seq: u64, data: Box<InspectorData> },
+    Mesh3D { key: (PathBuf, u64), result: Result<(Vec<CpuSubMesh>, Vec3), String> },
+    HintsSaved(Result<(), String>),
+    MapGenerated(Result<PathBuf, String>),
 }
 
 /// What the surfaces read was requested for.
@@ -113,6 +144,13 @@ struct TrackInfo {
     friction_draft: HashMap<String, f64>,
     /// A friction save is running.
     friction_busy: bool,
+    inspector_view: InspectorView,
+    inspector_key: Option<SurfaceKey>,
+    inspector_seq: u64,
+    inspector: Load<InspectorData>,
+    mesh_3d: Option<((PathBuf, u64), Vec<CpuSubMesh>)>,
+    uploaded_3d: Option<(PathBuf, u64)>,
+    cam_3d: Camera3D,
 }
 
 fn find<'a>(tracks: &'a [TrackEntry], id: Option<&str>) -> Option<&'a TrackEntry> {
@@ -222,6 +260,51 @@ impl TrackInfo {
                         Err(e) => Load::Failed(e),
                     };
                 }
+                Msg::Inspector { seq, data } if seq == self.inspector_seq => {
+                    if let Some(sp) = &data.fast_lane
+                        && let Some(p) = sp.points.first()
+                    {
+                        self.cam_3d = Camera3D::Orbit {
+                            target: Vec3::new(p.x, p.y, p.z),
+                            yaw: 0.7,
+                            pitch: 0.75,
+                            dist: 260.0,
+                        };
+                    }
+                    self.inspector = Load::Ready(*data);
+                }
+                Msg::Mesh3D { key, result } => match result {
+                    Ok((subs, center)) => {
+                        self.cam_3d = Camera3D::Orbit {
+                            target: center,
+                            yaw: 0.7,
+                            pitch: 0.65,
+                            dist: 280.0,
+                        };
+                        self.mesh_3d = Some((key, subs));
+                        self.uploaded_3d = None;
+                    }
+                    Err(e) => notices.push(Notice {
+                        text: format!("Could not load 3D track mesh: {e}"),
+                        ok: false,
+                    }),
+                },
+                Msg::HintsSaved(Ok(())) => notices.push(Notice {
+                    text: "Saved ai_hints.ini (backup created).".into(),
+                    ok: true,
+                }),
+                Msg::HintsSaved(Err(e)) => notices.push(Notice {
+                    text: format!("Could not save ai_hints.ini: {e}"),
+                    ok: false,
+                }),
+                Msg::MapGenerated(Ok(path)) => notices.push(Notice {
+                    text: format!("Generated map.png + map.ini in {}", path.display()),
+                    ok: true,
+                }),
+                Msg::MapGenerated(Err(e)) => notices.push(Notice {
+                    text: format!("Could not generate track map: {e}"),
+                    ok: false,
+                }),
                 _ => {}
             }
         }
@@ -265,11 +348,45 @@ impl TrackInfo {
                 if self.surfaces_key.as_ref() != Some(&key) {
                     self.surfaces_seq += 1;
                     let seq = self.surfaces_seq;
-                    self.surfaces_key = Some(key);
+                    self.surfaces_key = Some(key.clone());
                     self.surfaces = Load::Loading;
+                    let surf_dir = data_dir.clone();
                     self.spawn(egui_ctx, move || Msg::Surfaces {
                         seq,
-                        result: read_surfaces(&data_dir).map_err(|e| e.to_string()),
+                        result: read_surfaces(&surf_dir).map_err(|e| e.to_string()),
+                    });
+                }
+                if self.inspector_key.as_ref() != Some(&key) {
+                    self.inspector_seq += 1;
+                    let iseq = self.inspector_seq;
+                    self.inspector_key = Some(key);
+                    self.inspector = Load::Loading;
+                    self.mesh_3d = None;
+                    self.uploaded_3d = None;
+                    let base_dir = data_dir.parent().map(Path::to_path_buf).unwrap_or_else(|| data_dir.clone());
+                    let data_dir2 = data_dir.clone();
+                    self.spawn(egui_ctx, move || {
+                        let fast_lane = ai_spline::read_ai_spline(&base_dir.join("ai").join("fast_lane.ai")).ok();
+                        let pit_lane = ai_spline::read_ai_spline(&base_dir.join("ai").join("pit_lane.ai")).ok();
+                        let drs_zones = track_files::read_drs_zones(&data_dir2).unwrap_or_default();
+                        let cameras = track_files::read_cameras(&data_dir2.join("cameras.ini")).unwrap_or_default();
+                        let sections = track_files::read_sections(&data_dir2.join("sections.ini"))
+                            .ok()
+                            .filter(|v| !v.is_empty())
+                            .or_else(|| track_files::read_sections(&base_dir.join("ui").join("sections.ini")).ok())
+                            .unwrap_or_default();
+                        let ai_hints = track_files::read_ai_hints(&data_dir2).unwrap_or_default();
+                        Msg::Inspector {
+                            seq: iseq,
+                            data: Box::new(InspectorData {
+                                fast_lane,
+                                pit_lane,
+                                drs_zones,
+                                cameras,
+                                sections,
+                                ai_hints,
+                            }),
+                        }
                     });
                 }
             }
@@ -732,6 +849,8 @@ impl Tool for TrackInfo {
             .show(ui, |ui| {
                 self.list_section(ui);
                 ui.add_space(12.0);
+                self.inspector_section(ui, ctx);
+                ui.add_space(12.0);
                 self.details_section(ui);
                 if let Some(root) = root {
                     self.thumbnail_section(ui, root);
@@ -744,4 +863,312 @@ impl Tool for TrackInfo {
         // Selection and layout changes made above take effect this frame, not the next.
         self.sync(&egui_ctx, root);
     }
+}
+
+impl TrackInfo {
+    fn inspector_section(&mut self, ui: &mut egui::Ui, ctx: &ToolContext) {
+        let Some(track) = find(&self.tracks, self.selected.as_deref()).cloned() else {
+            return;
+        };
+        let base_dir = match &self.layout {
+            Some(l) => track.path.join(l),
+            None => track.path.clone(),
+        };
+        let data_dir = base_dir.join("data");
+
+        theme::card_elevated().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                widgets::section_title(ui, "Track & Map Inspector");
+                ui.add_space(12.0);
+                widgets::animated_tabs(
+                    ui,
+                    "track_inspector_tabs",
+                    &mut self.inspector_view,
+                    &[
+                        (InspectorView::Map2D, "2D Map", None),
+                        (InspectorView::Mesh3D, "3D Track", None),
+                    ],
+                );
+            });
+
+            match &mut self.inspector {
+                Load::Idle | Load::Loading => {
+                    ui.spinner();
+                    return;
+                }
+                Load::Failed(e) => {
+                    ui.label(RichText::new(e.as_str()).color(theme::CH_BRAKE));
+                    return;
+                }
+                Load::Ready(data) => {
+                    ui.horizontal_wrapped(|ui| {
+                        widgets::pill(
+                            ui,
+                            if data.fast_lane.is_some() { "fast_lane.ai OK" } else { "No fast_lane.ai" },
+                            if data.fast_lane.is_some() { theme::OK } else { theme::WARN },
+                        );
+                        widgets::pill(ui, &format!("{} DRS", data.drs_zones.len()), theme::CH_THROTTLE);
+                        widgets::pill(ui, &format!("{} TV Cams", data.cameras.len()), theme::CH_SPEED);
+                        widgets::pill(ui, &format!("{} Sections", data.sections.len()), theme::MUTED);
+                        if let Some(sp) = data.fast_lane.clone()
+                            && ui
+                                .add_enabled(!ctx.game_running, egui::Button::new("Generate map.png + map.ini"))
+                                .clicked()
+                        {
+                            let out_base = base_dir.clone();
+                            let out_data = data_dir.clone();
+                            let tx = self.tx.clone();
+                            let repaint = ui.ctx().clone();
+                            thread::spawn(move || {
+                                let res = (|| -> Result<PathBuf, String> {
+                                    let (png_bytes, map) =
+                                        track_files::generate_track_map_png(&sp, 1024, 24)
+                                            .map_err(|e| e.to_string())?;
+                                    let png_path = out_base.join("map.png");
+                                    if png_path.is_file() {
+                                        let _ = std::fs::rename(&png_path, out_base.join("map.png.acxs-backup"));
+                                    }
+                                    std::fs::write(&png_path, png_bytes).map_err(|e| e.to_string())?;
+                                    std::fs::create_dir_all(&out_data).map_err(|e| e.to_string())?;
+                                    let ini_path = out_data.join("map.ini");
+                                    if ini_path.is_file() {
+                                        let _ = std::fs::rename(&ini_path, out_data.join("map.ini.acxs-backup"));
+                                    }
+                                    std::fs::write(&ini_path, track_files::format_map_ini(&map))
+                                        .map_err(|e| e.to_string())?;
+                                    Ok(out_base)
+                                })();
+                                let _ = tx.send(Msg::MapGenerated(res));
+                                repaint.request_repaint();
+                            });
+                        }
+                    });
+                    ui.add_space(6.0);
+
+                    if self.inspector_view == InspectorView::Map2D {
+                        paint_track_2d(ui, data);
+                    } else {
+                        if self.mesh_3d.is_none()
+                            && ui.button("Load 3D KN5 Track Mesh").clicked()
+                        {
+                            let tdir = track.path.clone();
+                            let lay = self.layout.clone();
+                            let tx = self.tx.clone();
+                            let repaint = ui.ctx().clone();
+                            thread::spawn(move || {
+                                let res = load_track_3d_meshes(&tdir, lay.as_deref());
+                                let _ = tx.send(Msg::Mesh3D { key: (tdir, 0), result: res });
+                                repaint.request_repaint();
+                            });
+                        }
+                        if let (Some((key, subs)), Some(gl)) = (&self.mesh_3d, &ctx.gl)
+                            && self.uploaded_3d.as_ref() != Some(key)
+                            && let Ok(mut guard) = gl.lock()
+                        {
+                            guard.upload_mesh(key.clone(), subs);
+                            self.uploaded_3d = Some(key.clone());
+                        }
+                        let mut frame = SceneFrame {
+                            camera: self.cam_3d,
+                            render_mode: RenderMode::Shaded,
+                            ..SceneFrame::default()
+                        };
+                        if let Some((key, _)) = &self.mesh_3d {
+                            frame.items.push(DrawItem {
+                                mesh_key: key.clone(),
+                                model: Mat4::IDENTITY,
+                                tint_override: None,
+                                texture_override: None,
+                            });
+                        }
+                        if let Some(sp) = &data.fast_lane {
+                            frame.lines.push(DrawLines {
+                                vertices: sp
+                                    .points
+                                    .iter()
+                                    .map(|p| LineVertex {
+                                        pos: [p.x, p.y + 0.5, p.z],
+                                        color: [0.2, 0.85, 1.0, 1.0],
+                                    })
+                                    .collect(),
+                                strip: true,
+                            });
+                        }
+                        let dt = ui.input(|i| i.stable_dt);
+                        let gl = ctx.gl.clone();
+                        widgets::viewport_3d_frame(
+                            ui,
+                            vec2(ui.available_width(), 300.0),
+                            |ui| {
+                                widgets::pill(ui, "3D TRACK INSPECTOR", theme::CH_SPEED);
+                            },
+                            |ui, rect| {
+                                let resp = ui.interact(rect, ui.scope_id().with("ti_3d"), Sense::click_and_drag());
+                                ui.input(|i| {
+                                    if self.cam_3d.handle_input(&resp, i, dt) {
+                                        ui.ctx().request_repaint();
+                                    }
+                                });
+                                frame.camera = self.cam_3d;
+                                viewport3d::paint_viewport_3d(ui, rect, gl, frame, |ui, r| {
+                                    ui.painter().rect_filled(r, 0, theme::SURFACE_VOID);
+                                    ui.painter().text(
+                                        r.center(),
+                                        Align2::CENTER_CENTER,
+                                        "3D Track Inspector (2D fallback in headless mode)",
+                                        egui::FontId::proportional(13.0),
+                                        theme::MUTED,
+                                    );
+                                });
+                            },
+                        );
+                    }
+
+                    // Inline ai_hints.ini editor
+                    if !data.ai_hints.is_empty() {
+                        ui.add_space(8.0);
+                        egui::CollapsingHeader::new(format!("AI Hints ({})", data.ai_hints.len()))
+                            .show(ui, |ui| {
+                                for h in &mut data.ai_hints {
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new(&h.section).font(theme::mono(12.0)));
+                                        ui.add(egui::DragValue::new(&mut h.start).speed(0.005).range(0.0..=1.0).prefix("Start "));
+                                        ui.add(egui::DragValue::new(&mut h.end).speed(0.005).range(0.0..=1.0).prefix("End "));
+                                        ui.add(egui::DragValue::new(&mut h.value).speed(0.01).range(0.0..=2.0).prefix("Val "));
+                                    });
+                                }
+                                if ui
+                                    .add_enabled(!ctx.game_running, egui::Button::new("Save ai_hints.ini"))
+                                    .clicked()
+                                {
+                                    let ddir = data_dir.clone();
+                                    let hints = data.ai_hints.clone();
+                                    let tx = self.tx.clone();
+                                    let repaint = ui.ctx().clone();
+                                    thread::spawn(move || {
+                                        let res = track_files::save_ai_hints(&ddir, &hints).map_err(|e| e.to_string());
+                                        let _ = tx.send(Msg::HintsSaved(res));
+                                        repaint.request_repaint();
+                                    });
+                                }
+                            });
+                    }
+                }
+            }
+        });
+    }
+}
+
+fn paint_track_2d(ui: &mut egui::Ui, data: &InspectorData) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 260.0), Sense::hover());
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, 6, theme::SURFACE_VOID);
+    let Some(sp) = &data.fast_lane else {
+        p.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "No ai/fast_lane.ai found for this layout.",
+            egui::FontId::proportional(13.0),
+            theme::MUTED,
+        );
+        return;
+    };
+    if sp.points.len() < 2 {
+        return;
+    }
+    let (mut min_x, mut max_x) = (f32::INFINITY, f32::NEG_INFINITY);
+    let (mut min_z, mut max_z) = (f32::INFINITY, f32::NEG_INFINITY);
+    for pt in &sp.points {
+        min_x = min_x.min(pt.x);
+        max_x = max_x.max(pt.x);
+        min_z = min_z.min(pt.z);
+        max_z = max_z.max(pt.z);
+    }
+    let span = (max_x - min_x).max(max_z - min_z).max(1.0);
+    let scale = ((rect.width() - 32.0).min(rect.height() - 32.0) / span).max(1e-4);
+    let cx = 0.5 * (min_x + max_x);
+    let cz = 0.5 * (min_z + max_z);
+    let to_scr = |x: f32, z: f32| -> Pos2 {
+        pos2(rect.center().x + (x - cx) * scale, rect.center().y + (z - cz) * scale)
+    };
+
+    let (left, right) = sp.corridor_edges();
+    p.add(egui::Shape::line(
+        left.iter().map(|q| to_scr(q[0], q[2])).collect(),
+        Stroke::new(1.2, Color32::from_gray(90)),
+    ));
+    p.add(egui::Shape::line(
+        right.iter().map(|q| to_scr(q[0], q[2])).collect(),
+        Stroke::new(1.2, Color32::from_gray(90)),
+    ));
+    p.add(egui::Shape::line(
+        sp.points.iter().map(|q| to_scr(q.x, q.z)).collect(),
+        Stroke::new(2.0, theme::CH_SPEED),
+    ));
+    if let Some(pit) = &data.pit_lane {
+        p.add(egui::Shape::line(
+            pit.points.iter().map(|q| to_scr(q.x, q.z)).collect(),
+            Stroke::new(1.5, theme::WARN),
+        ));
+    }
+    for cam in &data.cameras {
+        let pos = to_scr(cam.position[0], cam.position[2]);
+        p.circle_filled(pos, 3.0, theme::CH_GEAR);
+    }
+}
+
+fn load_track_3d_meshes(track_dir: &Path, layout: Option<&str>) -> Result<(Vec<CpuSubMesh>, Vec3), String> {
+    let opts = LoadOptions {
+        load_textures: false,
+        skip_ac_helpers: true,
+        max_vertices: 2_000_000,
+        max_triangles: 2_000_000,
+    };
+    let scene = kn5_scene::load_track_layout(track_dir, layout, &opts).map_err(|e| e.to_string())?;
+    let mut subs = Vec::new();
+    let mut min_p = Vec3::splat(f32::INFINITY);
+    let mut max_p = Vec3::splat(f32::NEG_INFINITY);
+    for (_, model) in &scene.models {
+        for m in &model.meshes {
+            if m.name.starts_with("AC_") || m.indices.len() < 3 {
+                continue;
+            }
+            let tint = match &m.role {
+                NodeRole::SurfaceMesh { surface_key, .. } => match surface_key.as_str() {
+                    "ROAD" => [0.28, 0.30, 0.34, 1.0],
+                    "KERB" => [0.85, 0.22, 0.22, 1.0],
+                    "GRASS" => [0.22, 0.48, 0.24, 1.0],
+                    "SAND" | "GRAVEL" => [0.76, 0.68, 0.48, 1.0],
+                    _ => [0.55, 0.58, 0.62, 1.0],
+                },
+                _ => [0.65, 0.68, 0.72, 1.0],
+            };
+            let vertices: Vec<MeshVertex> = (0..m.positions.len())
+                .map(|i| {
+                    let pos = kn5_scene::mat4_transform(&m.transform, &m.positions[i], true);
+                    let v = Vec3::from_array(pos);
+                    min_p = min_p.min(v);
+                    max_p = max_p.max(v);
+                    MeshVertex {
+                        pos,
+                        normal: kn5_scene::mat4_transform(&m.transform, &m.normals[i], false),
+                        uv: m.uvs.get(i).copied().unwrap_or([0.0, 0.0]),
+                    }
+                })
+                .collect();
+            let indices = m.indices.iter().map(|&idx| u32::from(idx)).collect();
+            subs.push(CpuSubMesh {
+                vertices,
+                indices,
+                texture_key: None,
+                tint,
+            });
+        }
+    }
+    let center = if min_p.is_finite() && max_p.is_finite() {
+        (min_p + max_p) * 0.5
+    } else {
+        Vec3::ZERO
+    };
+    Ok((subs, center))
 }

@@ -6,11 +6,14 @@
 use super::{Tool, ToolContext};
 use crate::ui::theme::{self, MUTED, WARN};
 use crate::ui::{widgets, Notice};
+use acxs_manager::acd;
+use acxs_manager::cardata;
 use acxs_manager::car_tuning::{
     self, Axle, Change, Tuning, MAX_BASE_HEIGHT_M, MAX_CAMBER_DEG, MAX_FACTOR, MAX_FUEL_L, MAX_MASS_KG,
     MAX_PRESSURE_PSI, MIN_BASE_HEIGHT_M, MIN_CAMBER_DEG, MIN_FACTOR, MIN_FUEL_L, MIN_MASS_KG, MIN_PRESSURE_PSI,
 };
 use acxs_manager::content::{self, CarEntry};
+use acxs_manager::game;
 use acxs_manager::tuning_profiles::{self, ApplyProfileError, PROFILE_DIR, TuningProfile, TuningStep};
 use eframe::egui::{self, RichText};
 use std::path::{Path, PathBuf};
@@ -223,6 +226,82 @@ impl Tool for CarTuningPage {
         });
         if let Some(id) = picked {
             self.selected = Some(id);
+        }
+
+        // Opt-in data.acd Unpack / Repack banner for the selected car.
+        if let Some(car_id) = self.selected.clone() {
+            let car_dir = root.join("content").join("cars").join(&car_id);
+            let packed = cardata::uses_packed_data(&car_dir);
+            let has_data_dir = car_dir.join("data").is_dir();
+            if packed || has_data_dir {
+                ui.add_space(10.0);
+                theme::card_elevated().show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        if packed {
+                            widgets::pill(ui, "data.acd (packed)", WARN);
+                            ui.label(
+                                RichText::new(
+                                    "This car ships packed data.acd; Assetto Corsa ignores data/ until data.acd is unpacked and archived.",
+                                )
+                                .small()
+                                .color(MUTED),
+                            );
+                            let can_unpack = !self.busy && !ctx.game_running;
+                            if ui
+                                .add_enabled(can_unpack, egui::Button::new("Unpack data.acd (archive original)"))
+                                .clicked()
+                            {
+                                let running = game::is_game_running();
+                                match acd::unpack_car_data(&car_dir, running) {
+                                    Ok((count, archived)) => notices.push(Notice {
+                                        text: format!(
+                                            "Unpacked {count} files to data/ and archived data.acd to {}.",
+                                            archived.display()
+                                        ),
+                                        ok: true,
+                                    }),
+                                    Err(e) => notices.push(Notice {
+                                        text: format!("Unpack failed: {e}"),
+                                        ok: false,
+                                    }),
+                                }
+                            }
+                        } else {
+                            widgets::pill(ui, "data/ (unpacked)", theme::OK);
+                            ui.label(
+                                RichText::new("Car physics are unpacked and ready for tuning.")
+                                    .small()
+                                    .color(MUTED),
+                            );
+                            let can_pack = !self.busy && !ctx.game_running;
+                            if ui
+                                .add_enabled(can_pack, egui::Button::new("Repack data/ -> data.acd"))
+                                .clicked()
+                            {
+                                let running = game::is_game_running();
+                                match acd::pack_acd(
+                                    &car_dir.join("data"),
+                                    &car_id,
+                                    &car_dir.join("data.acd"),
+                                    running,
+                                ) {
+                                    Ok(count) => notices.push(Notice {
+                                        text: format!("Packed {count} files into data.acd (backup kept if one existed)."),
+                                        ok: true,
+                                    }),
+                                    Err(e) => notices.push(Notice {
+                                        text: format!("Repack failed: {e}"),
+                                        ok: false,
+                                    }),
+                                }
+                            }
+                        }
+                        if ctx.game_running {
+                            ui.label(RichText::new("Close AC first.").small().color(WARN));
+                        }
+                    });
+                });
+            }
         }
 
         ui.add_space(12.0);

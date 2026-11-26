@@ -3,12 +3,117 @@
 //! Left/Right switch skins, PageUp/PageDown switch cars, F toggles the favourite.
 
 use super::theme::{self, ACCENT, FAINT, MUTED, TEXT};
+use super::viewport3d::{self, Camera3D, CpuSubMesh, DrawItem, MeshVertex, RenderMode, SceneFrame};
 use super::{media, widgets, App};
 use crate::content::{self, CarEntry};
+use acxs_manager::kn5_scene::{self, LoadOptions};
 use eframe::egui::{self, Align2, Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, vec2};
+use glam::Mat4;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShowroomView {
+    Preview2D,
+    Showroom3D,
+}
+
+struct LoadedCar3D {
+    key: (PathBuf, u64),
+    submeshes: Vec<CpuSubMesh>,
+    tri_count: usize,
+    center: glam::Vec3,
+    radius: f32,
+}
+
+struct Showroom3DState {
+    view: ShowroomView,
+    camera: Camera3D,
+    render_mode: RenderMode,
+    requested: Option<(PathBuf, Option<String>)>,
+    loading: bool,
+    loaded: Option<LoadedCar3D>,
+    uploaded_key: Option<(PathBuf, u64)>,
+    error: Option<String>,
+    tx: Sender<((PathBuf, Option<String>), Result<LoadedCar3D, String>)>,
+    rx: Receiver<((PathBuf, Option<String>), Result<LoadedCar3D, String>)>,
+}
+
+impl Showroom3DState {
+    fn new() -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self {
+            view: ShowroomView::Preview2D,
+            camera: Camera3D::default(),
+            render_mode: RenderMode::Shaded,
+            requested: None,
+            loading: false,
+            loaded: None,
+            uploaded_key: None,
+            error: None,
+            tx,
+            rx,
+        }
+    }
+}
+
+fn state_3d() -> &'static Mutex<Showroom3DState> {
+    static STATE: OnceLock<Mutex<Showroom3DState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(Showroom3DState::new()))
+}
+
+fn build_car_3d(car_dir: &Path, skin: Option<&str>) -> Result<LoadedCar3D, String> {
+    let opts = LoadOptions {
+        load_textures: false,
+        skip_ac_helpers: true,
+        max_vertices: 1_500_000,
+        max_triangles: 1_500_000,
+    };
+    let car_scene = kn5_scene::load_car_lod(car_dir, skin, 0, &opts).map_err(|e| e.to_string())?;
+    let mut submeshes = Vec::new();
+    let mut tri_count = 0usize;
+    let mut min_p = glam::Vec3::splat(f32::INFINITY);
+    let mut max_p = glam::Vec3::splat(f32::NEG_INFINITY);
+
+    for mesh in &car_scene.scene.meshes {
+        if mesh.name.starts_with("AC_") || mesh.indices.len() < 3 {
+            continue;
+        }
+        let mut vertices = Vec::with_capacity(mesh.positions.len());
+        for i in 0..mesh.positions.len() {
+            let p = kn5_scene::mat4_transform(&mesh.transform, &mesh.positions[i], true);
+            let n = kn5_scene::mat4_transform(&mesh.transform, &mesh.normals[i], false);
+            let uv = mesh.uvs.get(i).copied().unwrap_or([0.0, 0.0]);
+            let v = glam::Vec3::from_array(p);
+            min_p = min_p.min(v);
+            max_p = max_p.max(v);
+            vertices.push(MeshVertex { pos: p, normal: n, uv });
+        }
+        let indices: Vec<u32> = mesh.indices.iter().map(|&idx| u32::from(idx)).collect();
+        tri_count += indices.len() / 3;
+        submeshes.push(CpuSubMesh {
+            vertices,
+            indices,
+            texture_key: None,
+            tint: [0.84, 0.87, 0.91, 1.0],
+        });
+    }
+    let (center, radius) = if min_p.is_finite() && max_p.is_finite() {
+        ((min_p + max_p) * 0.5, ((max_p - min_p).length() * 0.5).max(1.5))
+    } else {
+        (glam::Vec3::ZERO, 2.5)
+    };
+    let hash = skin.map_or(0u64, |s| s.bytes().fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(u64::from(b))));
+    Ok(LoadedCar3D {
+        key: (car_dir.join(&car_scene.lod_file), hash),
+        submeshes,
+        tri_count,
+        center,
+        radius,
+    })
+}
 
 /// One line of the spec sheet.
 struct Spec {
@@ -163,23 +268,26 @@ pub fn showroom(app: &mut App, ui: &mut egui::Ui) {
             ui.set_width(304.0);
             ui.set_min_height(area.y - 38.0);
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                ui.label(RichText::new("SPECS").font(theme::bold(11.0)).color(FAINT));
+                ui.label(RichText::new("SPECS").font(theme::display(13.0)).color(FAINT));
                 ui.add_space(6.0);
                 if info.specs.is_empty() {
                     ui.label(RichText::new("This car ships no spec sheet.").color(MUTED));
                 }
                 for spec in &info.specs {
+                    widgets::spec_bar_animated(ui, &car.id, spec.label, &spec.value, spec.fill, ACCENT);
+                }
+                if info.specs.len() >= 3 {
+                    let axes: Vec<(&str, f32)> = info
+                        .specs
+                        .iter()
+                        .take(6)
+                        .map(|s| (s.label, s.fill))
+                        .collect();
+                    ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(spec.label).color(MUTED));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new(&spec.value).font(theme::bold(14.0)));
-                        });
+                        ui.add_space(((ui.available_width() - 180.0) * 0.5).max(0.0));
+                        widgets::radar_chart(ui, 180.0, &axes, ACCENT);
                     });
-                    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
-                    ui.painter().rect_filled(rect, CornerRadius::same(3), theme::INPUT);
-                    let fill = Rect::from_min_size(rect.min, vec2(rect.width() * spec.fill, rect.height()));
-                    ui.painter().rect_filled(fill, CornerRadius::same(3), ACCENT.gamma_multiply(0.55 + 0.45 * spec.fill));
-                    ui.add_space(6.0);
                 }
 
                 if !info.description.is_empty() {
@@ -227,15 +335,163 @@ pub fn showroom(app: &mut App, ui: &mut egui::Ui) {
     });
     ui.allocate_ui_with_layout(vec2(ui.available_width(), area.y), egui::Layout::top_down(egui::Align::Min), |ui| {
 
+    // Mode toggle bar: 2D Preview | 3D Showroom.
+    let mut show_3d = false;
+    if let Ok(mut st) = state_3d().lock() {
+        while let Ok((req, res)) = st.rx.try_recv() {
+            if st.requested.as_ref() == Some(&req) {
+                st.loading = false;
+                match res {
+                    Ok(loaded) => {
+                        st.camera = Camera3D::Orbit {
+                            target: loaded.center,
+                            yaw: 0.75,
+                            pitch: 0.30,
+                            dist: loaded.radius * 2.4,
+                        };
+                        st.loaded = Some(loaded);
+                        st.uploaded_key = None;
+                        st.error = None;
+                    }
+                    Err(e) => {
+                        st.loaded = None;
+                        st.error = Some(e);
+                    }
+                }
+            }
+        }
+        ui.horizontal(|ui| {
+            widgets::animated_tabs(
+                ui,
+                "showroom_view_mode",
+                &mut st.view,
+                &[
+                    (ShowroomView::Preview2D, "2D Preview", None),
+                    (ShowroomView::Showroom3D, "3D Showroom", None),
+                ],
+            );
+            if st.view == ShowroomView::Showroom3D {
+                ui.add_space(8.0);
+                for (m, lbl) in [
+                    (RenderMode::Shaded, "Shaded"),
+                    (RenderMode::Wireframe, "Wireframe"),
+                    (RenderMode::Normals, "Normals"),
+                ] {
+                    ui.selectable_value(&mut st.render_mode, m, lbl);
+                }
+            }
+        });
+        ui.add_space(6.0);
+        show_3d = st.view == ShowroomView::Showroom3D;
+    }
+
     // Hero, sized to leave room for the skin strip.
     let strip_height = if skins.len() > 1 { 104.0 } else { 0.0 };
     let avail = ui.available_size();
     let hero_h = (avail.y - strip_height - 8.0).max(200.0).min(avail.x * 9.0 / 16.0);
     let hero_w = (hero_h * 16.0 / 9.0).min(avail.x);
+    let current = skins.get(skin_pos);
+
+    if show_3d {
+        let skin_name = current.map(|(n, _)| n.clone());
+        if let Ok(mut st) = state_3d().lock() {
+            let req = (car.path.clone(), skin_name.clone());
+            if st.requested.as_ref() != Some(&req) {
+                st.requested = Some(req.clone());
+                st.loading = true;
+                st.error = None;
+                let tx = st.tx.clone();
+                let ctx = ui.ctx().clone();
+                std::thread::spawn(move || {
+                    let res = build_car_3d(&req.0, req.1.as_deref());
+                    let _ = tx.send((req, res));
+                    ctx.request_repaint();
+                });
+            }
+            if let (Some(loaded), Some(gl)) = (&st.loaded, &app.gl_renderer)
+                && st.uploaded_key.as_ref() != Some(&loaded.key)
+                && let Ok(mut guard) = gl.lock()
+            {
+                guard.upload_mesh(loaded.key.clone(), &loaded.submeshes);
+                st.uploaded_key = Some(loaded.key.clone());
+            }
+            let tri_label = st
+                .loaded
+                .as_ref()
+                .map(|l| format!("{} tris", l.tri_count))
+                .unwrap_or_else(|| if st.loading { "Loading KN5...".into() } else { "No mesh".into() });
+            let err_msg = st.error.clone();
+            let mut frame = SceneFrame {
+                camera: st.camera,
+                render_mode: st.render_mode,
+                ..SceneFrame::default()
+            };
+            if let Some(loaded) = &st.loaded {
+                frame.items.push(DrawItem {
+                    mesh_key: loaded.key.clone(),
+                    model: Mat4::IDENTITY,
+                    tint_override: None,
+                    texture_override: None,
+                });
+            }
+            let gl = app.gl_renderer.clone();
+            let dt = ui.input(|i| i.stable_dt);
+            let mut reset_cam = false;
+            let is_loading = st.loading;
+            let mut cam = st.camera;
+            widgets::viewport_3d_frame(
+                ui,
+                vec2(avail.x, hero_h),
+                |ui| {
+                    ui.horizontal(|ui| {
+                        widgets::pill(ui, "3D SHOWROOM", theme::CH_SPEED);
+                        widgets::pill(ui, &tri_label, theme::MUTED);
+                        if ui.small_button("Reset cam").clicked() {
+                            reset_cam = true;
+                        }
+                    });
+                },
+                |ui, rect| {
+                    let resp = ui.interact(rect, ui.scope_id().with("sr_3d_drag"), Sense::click_and_drag());
+                    ui.input(|i| {
+                        if cam.handle_input(&resp, i, dt) {
+                            ui.ctx().request_repaint();
+                        }
+                    });
+                    frame.camera = cam;
+                    viewport3d::paint_viewport_3d(ui, rect, gl, frame, |ui, r| {
+                        ui.painter().rect_filled(r, 0, theme::SURFACE_VOID);
+                        let msg = err_msg.as_deref().unwrap_or(if is_loading {
+                            "Loading car KN5 geometry..."
+                        } else {
+                            "3D Viewport ready (2D fallback in headless mode)"
+                        });
+                        ui.painter().text(
+                            r.center(),
+                            Align2::CENTER_CENTER,
+                            msg,
+                            egui::FontId::proportional(13.5),
+                            MUTED,
+                        );
+                    });
+                },
+            );
+            st.camera = cam;
+            if reset_cam
+                && let Some(loaded) = &st.loaded
+            {
+                st.camera = Camera3D::Orbit {
+                    target: loaded.center,
+                    yaw: 0.75,
+                    pitch: 0.30,
+                    dist: loaded.radius * 2.4,
+                };
+            }
+        }
+    } else {
     let (slot, _) = ui.allocate_exact_size(vec2(avail.x, hero_h), Sense::hover());
     let hero = Rect::from_center_size(slot.center(), vec2(hero_w, hero_h));
     let round = CornerRadius::same(16);
-    let current = skins.get(skin_pos);
     media::paint_image(ui, hero, current.map(|(_, p)| p.as_path()), &car.name, theme::INFO, round);
 
     // Dark gradient under the title.
@@ -286,6 +542,7 @@ pub fn showroom(app: &mut App, ui: &mut egui::Ui) {
                 skin_step = dir;
             }
         }
+    }
     }
 
     // Skin strip.

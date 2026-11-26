@@ -10,8 +10,17 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use acxs_manager::backup::{self, Snapshot};
+use acxs_manager::controls::{self, ControlsConfig, InputMethod};
+use acxs_manager::ffb::{self, FfbPostProcess, FfbPostProcessMode};
 use acxs_manager::game;
-use acxs_manager::game_cfg::{self, AssettoCorsaSettings, VideoSettings, ASSETTO_CORSA_FILE, VIDEO_FILE};
+use acxs_manager::game_cfg::{
+    self, AssettoCorsaSettings, CameraMode, CameraOnboardSettings, ReplaySettings, TripleScreenSettings, VideoSettings,
+    VrSettings, ASSETTO_CORSA_FILE, VIDEO_FILE,
+};
+use acxs_manager::input_poll::{self, BindEvent, DeviceInfo, DeviceState, InputBackend};
+use acxs_manager::rig_profiles::{self, RigProfile, RigProfileStore};
+use acxs_manager::settings;
+use std::collections::BTreeMap;
 use eframe::egui::{self, RichText};
 
 use super::{Tool, ToolContext};
@@ -33,6 +42,17 @@ const SCREENSHOT_CHOICES: &[&str] = &["JPG", "BMP", "PNG"];
 
 pub fn tool() -> Box<dyn Tool> {
     let (tx, rx) = mpsc::channel();
+    let cfg_dir = settings::ac_user_cfg_dir();
+    let triple = cfg_dir.as_deref().and_then(|d| game_cfg::read_triple_screen(d).ok()).unwrap_or_default();
+    let vr_oculus = cfg_dir.as_deref().and_then(|d| game_cfg::read_vr(d, false).ok()).unwrap_or_default();
+    let vr_openvr = cfg_dir.as_deref().and_then(|d| game_cfg::read_vr(d, true).ok()).unwrap_or_default();
+    let cam_onboard = cfg_dir.as_deref().and_then(|d| game_cfg::read_camera_onboard(d).ok()).unwrap_or_default();
+    let replay_cfg = cfg_dir.as_deref().and_then(|d| game_cfg::read_replay_settings(d).ok()).unwrap_or_default();
+    let controls_cfg = cfg_dir.as_deref().and_then(|d| controls::read_controls(d).ok()).unwrap_or_default();
+    let ffb_pp = cfg_dir.as_deref().and_then(|d| ffb::read_post_process(d).ok()).unwrap_or_default();
+    let per_car_ffb = cfg_dir.as_deref().and_then(|d| ffb::read_per_car_ffb(d).ok()).unwrap_or_default();
+    let rig_store = RigProfileStore::load(&rig_profiles_path()).unwrap_or_default();
+
     Box::new(GameSettings {
         tab: VIDEO_TAB,
         options: super::game_options::GameOptions::new(),
@@ -58,7 +78,30 @@ pub fn tool() -> Box<dyn Tool> {
         verify: HashMap::new(),
         restore_target: None,
         restore_confirmed: false,
+        triple,
+        vr_oculus,
+        vr_openvr,
+        cam_onboard,
+        replay_cfg,
+        controls_cfg,
+        ffb_pp,
+        per_car_ffb,
+        new_car_ffb_id: String::new(),
+        new_car_ffb_gain: 1.0,
+        rig_store,
+        new_rig_name: String::new(),
+        input_backend: input_poll::default_backend(),
+        devices: Vec::new(),
+        listening_target: None,
+        listen_baseline: None,
+        last_bound_note: String::new(),
     })
+}
+
+fn rig_profiles_path() -> PathBuf {
+    settings::settings_path()
+        .parent()
+        .map_or_else(|| PathBuf::from("rig-profiles.json"), |d| d.join("rig-profiles.json"))
 }
 
 /// `video.ini` lives in `Documents/Assetto Corsa/cfg/` (see `game_cfg` module docs).
@@ -249,8 +292,25 @@ fn choice<T: Copy + PartialEq>(
 }
 
 const VIDEO_TAB: &str = "Video";
+const VR_TRIPLE_TAB: &str = "VR & Triple";
+const CONTROLS_TAB: &str = "Controls";
+const FFB_LUT_TAB: &str = "FFB LUT";
+const RIG_PROFILES_TAB: &str = "Rig Profiles";
+const CAMERA_REPLAY_TAB: &str = "Camera & Replay";
 const ADVANCED_TAB: &str = "Advanced";
-const TABS: [&str; 6] = [VIDEO_TAB, "Audio", "Force feedback", "Gameplay", "Filter and apps", ADVANCED_TAB];
+const TABS: [&str; 11] = [
+    VIDEO_TAB,
+    VR_TRIPLE_TAB,
+    CONTROLS_TAB,
+    FFB_LUT_TAB,
+    RIG_PROFILES_TAB,
+    CAMERA_REPLAY_TAB,
+    "Audio",
+    "Force feedback",
+    "Gameplay",
+    "Filter and apps",
+    ADVANCED_TAB,
+];
 
 struct GameSettings {
     tab: &'static str,
@@ -283,6 +343,25 @@ struct GameSettings {
     verify: HashMap<PathBuf, Verify>,
     restore_target: Option<PathBuf>,
     restore_confirmed: bool,
+
+    // Wave 3C Offline Settings: VR/Triple, Camera/Replay, Controls, FFB LUT, Rig Profiles
+    triple: TripleScreenSettings,
+    vr_oculus: VrSettings,
+    vr_openvr: VrSettings,
+    cam_onboard: CameraOnboardSettings,
+    replay_cfg: ReplaySettings,
+    controls_cfg: ControlsConfig,
+    ffb_pp: FfbPostProcess,
+    per_car_ffb: BTreeMap<String, f64>,
+    new_car_ffb_id: String,
+    new_car_ffb_gain: f64,
+    rig_store: RigProfileStore,
+    new_rig_name: String,
+    input_backend: Box<dyn InputBackend>,
+    devices: Vec<DeviceInfo>,
+    listening_target: Option<&'static str>,
+    listen_baseline: Option<(u32, DeviceState)>,
+    last_bound_note: String,
 }
 
 impl GameSettings {
@@ -614,8 +693,30 @@ impl GameSettings {
             for problem in &problems {
                 ui.label(RichText::new(problem).color(WARN));
             }
+            let can_save = idle && problems.is_empty() && !self.video_dir.trim().is_empty();
+            let bar_action = widgets::pending_changes_bar(
+                ui,
+                &widgets::PendingChangesBar {
+                    changed_count: changes.len(),
+                    summary: format!("{} video setting(s) modified", changes.len()),
+                    can_save,
+                    blocked_reason: problems.first().cloned(),
+                },
+            );
+            match bar_action {
+                widgets::PendingAction::Save => {
+                    if let Ok(settings) = parsed.clone() {
+                        self.saved_form = self.form.clone();
+                        self.save_video(ctx, settings);
+                    }
+                }
+                widgets::PendingAction::RevertAll => {
+                    self.form = base.clone();
+                }
+                _ => {}
+            }
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
-                let can_save = idle && problems.is_empty() && !self.video_dir.trim().is_empty();
                 if ui
                     .add_enabled(can_save, widgets::primary_button("Save video settings"))
                     .clicked()
@@ -858,6 +959,337 @@ impl GameSettings {
             });
         }
     }
+    fn vr_triple_section(&mut self, ui: &mut egui::Ui, notices: &mut Vec<Notice>) {
+        let cfg_dir = PathBuf::from(self.video_dir.trim());
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section_title(ui, "Display & VR Mode (video.ini [CAMERA] MODE)");
+            let mut mode = game_cfg::read_video(&cfg_dir).map(|v| v.camera_mode).unwrap_or_default();
+            let before = mode;
+            ui.horizontal_wrapped(|ui| {
+                for m in CameraMode::ALL {
+                    ui.selectable_value(&mut mode, m, m.label());
+                }
+            });
+            if mode != before {
+                if let Ok(mut v) = game_cfg::read_video(&cfg_dir) {
+                    v.camera_mode = mode;
+                    match game_cfg::write_video(&cfg_dir, &v) {
+                        Ok(()) => notices.push(ok_note(format!("Switched camera mode to {}.", mode.label()))),
+                        Err(e) => notices.push(fail_note(format!("Could not switch camera mode: {e}"))),
+                    }
+                }
+            }
+        });
+        ui.add_space(10.0);
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section_title(ui, "Triple Screen Geometry (triple_screen.ini)");
+            egui::Grid::new("gs_triple").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+                ui.label("Screen width / height (mm)");
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut self.triple.width_mm).range(100.0..=3000.0).suffix(" mm"));
+                    ui.add(egui::DragValue::new(&mut self.triple.height_mm).range(100.0..=2000.0).suffix(" mm"));
+                });
+                ui.end_row();
+                ui.label("Eye distance / Side angle");
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut self.triple.distance_mm).range(100.0..=3000.0).suffix(" mm"));
+                    ui.add(egui::DragValue::new(&mut self.triple.angle_deg).range(0.0..=89.0).suffix("°"));
+                });
+                ui.end_row();
+                ui.label("Bezel width (mm) / Center px");
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut self.triple.bezel_mm).range(0.0..=100.0).suffix(" mm"));
+                    ui.add(egui::DragValue::new(&mut self.triple.sp_width_px).range(640..=7680).suffix(" px"));
+                });
+                ui.end_row();
+            });
+            ui.add_space(6.0);
+            if ui.add(widgets::primary_button("Save triple_screen.ini")).clicked() {
+                match game_cfg::write_triple_screen(&cfg_dir, &self.triple) {
+                    Ok(()) => notices.push(ok_note("Saved triple_screen.ini (backup kept).")),
+                    Err(e) => notices.push(fail_note(format!("Save failed: {e}"))),
+                }
+            }
+        });
+        ui.add_space(10.0);
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section_title(ui, "VR Settings (oculus.ini & openvr.ini)");
+            ui.horizontal(|ui| {
+                ui.label("OpenVR / OpenXR PPD:");
+                ui.add(egui::Slider::new(&mut self.vr_openvr.pixel_per_display, 0.5..=2.5).step_by(0.05));
+                ui.checkbox(&mut self.vr_openvr.mirror_texture, "Mirror");
+                if ui.button("Save openvr.ini").clicked() {
+                    match game_cfg::write_vr(&cfg_dir, true, &self.vr_openvr) {
+                        Ok(()) => notices.push(ok_note("Saved openvr.ini.")),
+                        Err(e) => notices.push(fail_note(format!("Save failed: {e}"))),
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Oculus / Meta PPD:");
+                ui.add(egui::Slider::new(&mut self.vr_oculus.pixel_per_display, 0.5..=2.5).step_by(0.05));
+                ui.checkbox(&mut self.vr_oculus.autoselect_audio, "Auto Audio");
+                if ui.button("Save oculus.ini").clicked() {
+                    match game_cfg::write_vr(&cfg_dir, false, &self.vr_oculus) {
+                        Ok(()) => notices.push(ok_note("Saved oculus.ini.")),
+                        Err(e) => notices.push(fail_note(format!("Save failed: {e}"))),
+                    }
+                }
+            });
+        });
+    }
+
+    fn controls_section(&mut self, ui: &mut egui::Ui, notices: &mut Vec<Notice>) {
+        let cfg_dir = PathBuf::from(self.video_dir.trim());
+        // Poll live binding if listening.
+        if let Some(target) = self.listening_target {
+            if let Some((dev_idx, baseline)) = self.listen_baseline.clone()
+                && let Some(now) = self.input_backend.poll(dev_idx)
+                && let Some(ev) = input_poll::detect_binding(dev_idx, &baseline, &now, 0.25)
+            {
+                match (target, ev) {
+                    ("STEER", BindEvent::Axis { device, axis, inverted }) => {
+                        self.controls_cfg.steer.joy = device as i32;
+                        self.controls_cfg.steer.axle = axis as i32;
+                        self.controls_cfg.steer.scale = if inverted { -1 } else { 1 };
+                        self.last_bound_note = format!("Bound Steer -> Joy {device} Axis {axis}");
+                    }
+                    ("THROTTLE", BindEvent::Axis { device, axis, .. }) => {
+                        self.controls_cfg.throttle.joy = device as i32;
+                        self.controls_cfg.throttle.axle = axis as i32;
+                        self.last_bound_note = format!("Bound Throttle -> Joy {device} Axis {axis}");
+                    }
+                    ("BRAKES", BindEvent::Axis { device, axis, .. }) => {
+                        self.controls_cfg.brakes.joy = device as i32;
+                        self.controls_cfg.brakes.axle = axis as i32;
+                        self.last_bound_note = format!("Bound Brakes -> Joy {device} Axis {axis}");
+                    }
+                    (sec, BindEvent::Button { device, button }) => {
+                        self.controls_cfg.actions.insert(
+                            sec.to_string(),
+                            controls::ButtonBinding { joy: device as i32, button: button as i32, key: String::new() },
+                        );
+                        self.last_bound_note = format!("Bound {sec} -> Joy {device} Btn {button}");
+                    }
+                    _ => {}
+                }
+                self.listening_target = None;
+                self.listen_baseline = None;
+            }
+            ui.ctx().request_repaint();
+        }
+
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section_title(ui, "Controls & Live Wheel/Pedal Binder (controls.ini)");
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Input Method:");
+                ui.selectable_value(&mut self.controls_cfg.input_method, InputMethod::Wheel, "Wheel");
+                ui.selectable_value(&mut self.controls_cfg.input_method, InputMethod::X360, "Xbox / Gamepad");
+                ui.selectable_value(&mut self.controls_cfg.input_method, InputMethod::Keyboard, "Keyboard");
+                if ui.button("Scan Controllers").clicked() {
+                    self.devices = self.input_backend.enumerate();
+                    self.controls_cfg.controllers = self
+                        .devices
+                        .iter()
+                        .map(|d| (d.name.clone(), d.product_guid.clone()))
+                        .collect();
+                }
+                if !self.last_bound_note.is_empty() {
+                    widgets::pill(ui, &self.last_bound_note, OK);
+                }
+            });
+            ui.add_space(6.0);
+            if !self.devices.is_empty() {
+                for dev in &self.devices {
+                    ui.label(RichText::new(format!("[{}] {}  {}", dev.index, dev.name, dev.product_guid)).font(theme::mono(11.5)).color(MUTED));
+                }
+                ui.add_space(6.0);
+            }
+            egui::Grid::new("gs_controls_axes").num_columns(4).spacing([12.0, 6.0]).show(ui, |ui| {
+                ui.label("Steering Lock / FFB Gain");
+                ui.add(egui::DragValue::new(&mut self.controls_cfg.steer.lock_deg).range(180..=1800).suffix("°"));
+                ui.add(egui::Slider::new(&mut self.controls_cfg.steer.ff_gain, 0.0..=2.0).suffix(" gain"));
+                if ui.small_button(if self.listening_target == Some("STEER") { "Move wheel..." } else { "Bind Steer" }).clicked() {
+                    if let Some(st) = self.input_backend.poll(0) {
+                        self.listening_target = Some("STEER");
+                        self.listen_baseline = Some((0, st));
+                    }
+                }
+                ui.end_row();
+
+                ui.label("Throttle Gamma / Range");
+                ui.add(egui::DragValue::new(&mut self.controls_cfg.throttle.gamma).range(0.5..=4.0).speed(0.05));
+                ui.add(egui::DragValue::new(&mut self.controls_cfg.throttle.range_to).range(0.1..=1.0).speed(0.02));
+                if ui.small_button("Bind Throttle").clicked() {
+                    if let Some(st) = self.input_backend.poll(0) {
+                        self.listening_target = Some("THROTTLE");
+                        self.listen_baseline = Some((0, st));
+                    }
+                }
+                ui.end_row();
+
+                ui.label("Brake Gamma / Range");
+                ui.add(egui::DragValue::new(&mut self.controls_cfg.brakes.gamma).range(0.5..=4.0).speed(0.05));
+                ui.add(egui::DragValue::new(&mut self.controls_cfg.brakes.range_to).range(0.1..=1.0).speed(0.02));
+                if ui.small_button("Bind Brake").clicked() {
+                    if let Some(st) = self.input_backend.poll(0) {
+                        self.listening_target = Some("BRAKES");
+                        self.listen_baseline = Some((0, st));
+                    }
+                }
+                ui.end_row();
+
+                ui.label("H-Shifter Active");
+                widgets::toggle(ui, &mut self.controls_cfg.shifter.active);
+                ui.label(RichText::new("CSP Actions: Extra A–F, Wipers, VR Recenter").size(12.0).color(MUTED));
+                ui.label("");
+                ui.end_row();
+            });
+            ui.add_space(8.0);
+            if ui.add(widgets::primary_button("Save controls.ini")).clicked() {
+                match controls::write_controls(&cfg_dir, &self.controls_cfg) {
+                    Ok(()) => notices.push(ok_note("Saved controls.ini (backup kept).")),
+                    Err(e) => notices.push(fail_note(format!("Save failed: {e}"))),
+                }
+            }
+        });
+    }
+
+    fn ffb_lut_section(&mut self, ui: &mut egui::Ui, notices: &mut Vec<Notice>) {
+        let cfg_dir = PathBuf::from(self.video_dir.trim());
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section_title(ui, "FFB Post-Processing (ff_post_process.ini)");
+            ui.horizontal(|ui| {
+                widgets::toggle(ui, &mut self.ffb_pp.enabled);
+                ui.label("Enable FFB Post-Processing");
+                ui.selectable_value(&mut self.ffb_pp.mode, FfbPostProcessMode::Gamma, "Gamma");
+                ui.selectable_value(&mut self.ffb_pp.mode, FfbPostProcessMode::Lut, "LUT Curve");
+            });
+            if self.ffb_pp.mode == FfbPostProcessMode::Gamma {
+                ui.add(egui::Slider::new(&mut self.ffb_pp.gamma, 0.1..=2.0).text("Gamma"));
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label("LUT filename in cfg/:");
+                    ui.add(egui::TextEdit::singleline(&mut self.ffb_pp.lut_curve).hint_text("mywheel.lut").desired_width(220.0));
+                });
+            }
+            if ui.add(widgets::primary_button("Save ff_post_process.ini")).clicked() {
+                match ffb::write_post_process(&cfg_dir, &self.ffb_pp) {
+                    Ok(()) => notices.push(ok_note("Saved ff_post_process.ini.")),
+                    Err(e) => notices.push(fail_note(format!("Save failed: {e}"))),
+                }
+            }
+        });
+        ui.add_space(10.0);
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section_title(ui, "Per-Car FFB Gain (native user_ff.ini)");
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.new_car_ffb_id).hint_text("car id (e.g. ks_ferrari_488_gt3)").desired_width(220.0));
+                ui.add(egui::DragValue::new(&mut self.new_car_ffb_gain).range(0.10..=3.00).speed(0.05).suffix("x"));
+                if ui.button("Set Car FFB").clicked() {
+                    match ffb::write_car_ffb(&cfg_dir, &self.new_car_ffb_id, self.new_car_ffb_gain) {
+                        Ok(()) => {
+                            self.per_car_ffb.insert(self.new_car_ffb_id.trim().to_string(), self.new_car_ffb_gain);
+                            notices.push(ok_note(format!("Updated FFB for {}.", self.new_car_ffb_id.trim())));
+                            self.new_car_ffb_id.clear();
+                        }
+                        Err(e) => notices.push(fail_note(format!("Could not save user_ff.ini: {e}"))),
+                    }
+                }
+            });
+            for (car, gain) in &self.per_car_ffb {
+                ui.label(RichText::new(format!("{car:<36}  {:.0}%", gain * 100.0)).font(theme::mono(12.0)));
+            }
+        });
+    }
+
+    fn rig_profiles_section(&mut self, ui: &mut egui::Ui, notices: &mut Vec<Notice>) {
+        let cfg_dir = PathBuf::from(self.video_dir.trim());
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section_title(ui, "1-Click Atomic Rig Profile Switcher (VR ↔ Triple ↔ Flat)");
+            ui.label(RichText::new("Captures Video, VR/Triple, Controls & FFB into one atomic profile with full rollback on error.").size(12.5).color(MUTED));
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.new_rig_name).hint_text("Profile name (e.g. VR + Wheel)").desired_width(240.0));
+                if ui.add(widgets::primary_button("Save Current Rig")).clicked() {
+                    let profile = RigProfile {
+                        name: self.new_rig_name.trim().to_string(),
+                        video: self.form.to_settings().ok(),
+                        triple_screen: Some(self.triple.clone()),
+                        vr_oculus: Some(self.vr_oculus.clone()),
+                        vr_openvr: Some(self.vr_openvr.clone()),
+                        controls: Some(self.controls_cfg.clone()),
+                        ffb_post_process: Some(self.ffb_pp.clone()),
+                    };
+                    match self.rig_store.upsert(profile).and_then(|()| self.rig_store.save(&rig_profiles_path())) {
+                        Ok(()) => {
+                            notices.push(ok_note(format!("Saved rig profile '{}'.", self.new_rig_name.trim())));
+                            self.new_rig_name.clear();
+                        }
+                        Err(e) => notices.push(fail_note(format!("Could not save rig profile: {e}"))),
+                    }
+                }
+            });
+            ui.add_space(8.0);
+            for prof in self.rig_store.profiles.clone() {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&prof.name).font(theme::bold(14.0)));
+                    if let Some(v) = &prof.video {
+                        widgets::pill(ui, v.camera_mode.label(), INFO);
+                    }
+                    if ui.button("Apply Profile").clicked() {
+                        match rig_profiles::apply_rig_profile(&cfg_dir, &prof) {
+                            Ok(()) => notices.push(ok_note(format!("Applied rig profile '{}'.", prof.name))),
+                            Err(e) => notices.push(fail_note(format!("Switch failed (rolled back): {e}"))),
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    fn camera_replay_section(&mut self, ui: &mut egui::Ui, notices: &mut Vec<Notice>) {
+        let cfg_dir = PathBuf::from(self.video_dir.trim());
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section_title(ui, "Cockpit Camera (camera_onboard_free.ini)");
+            ui.add(egui::Slider::new(&mut self.cam_onboard.fov, 10.0..=120.0).text("FOV (°)"));
+            ui.checkbox(&mut self.cam_onboard.lock_to_horizon, "Lock to horizon");
+            ui.add(egui::Slider::new(&mut self.cam_onboard.look_ahead, 0.0..=1.0).text("Look ahead"));
+            if ui.add(widgets::primary_button("Save camera_onboard_free.ini")).clicked() {
+                match game_cfg::write_camera_onboard(&cfg_dir, &self.cam_onboard) {
+                    Ok(()) => notices.push(ok_note("Saved camera_onboard_free.ini.")),
+                    Err(e) => notices.push(fail_note(format!("Save failed: {e}"))),
+                }
+            }
+        });
+        ui.add_space(10.0);
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section_title(ui, "Replay Recording (replay.ini)");
+            ui.horizontal(|ui| {
+                ui.label("FPS:");
+                for fps in [10u32, 15, 20, 30, 60] {
+                    ui.selectable_value(&mut self.replay_cfg.fps, fps, format!("{fps} Hz"));
+                }
+            });
+            ui.add(egui::Slider::new(&mut self.replay_cfg.max_size_mb, 50..=2048).suffix(" MB").text("Max replay size"));
+            ui.checkbox(&mut self.replay_cfg.autosave, "Autosave replays");
+            if ui.add(widgets::primary_button("Save replay.ini")).clicked() {
+                match game_cfg::write_replay_settings(&cfg_dir, &self.replay_cfg) {
+                    Ok(()) => notices.push(ok_note("Saved replay.ini.")),
+                    Err(e) => notices.push(fail_note(format!("Save failed: {e}"))),
+                }
+            }
+        });
+    }
 }
 
 impl Tool for GameSettings {
@@ -866,7 +1298,7 @@ impl Tool for GameSettings {
     }
 
     fn content_width(&self) -> f32 {
-        960.0
+        1120.0
     }
 
     fn group(&self) -> &'static str {
@@ -877,7 +1309,7 @@ impl Tool for GameSettings {
         let egui_ctx = ui.ctx().clone();
         self.poll(notices);
 
-        widgets::heading(ui, "Game Settings", "Everything the game asks for in its options. Each save keeps a backup of the old file.");
+        widgets::heading(ui, "Game Settings", "Video, VR/Triple Screen, Controls, FFB LUT, Atomic Rig Profiles & Snapshots.");
 
         if !self.video_requested {
             self.video_requested = true;
@@ -896,7 +1328,7 @@ impl Tool for GameSettings {
             self.list_snapshots(&egui_ctx, root.clone());
         }
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             for tab in TABS {
                 ui.selectable_value(&mut self.tab, tab, tab);
             }
@@ -906,6 +1338,21 @@ impl Tool for GameSettings {
         match self.tab {
             VIDEO_TAB => {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.video_section(ui, &egui_ctx));
+            }
+            VR_TRIPLE_TAB => {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.vr_triple_section(ui, notices));
+            }
+            CONTROLS_TAB => {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.controls_section(ui, notices));
+            }
+            FFB_LUT_TAB => {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.ffb_lut_section(ui, notices));
+            }
+            RIG_PROFILES_TAB => {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.rig_profiles_section(ui, notices));
+            }
+            CAMERA_REPLAY_TAB => {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.camera_replay_section(ui, notices));
             }
             ADVANCED_TAB => {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {

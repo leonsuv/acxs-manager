@@ -8,11 +8,13 @@
 use super::{PickKind, Tool, ToolContext};
 use crate::ui::theme::{self, DANGER, MUTED, OK, WARN};
 use crate::ui::{widgets, Notice};
+use acxs_manager::adaptive_ai::{self, AdaptiveAiInput};
 use acxs_manager::content::{scan_cars, scan_tracks, CarEntry, TrackEntry};
 use acxs_manager::game;
 use acxs_manager::presets::{self, PresetStore};
-use acxs_manager::race::{self, QuickRace};
+use acxs_manager::race::{self, AiOpponent, QuickRace};
 use acxs_manager::race_options::RaceMode;
+use acxs_manager::{race_out, weather};
 use eframe::egui::{self, RichText};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -31,6 +33,9 @@ pub fn tool() -> Box<dyn Tool> {
         tracks: Vec::new(),
         scanned: false,
         weathers: Vec::new(),
+        controllers: Vec::new(),
+        new_opp_car: String::new(),
+        new_opp_name: String::new(),
         pick: None,
         presets: None,
         presets_error: None,
@@ -55,6 +60,11 @@ struct QuickRacePage {
     scanned: bool,
     /// Weather types installed in `content/weather`.
     weathers: Vec<String>,
+    /// WeatherFX controllers installed in `extension/weather-controllers`.
+    controllers: Vec<String>,
+    /// Staging inputs for adding a custom multi-car opponent.
+    new_opp_car: String,
+    new_opp_name: String,
     /// Set when the user pressed "Choose track" or "Choose car"; taken by the app.
     pick: Option<super::PickKind>,
     /// Presets as last saved or loaded. `None` until loaded, or when the file could not be read.
@@ -169,6 +179,7 @@ impl QuickRacePage {
         }
         self.loaded_root = root.clone();
         self.weathers = root.as_deref().map(list_weather).unwrap_or_default();
+        self.controllers = root.as_deref().map(weather::list_controllers).unwrap_or_default();
         self.cars.clear();
         self.tracks.clear();
         self.scanned = false;
@@ -259,6 +270,13 @@ impl QuickRacePage {
                         let path = race::write_race_ini(&cfg, &form)?;
                         if form.extras.write_assists {
                             race::write_assists_ini(&cfg, &form.extras.assists)?;
+                        }
+                        if form.extras.ai_flood {
+                            let _ = race::write_ai_flood_override(&cfg.join("extension"), true);
+                        }
+                        if let Some(ctrl) = form.weather_controller.as_deref().filter(|s| !s.is_empty()) {
+                            let user_fx = cfg.join("extension").join("weather_fx.ini");
+                            let _ = weather::select_controller_user(&root, &user_fx, "", ctrl);
                         }
                         Ok(path)
                     });
@@ -415,9 +433,9 @@ impl QuickRacePage {
 /// The race settings and the Validate / launch buttons.
 /// A titled card with the page's usual spacing.
 fn card(ui: &mut egui::Ui, title: &str, hint: &str, add: impl FnOnce(&mut egui::Ui)) {
-    theme::card().inner_margin(egui::Margin::symmetric(18, 14)).show(ui, |ui| {
+    theme::card_elevated().inner_margin(egui::Margin::symmetric(18, 14)).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.label(RichText::new(title).font(theme::bold(16.0)));
+        ui.label(RichText::new(title).font(theme::display(16.5)));
         if !hint.is_empty() {
             ui.label(RichText::new(hint).size(12.5).color(MUTED));
         }
@@ -483,7 +501,19 @@ fn humanize_weather(id: &str) -> String {
 
 fn form_card(ui: &mut egui::Ui, page: &mut QuickRacePage, busy: bool) -> Option<Action> {
     let problems = if page.check_requested { page.problems() } else { Vec::new() };
-    let QuickRacePage { form, check_requested, tracks, cars, scanned, weathers, pick, .. } = page;
+    let QuickRacePage {
+        form,
+        check_requested,
+        tracks,
+        cars,
+        scanned,
+        weathers,
+        controllers,
+        new_opp_car,
+        new_opp_name,
+        pick,
+        ..
+    } = page;
     let mut action = None;
     ui.spacing_mut().slider_width = 220.0;
 
@@ -535,16 +565,36 @@ fn form_card(ui: &mut egui::Ui, page: &mut QuickRacePage, busy: bool) -> Option<
 
     let x = &mut form.extras;
 
-    card(ui, "Mode", "A race weekend has opponents. The other modes are driven alone.", |ui| {
-        ui.horizontal(|ui| {
-            for mode in RaceMode::ALL {
-                ui.selectable_value(&mut x.mode, mode, mode.label());
-            }
-        });
+    card(ui, "Mode", "Race Weekend, Track Day (AI traffic), Drag, Hotlap, Time Attack or Drift.", |ui| {
+        let mode_tabs: [(RaceMode, &str, Option<&str>); 6] = [
+            (RaceMode::Weekend, "Weekend", None),
+            (RaceMode::TrackDay, "Track Day", Some("AI")),
+            (RaceMode::Hotlap, "Hotlap", None),
+            (RaceMode::TimeAttack, "Time Attack", None),
+            (RaceMode::Drift, "Drift", None),
+            (RaceMode::Drag, "Drag", Some("1v1")),
+        ];
+        widgets::animated_tabs(ui, "drive_mode_tabs", &mut x.mode, &mode_tabs);
+        if x.mode == RaceMode::TrackDay {
+            ui.add_space(6.0);
+            setting(ui, "Track Day duration", |ui| {
+                ui.add(egui::DragValue::new(&mut x.track_day_minutes).range(0..=600).suffix(" min (0 = ∞)"));
+            });
+            setting(ui, "CSP AI Flood (Traffic)", |ui| {
+                widgets::toggle(ui, &mut x.ai_flood);
+                ui.label(RichText::new("writes new_behaviour.ini [AI_FLOOD] on launch").size(12.0).color(theme::FAINT));
+            });
+        } else if x.mode == RaceMode::Drag {
+            ui.add_space(6.0);
+            setting(ui, "Drag matches", |ui| {
+                ui.add(egui::DragValue::new(&mut x.drag_matches).range(1..=99).suffix(" runs"));
+            });
+        }
     });
-    ui.add_space(14.0);
+    ui.add_space(8.0);
 
     let weekend = x.mode == RaceMode::Weekend;
+    let allows_ai = x.mode.allows_opponents();
 
     if weekend {
     card(ui, "Sessions", "Played in this order. Switch off what you do not want.", |ui| {
@@ -604,79 +654,205 @@ fn form_card(ui: &mut egui::Ui, page: &mut QuickRacePage, busy: bool) -> Option<
     });
     }
 
-    card(ui, "Conditions", "Weather, light and the track surface.", |ui| {
-        setting(ui, "Weather", |ui| {
-            if weathers.is_empty() {
-                ui.add(egui::TextEdit::singleline(&mut form.weather).desired_width(200.0));
-            } else {
-                let current = humanize_weather(&form.weather);
-                egui::ComboBox::from_id_salt("quick_race_weather").selected_text(current).height(320.0).show_ui(ui, |ui| {
-                    for id in weathers.iter() {
-                        ui.selectable_value(&mut form.weather, id.clone(), humanize_weather(id));
+    card(ui, "Conditions & WeatherFX", "Solar dial, Sol/Pure WeatherFX controller, temperatures and dynamic grip.", |ui| {
+        ui.horizontal_top(|ui| {
+            let mut mins = u32::from(form.time_of_day_hour) * 60 + u32::from(form.time_of_day_minute);
+            if widgets::solar_dial(ui, &mut mins) {
+                form.time_of_day_hour = ((mins / 60) % 24) as u8;
+                form.time_of_day_minute = (mins % 60) as u8;
+            }
+            ui.add_space(12.0);
+            ui.vertical(|ui| {
+                setting(ui, "Weather", |ui| {
+                    if weathers.is_empty() {
+                        ui.add(egui::TextEdit::singleline(&mut form.weather).desired_width(180.0));
+                    } else {
+                        let current = humanize_weather(&form.weather);
+                        egui::ComboBox::from_id_salt("quick_race_weather").selected_text(current).height(320.0).show_ui(ui, |ui| {
+                            for id in weathers.iter() {
+                                ui.selectable_value(&mut form.weather, id.clone(), humanize_weather(id));
+                            }
+                        });
                     }
                 });
-            }
+                if !controllers.is_empty() {
+                    setting(ui, "WeatherFX controller", |ui| {
+                        let sel = form.weather_controller.as_deref().unwrap_or("Default (unchanged)");
+                        egui::ComboBox::from_id_salt("qr_weather_ctrl").selected_text(sel).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut form.weather_controller, None, "Default (unchanged)");
+                            for c in controllers.iter() {
+                                ui.selectable_value(&mut form.weather_controller, Some(c.clone()), c);
+                            }
+                        });
+                    });
+                }
+                setting(ui, "Exact time", |ui| {
+                    ui.add(egui::DragValue::new(&mut form.time_of_day_hour).range(0..=23).suffix("h"));
+                    ui.add(egui::DragValue::new(&mut form.time_of_day_minute).range(0..=59).suffix("m"));
+                });
+                setting(ui, "Time speed", |ui| {
+                    ui.add(egui::DragValue::new(&mut x.time_multiplier).range(1_u32..=60).prefix("x"));
+                });
+            });
         });
-        setting(ui, "Time of day", |ui| {
-            ui.add(egui::Slider::new(&mut form.time_of_day_hour, 0..=23).suffix(":00"));
-        });
-        setting(ui, "Time speed", |ui| {
-            ui.add(egui::DragValue::new(&mut x.time_multiplier).range(1_u32..=60).prefix("x"));
-            ui.label(RichText::new("1 is real time").size(12.0).color(theme::FAINT));
-        });
-        setting(ui, "Air temperature", |ui| {
-            ui.add(egui::Slider::new(&mut x.ambient_temp, -10..=45).suffix(" °C"));
-        });
-        setting(ui, "Road temperature", |ui| {
-            ui.add(egui::Slider::new(&mut x.road_temp, -10..=70).suffix(" °C"));
-            if ui.small_button("Match air").clicked() {
+        ui.add_space(6.0);
+        setting(ui, "Air / Road temp", |ui| {
+            ui.add(egui::Slider::new(&mut x.ambient_temp, -10..=45).suffix(" °C air"));
+            ui.add(egui::Slider::new(&mut x.road_temp, -10..=70).suffix(" °C road"));
+            if ui.small_button("Match").clicked() {
                 x.road_temp = x.ambient_temp + 6;
             }
         });
-        setting(ui, "Wind speed", |ui| {
+        setting(ui, "Wind", |ui| {
             ui.add(egui::Slider::new(&mut x.wind_min_kmh, 0..=60).suffix(" min"));
             ui.add(egui::Slider::new(&mut x.wind_max_kmh, 0..=60).suffix(" max"));
             if x.wind_min_kmh > x.wind_max_kmh {
                 x.wind_max_kmh = x.wind_min_kmh;
             }
+            ui.add(egui::DragValue::new(&mut x.wind_direction).range(0..=359).suffix("°"));
         });
-        setting(ui, "Wind direction", |ui| {
-            ui.add(egui::Slider::new(&mut x.wind_direction, 0..=359).suffix("°"));
-        });
-        setting(ui, "Track grip at the start", |ui| {
-            ui.add(egui::Slider::new(&mut x.track_grip, 70..=100).suffix(" %"));
+        setting(ui, "Dynamic Track", |ui| {
+            let presets = [(0u8, "Dusty"), (1, "Old"), (2, "Slow"), (3, "Green"), (4, "Fast"), (5, "Optimum")];
+            pick_value(ui, "qr_dt_preset", &mut form.dynamic_track.preset, &presets);
+            ui.add(egui::DragValue::new(&mut form.dynamic_track.session_start).range(80..=100).suffix("% grip"));
+            ui.add(egui::DragValue::new(&mut form.dynamic_track.randomness).range(0..=10).prefix("±").suffix("%"));
+            x.track_grip = form.dynamic_track.session_start;
         });
     });
 
-    if weekend {
-    card(ui, "Opponents", "AI drivers on the grid.", |ui| {
-        let max_grid = form.ai_count.min(MAX_AI_COUNT);
-        form.grid_position = form.grid_position.min(form.ai_count);
-        setting(ui, "AI cars", |ui| {
-            ui.add(egui::Slider::new(&mut form.ai_count, 0..=MAX_AI_COUNT));
-        });
-        setting(ui, "Your grid position", |ui| {
-            ui.add(egui::Slider::new(&mut form.grid_position, 0..=max_grid));
-        });
-        setting(ui, "AI strength", |ui| {
-            ui.add(egui::Slider::new(&mut form.ai_level, 0..=100).suffix(" %"));
-        });
-        setting(ui, "AI aggression", |ui| {
-            let mut on = form.ai_aggression.is_some();
-            if widgets::toggle(ui, &mut on).changed() {
-                form.ai_aggression = on.then_some(50);
+    if allows_ai {
+    card(ui, "Opponents & Multi-Class Grid", "Uniform AI grid or custom multi-car grid with Adaptive AI auto-matching.", |ui| {
+        let mut custom_grid = !form.opponents.is_empty();
+        ui.horizontal(|ui| {
+            if ui.selectable_label(!custom_grid, "Uniform Grid").clicked() && custom_grid {
+                form.ai_count = form.opponents.len() as u32;
+                form.opponents.clear();
+                custom_grid = false;
             }
-            match form.ai_aggression.as_mut() {
-                Some(value) => {
-                    ui.add(egui::Slider::new(value, 0..=100).suffix(" %"));
+            if ui.selectable_label(custom_grid, format!("Multi-Car Grid ({})", form.opponents.len())).clicked() && !custom_grid {
+                let count = form.ai_count.clamp(1, 8);
+                for i in 0..count {
+                    form.opponents.push(AiOpponent {
+                        car: form.car.clone(),
+                        driver_name: format!("AI {}", i + 1),
+                        ai_level: form.ai_level,
+                        ai_aggression: form.ai_aggression,
+                        ..Default::default()
+                    });
                 }
-                None => {
-                    ui.label(RichText::new("Game default").color(MUTED));
+                custom_grid = true;
+            }
+            if ui.button("Match My Pace (Adaptive AI)").on_hover_text("Calibrates AI skill spread from your last race_out.json pace gap.").clicked() {
+                let gap = acxs_manager::settings::ac_documents_dir()
+                    .and_then(|d| race_out::load_race_out(&d.join("out").join("race_out.json")).ok())
+                    .and_then(|s| s.gap_to_p1_ms_per_lap);
+                let grid_size = if custom_grid { form.opponents.len() } else { form.ai_count.max(1) as usize };
+                let tuned = adaptive_ai::compute_ai_grid(&AdaptiveAiInput {
+                    last_race_gap_ms_per_lap: gap,
+                    prev_ai_level: form.ai_level.clamp(70, 100),
+                    base_aggression: form.ai_aggression.unwrap_or(40),
+                    grid_size,
+                    spread: 6,
+                    ..Default::default()
+                });
+                if custom_grid {
+                    for (opp, (lvl, agg, bal)) in form.opponents.iter_mut().zip(tuned) {
+                        opp.ai_level = lvl;
+                        opp.ai_aggression = Some(agg);
+                        opp.ballast = bal;
+                    }
+                } else if let Some(&(mid_lvl, mid_agg, _)) = tuned.get(tuned.len() / 2) {
+                    form.ai_level = mid_lvl;
+                    form.ai_aggression = Some(mid_agg);
                 }
             }
         });
+        ui.add_space(6.0);
+        if custom_grid {
+            let max_grid = (form.opponents.len() as u32).min(MAX_AI_COUNT);
+            form.grid_position = form.grid_position.min(max_grid);
+            setting(ui, "Your grid position", |ui| {
+                ui.add(egui::Slider::new(&mut form.grid_position, 0..=max_grid));
+            });
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(new_opp_car).hint_text("car id (empty = same)").desired_width(180.0));
+                ui.add(egui::TextEdit::singleline(new_opp_name).hint_text("driver name").desired_width(130.0));
+                if ui.button("+ Add AI Car").clicked() && form.opponents.len() < MAX_AI_COUNT as usize {
+                    let car_id = if new_opp_car.trim().is_empty() { form.car.clone() } else { new_opp_car.trim().to_string() };
+                    let name = if new_opp_name.trim().is_empty() { format!("AI {}", form.opponents.len() + 1) } else { new_opp_name.trim().to_string() };
+                    form.opponents.push(AiOpponent {
+                        car: car_id,
+                        driver_name: name,
+                        ai_level: form.ai_level,
+                        ai_aggression: form.ai_aggression,
+                        ..Default::default()
+                    });
+                    new_opp_name.clear();
+                }
+            });
+            let mut remove_idx = None;
+            for (i, opp) in form.opponents.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("#{}", i + 1)).font(theme::mono(12.0)).color(MUTED));
+                    ui.add(egui::TextEdit::singleline(&mut opp.car).desired_width(150.0));
+                    ui.add(egui::TextEdit::singleline(&mut opp.driver_name).desired_width(100.0));
+                    ui.add(egui::DragValue::new(&mut opp.ai_level).range(50..=100).suffix("%"));
+                    ui.add(egui::DragValue::new(&mut opp.ballast).range(0..=500).suffix("kg"));
+                    if ui.small_button("×").clicked() {
+                        remove_idx = Some(i);
+                    }
+                });
+            }
+            if let Some(idx) = remove_idx {
+                form.opponents.remove(idx);
+            }
+        } else {
+            let max_grid = form.ai_count.min(MAX_AI_COUNT);
+            form.grid_position = form.grid_position.min(form.ai_count);
+            setting(ui, "AI cars", |ui| {
+                ui.add(egui::Slider::new(&mut form.ai_count, 0..=MAX_AI_COUNT));
+            });
+            setting(ui, "Your grid position", |ui| {
+                ui.add(egui::Slider::new(&mut form.grid_position, 0..=max_grid));
+            });
+            setting(ui, "AI strength", |ui| {
+                ui.add(egui::Slider::new(&mut form.ai_level, 0..=100).suffix(" %"));
+            });
+            setting(ui, "AI aggression", |ui| {
+                let mut on = form.ai_aggression.is_some();
+                if widgets::toggle(ui, &mut on).changed() {
+                    form.ai_aggression = on.then_some(50);
+                }
+                match form.ai_aggression.as_mut() {
+                    Some(value) => {
+                        ui.add(egui::Slider::new(value, 0..=100).suffix(" %"));
+                    }
+                    None => {
+                        ui.label(RichText::new("Game default").color(MUTED));
+                    }
+                }
+            });
+        }
     });
     }
+
+    card(ui, "Ghost Car & Player BoP", "Ghost pacing and player setup/ballast/restrictor.", |ui| {
+        setting(ui, "Ghost Car", |ui| {
+            widgets::toggle(ui, &mut form.ghost_car.enabled);
+            if form.ghost_car.enabled {
+                ui.checkbox(&mut form.ghost_car.recording, "Record");
+                ui.checkbox(&mut form.ghost_car.playing, "Play");
+                ui.add(egui::DragValue::new(&mut form.ghost_car.advantage_centis).range(-500..=500).suffix(" cs lead"));
+            }
+        });
+        setting(ui, "Player Setup", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut form.player_setup).hint_text("default setup").desired_width(200.0));
+        });
+        setting(ui, "Ballast / Restrictor", |ui| {
+            ui.add(egui::DragValue::new(&mut form.player_ballast).range(0..=500).suffix(" kg"));
+            ui.add(egui::DragValue::new(&mut form.player_restrictor).range(0..=100).suffix(" % restrictor"));
+        });
+    });
 
     card(ui, "Rules", "", |ui| {
         setting(ui, "Driver name", |ui| {
@@ -784,8 +960,7 @@ fn form_card(ui: &mut egui::Ui, page: &mut QuickRacePage, busy: bool) -> Option<
     }
 
     ui.horizontal(|ui| {
-        let launch = widgets::primary_button("Start race").min_size(egui::vec2(160.0, 38.0));
-        if ui.add_enabled(!busy && *scanned, launch).clicked() {
+        if widgets::cta_button(ui, "Start race", egui::vec2(170.0, 40.0), !busy && *scanned).clicked() {
             action = Some(Action::Launch);
         }
         if ui.add_enabled(!busy, egui::Button::new("Validate")).clicked() {

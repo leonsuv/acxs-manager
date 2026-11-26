@@ -101,6 +101,14 @@ struct SkinsPage {
     checking: bool,
     importing: bool,
     recolour: RecolourForm,
+    /// Inline `ui_skin.json` editor state for the currently selected skin.
+    meta_for: Option<PathBuf>,
+    meta_skinname: String,
+    meta_driver: String,
+    meta_team: String,
+    meta_number: String,
+    meta_country: String,
+    meta_priority: String,
 }
 
 impl SkinsPage {
@@ -125,6 +133,13 @@ impl SkinsPage {
             checking: false,
             importing: false,
             recolour: RecolourForm::default(),
+            meta_for: None,
+            meta_skinname: String::new(),
+            meta_driver: String::new(),
+            meta_team: String::new(),
+            meta_number: String::new(),
+            meta_country: String::new(),
+            meta_priority: String::new(),
         }
     }
 
@@ -390,7 +405,73 @@ impl SkinsPage {
             }
         }
 
+        self.skin_meta_section(ui, &skin);
         self.recolour_section(ui, &skin);
+    }
+
+    fn skin_meta_section(&mut self, ui: &mut egui::Ui, skin: &SkinEntry) {
+        if self.meta_for.as_deref() != Some(skin.path.as_path()) {
+            let meta = skins::read_skin_meta(&skin.path);
+            self.meta_for = Some(skin.path.clone());
+            self.meta_skinname = meta.skinname.unwrap_or_else(|| skin.name.clone());
+            self.meta_driver = meta.drivername.unwrap_or_default();
+            self.meta_team = meta.team.unwrap_or_default();
+            self.meta_number = meta.number.unwrap_or_default();
+            self.meta_country = meta.country.unwrap_or_default();
+            self.meta_priority = meta.priority.map(|p| p.to_string()).unwrap_or_default();
+        }
+
+        ui.add_space(12.0);
+        widgets::section_title(ui, "Edit ui_skin.json");
+        egui::Grid::new("skin_meta_grid")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label(RichText::new("Skin name").small().color(MUTED));
+                ui.text_edit_singleline(&mut self.meta_skinname);
+                ui.end_row();
+                ui.label(RichText::new("Driver").small().color(MUTED));
+                ui.text_edit_singleline(&mut self.meta_driver);
+                ui.end_row();
+                ui.label(RichText::new("Team").small().color(MUTED));
+                ui.text_edit_singleline(&mut self.meta_team);
+                ui.end_row();
+                ui.label(RichText::new("Number").small().color(MUTED));
+                ui.text_edit_singleline(&mut self.meta_number);
+                ui.end_row();
+                ui.label(RichText::new("Country").small().color(MUTED));
+                ui.text_edit_singleline(&mut self.meta_country);
+                ui.end_row();
+                ui.label(RichText::new("Priority").small().color(MUTED));
+                ui.text_edit_singleline(&mut self.meta_priority);
+                ui.end_row();
+            });
+        ui.add_space(6.0);
+        if ui.add(widgets::primary_button("Save ui_skin.json")).clicked() {
+            let patch = skins::SkinMeta {
+                skinname: Some(self.meta_skinname.trim().to_string()),
+                drivername: Some(self.meta_driver.trim().to_string()),
+                team: Some(self.meta_team.trim().to_string()),
+                number: Some(self.meta_number.trim().to_string()),
+                country: Some(self.meta_country.trim().to_string()),
+                priority: self.meta_priority.trim().parse::<i64>().ok(),
+            };
+            let notice = match skins::save_skin_meta(&skin.path, &patch) {
+                Ok(_) => {
+                    // Force skin list refresh on next frame.
+                    self.skins_car = None;
+                    Notice {
+                        text: format!("Saved ui_skin.json for {} (backup kept).", skin.skin_id),
+                        ok: true,
+                    }
+                }
+                Err(e) => Notice {
+                    text: format!("Could not save ui_skin.json: {e}"),
+                    ok: false,
+                },
+            };
+            let _ = self.tx.send(Msg::Notice(notice));
+        }
     }
 
     /// Recolour one PNG of the skin into a new file in the skin folder.

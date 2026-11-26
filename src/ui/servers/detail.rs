@@ -6,6 +6,8 @@
 //! Double-click a car to join with it at once.
 
 use super::*;
+use acxs_manager::content_dl::{self, ContentDownloadPlan};
+use acxs_manager::server_status::resolve_track_id;
 
 /// What the panel needs to know, read-only.
 pub(super) struct DetailIn<'a> {
@@ -16,6 +18,11 @@ pub(super) struct DetailIn<'a> {
     pub in_list: bool,
     pub tracks: &'a [TrackEntry],
     pub cars: &'a [CarEntry],
+    pub installed_csp_build: Option<u32>,
+    pub game_running: bool,
+    pub watching_slot: bool,
+    pub download_progress: Option<String>,
+    pub booking_status: Option<String>,
 }
 
 /// What the user can change in the panel. Lives in [`Servers`] so it survives between frames.
@@ -31,8 +38,17 @@ pub(super) struct Edit<'a> {
 /// Something the user asked for.
 pub(super) enum Action {
     Join(JoinRequest),
+    BookSlot(JoinRequest),
+    ToggleSlotWatch {
+        entry: Entry,
+        model: String,
+        skin: Option<String>,
+    },
+    DownloadMissing(ContentDownloadPlan),
+    CancelDownload,
     CheckNow,
     CopyAddress,
+    CopyInviteLink,
     Remove,
     AddToList,
     ToggleFavorite,
@@ -45,9 +61,14 @@ pub(super) fn show(ui: &mut egui::Ui, input: &DetailIn, edit: &mut Edit) -> Vec<
     let mut actions = Vec::new();
     let live = &input.live;
     let status = live.status.as_ref();
-    let (track, track_id, track_layout) = match status.and_then(|s| s.track.as_deref()) {
-        Some(raw) => resolve_track(raw, input.tracks),
-        None => (None, String::new(), None),
+    let track_ids: Vec<&str> = input.tracks.iter().map(|t| t.id.as_str()).collect();
+    let (track, track_id, track_layout, min_csp_build) = match status.and_then(|s| s.track.as_deref()) {
+        Some(raw) => {
+            let resolved = resolve_track_id(raw, &track_ids);
+            let found = input.tracks.iter().find(|t| t.id == resolved.track_id);
+            (found, resolved.track_id, resolved.layout, resolved.min_csp_build)
+        }
+        None => (None, String::new(), None, None),
     };
     let groups: Vec<Group> = status.map(|s| group_cars(&s.cars)).unwrap_or_default();
     let local = |model: &str| input.cars.iter().find(|c| c.id == model);
@@ -68,6 +89,7 @@ pub(super) fn show(ui: &mut egui::Ui, input: &DetailIn, edit: &mut Edit) -> Vec<
     ui.add_space(8.0);
 
     // Facts, one line.
+    let csp_too_old = min_csp_build.is_some_and(|req| input.installed_csp_build.is_none_or(|cur| cur < req));
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
         match status {
@@ -92,14 +114,17 @@ pub(super) fn show(ui: &mut egui::Ui, input: &DetailIn, edit: &mut Edit) -> Vec<
                 widgets::pill(ui, text, FAINT);
             }
         }
-        if input.lobby.is_some_and(|l| l.csp_required) {
+        if let Some(req) = min_csp_build {
+            let color = if csp_too_old { DANGER } else { INFO };
+            widgets::pill(ui, &format!("CSP ≥ {req}"), color);
+        } else if input.lobby.is_some_and(|l| l.csp_required) {
             widgets::pill(ui, "needs CSP", INFO);
         }
         if let Some(ms) = live.latency_ms {
             widgets::pill(ui, &format!("{ms} ms"), MUTED);
         }
         if !input.entry.host.is_empty() {
-            ui.label(RichText::new(input.entry.key()).size(12.0).color(FAINT));
+            ui.label(RichText::new(input.entry.key()).font(theme::mono(11.5)).color(FAINT));
         }
     });
     if let Some(error) = &live.error {
@@ -110,7 +135,13 @@ pub(super) fn show(ui: &mut egui::Ui, input: &DetailIn, edit: &mut Edit) -> Vec<
     // The action bar.
     let chosen = edit.pick_model.clone();
     let chosen_car = chosen.as_deref().and_then(local);
+    let chosen_free = chosen
+        .as_deref()
+        .and_then(|m| groups.iter().find(|g| g.0 == m))
+        .map_or(0, |g| g.2);
     let needs_password = input.lobby.is_some_and(|l| l.password);
+    let is_booking = status.and_then(|s| s.session.as_deref()) == Some("0");
+
     let mut problems: Vec<String> = Vec::new();
     if status.is_none() {
         problems.push("The server does not answer right now.".into());
@@ -124,30 +155,104 @@ pub(super) fn show(ui: &mut egui::Ui, input: &DetailIn, edit: &mut Edit) -> Vec<
     if status.is_some() && chosen.is_none() {
         problems.push("Pick a car below.".into());
     }
+    if let Some(req) = min_csp_build
+        && csp_too_old
+    {
+        let have = input
+            .installed_csp_build
+            .map_or_else(|| "none".into(), |b| b.to_string());
+        problems.push(format!("Requires CSP build {req} or newer (installed: {have})."));
+    }
     if needs_password && edit.password.trim().is_empty() {
         problems.push("This server needs a password.".into());
     }
     let can_join = problems.is_empty();
 
-    theme::card_flat().show(ui, |ui| {
+    // Check server-advertised missing content URLs.
+    let missing_track_opt = (status.is_some_and(|s| s.track.is_some()) && track.is_none())
+        .then_some(track_id.as_str());
+    let missing_cars: Vec<String> = groups
+        .iter()
+        .filter(|g| local(&g.0).is_none())
+        .map(|g| g.0.clone())
+        .collect();
+    let dl_plan = status
+        .map(|s| content_dl::parse_server_content_urls(&s.raw_info, &s.raw_entries, missing_track_opt, &missing_cars))
+        .unwrap_or_default();
+
+    theme::card_elevated().show(ui, |ui| {
         ui.set_width(ui.available_width());
-        let label = match (chosen_car, edit.pick_skin.as_deref()) {
-            (Some(car), Some(skin)) => format!("JOIN  ·  {}  ·  {skin}", car.name),
-            (Some(car), None) => format!("JOIN  ·  {}", car.name),
-            _ => "JOIN".to_string(),
+        let label = match (is_booking, chosen_car, edit.pick_skin.as_deref()) {
+            (true, Some(car), _) => format!("BOOK SLOT (/SUB)  ·  {}", car.name),
+            (true, None, _) => "BOOK SLOT (/SUB)".to_string(),
+            (false, Some(car), Some(skin)) => format!("JOIN  ·  {}  ·  {skin}", car.name),
+            (false, Some(car), None) => format!("JOIN  ·  {}", car.name),
+            (false, None, _) => "JOIN".to_string(),
         };
         let button = widgets::primary_button(&label).min_size(vec2(ui.available_width(), 46.0));
         if ui.add_enabled(can_join, button).clicked() {
-            actions.push(Action::Join(JoinRequest {
+            let req = JoinRequest {
                 entry: input.entry.clone(),
                 model: edit.pick_model.clone(),
                 skin: edit.pick_skin.clone(),
-            }));
+            };
+            if is_booking {
+                actions.push(Action::BookSlot(req));
+            } else {
+                actions.push(Action::Join(req));
+            }
+        }
+        if let Some(bstatus) = &input.booking_status {
+            ui.add_space(4.0);
+            widgets::pill(ui, bstatus, INFO);
         }
         for problem in &problems {
             ui.label(RichText::new(problem).size(12.5).color(WARN));
         }
-        ui.add_space(4.0);
+
+        // Missing-content auto-installer bar.
+        if let Some(progress) = &input.download_progress {
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spinner();
+                ui.label(RichText::new(progress).font(theme::mono(12.0)).color(INFO));
+                if ui.small_button("Cancel").clicked() {
+                    actions.push(Action::CancelDownload);
+                }
+            });
+        } else if !dl_plan.items.is_empty() {
+            ui.add_space(6.0);
+            let btn_label = format!("Download & Install Missing ({})", dl_plan.items.len());
+            if ui
+                .add_enabled(!input.game_running, egui::Button::new(btn_label))
+                .on_hover_text("Downloads missing content advertised by the server and installs safely into AC.")
+                .clicked()
+            {
+                actions.push(Action::DownloadMissing(dl_plan));
+            }
+        }
+
+        // Slot-Watch Auto-Join when the selected car is full.
+        if let Some(model) = chosen.as_ref()
+            && chosen_car.is_some()
+            && chosen_free == 0
+        {
+            ui.add_space(6.0);
+            let watch_label = if input.watching_slot {
+                "Stop Slot-Watch Auto-Join"
+            } else {
+                "Watch & Auto-Join When Slot Opens"
+            };
+            if ui.button(watch_label).clicked() {
+                actions.push(Action::ToggleSlotWatch {
+                    entry: input.entry.clone(),
+                    model: model.clone(),
+                    skin: edit.pick_skin.clone(),
+                });
+            }
+        }
+
+        ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Race as").color(MUTED));
             ui.add(egui::TextEdit::singleline(edit.driver).desired_width(120.0).margin(egui::Margin::symmetric(8, 5)));
@@ -159,6 +264,9 @@ pub(super) fn show(ui: &mut egui::Ui, input: &DetailIn, edit: &mut Edit) -> Vec<
                         .desired_width(110.0)
                         .margin(egui::Margin::symmetric(8, 5)),
                 );
+            }
+            if ui.button("Copy Invite Link").clicked() {
+                actions.push(Action::CopyInviteLink);
             }
             ui.menu_button("More", |ui| {
                 if ui.button("Copy address").clicked() {
@@ -250,7 +358,7 @@ fn car_picker(ui: &mut egui::Ui, input: &DetailIn, edit: &mut Edit, groups: &[Gr
     let local = |model: &str| input.cars.iter().find(|c| c.id == model);
     let free_total: usize = groups.iter().map(|g| g.2).sum();
     ui.horizontal(|ui| {
-        ui.label(RichText::new(format!("CHOOSE YOUR CAR  ·  {free_total} free")).font(theme::bold(11.0)).color(FAINT));
+        ui.label(RichText::new(format!("CHOOSE YOUR CAR  ·  {free_total} free")).font(theme::mono(11.0)).color(FAINT));
     });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
@@ -299,7 +407,7 @@ fn car_picker(ui: &mut egui::Ui, input: &DetailIn, edit: &mut Edit, groups: &[Gr
                     let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click());
                     let selected = edit.pick_model.as_deref() == Some(model.as_str());
                     let hover = ui.ctx().animate_bool_with_time(response.id, response.hovered(), 0.1);
-                    ui.painter().rect_filled(rect, CornerRadius::same(9), theme::CARD.lerp_to_gamma(theme::CARD_HOVER, hover));
+                    ui.painter().rect_filled(rect, CornerRadius::same(9), theme::SURFACE_ELEVATED.lerp_to_gamma(theme::SURFACE_RAISED, hover));
                     let image_rect = Rect::from_min_size(rect.min, vec2(width, height - 30.0));
                     let first_skin = skins.iter().find(|s| s.1 > 0).or(skins.first()).map(|s| s.0.as_str());
                     let preview = car.and_then(|c| media::car_preview(&c.path, first_skin));
@@ -345,7 +453,7 @@ fn car_picker(ui: &mut egui::Ui, input: &DetailIn, edit: &mut Edit, groups: &[Gr
     if skins.len() > 1 {
         let car = local(model);
         ui.add_space(8.0);
-        ui.label(RichText::new(format!("SKIN  ·  {} to choose from", skins.len())).font(theme::bold(11.0)).color(FAINT));
+        ui.label(RichText::new(format!("SKIN  ·  {} to choose from", skins.len())).font(theme::mono(11.0)).color(FAINT));
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(6.0, 6.0);

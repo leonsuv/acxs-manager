@@ -2,14 +2,30 @@
 
 use super::{Tool, ToolContext};
 use crate::ui::{media, theme, widgets, Notice};
-use acxs_manager::events::{self, GameEvent};
-use acxs_manager::{game, race, settings};
-use eframe::egui::{self, RichText};
+use acxs_manager::events::{self, EventProgressStore, GameEvent, Medal};
+use acxs_manager::{game, race, race_out, settings};
+use eframe::egui::{self, Color32, RichText};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 /// Rows drawn at once; the search narrows the rest down.
 const MAX_ROWS: usize = 120;
+
+fn progress_store_path() -> PathBuf {
+    settings::settings_path()
+        .parent()
+        .map_or_else(|| PathBuf::from("event-progress.json"), |d| d.join("event-progress.json"))
+}
+
+fn medal_color(medal: Medal) -> Color32 {
+    match medal {
+        Medal::Gold => Color32::from_rgb(0xFF, 0xC8, 0x3D),
+        Medal::Silver => Color32::from_rgb(0xC0, 0xCA, 0xD8),
+        Medal::Bronze => Color32::from_rgb(0xCD, 0x7F, 0x32),
+        Medal::None => theme::MUTED,
+    }
+}
 
 pub fn tool() -> Box<dyn Tool> {
     let (tx, rx) = mpsc::channel();
@@ -18,6 +34,8 @@ pub fn tool() -> Box<dyn Tool> {
         rx,
         root: None,
         events: None,
+        medals: BTreeMap::new(),
+        last_launched: None,
         query: String::new(),
         kind: "All".to_string(),
         career: false,
@@ -27,8 +45,8 @@ pub fn tool() -> Box<dyn Tool> {
 }
 
 enum Msg {
-    Scanned(Vec<(GameEvent, bool)>),
-    Started(Notice),
+    Scanned(Vec<(GameEvent, bool)>, BTreeMap<String, Medal>),
+    Started(Notice, GameEvent),
 }
 
 struct Events {
@@ -37,11 +55,27 @@ struct Events {
     root: Option<PathBuf>,
     /// Each event with whether its car and track are installed.
     events: Option<Vec<(GameEvent, bool)>>,
+    medals: BTreeMap<String, Medal>,
+    last_launched: Option<GameEvent>,
     query: String,
     kind: String,
     career: bool,
     playable_only: bool,
     busy: bool,
+}
+
+fn load_medals() -> BTreeMap<String, Medal> {
+    let mut merged = settings::ac_user_cfg_dir()
+        .map(|cfg| events::read_progress_ini(&cfg))
+        .unwrap_or_default();
+    let store = EventProgressStore::load(&progress_store_path());
+    for (id, medal) in store.medals {
+        let entry = merged.entry(id).or_default();
+        if medal > *entry {
+            *entry = medal;
+        }
+    }
+    merged
 }
 
 fn scan(root: &Path) -> Vec<(GameEvent, bool)> {
@@ -98,9 +132,15 @@ impl Tool for Events {
         widgets::heading(ui, "Events", "The game's Special Events and Career races. Pick one and drive.");
         while let Ok(message) = self.rx.try_recv() {
             match message {
-                Msg::Scanned(list) => self.events = Some(list),
-                Msg::Started(notice) => {
+                Msg::Scanned(list, medals) => {
+                    self.events = Some(list);
+                    self.medals = medals;
+                }
+                Msg::Started(notice, ev) => {
                     self.busy = false;
+                    if notice.ok {
+                        self.last_launched = Some(ev);
+                    }
                     notices.push(notice);
                 }
             }
@@ -116,7 +156,7 @@ impl Tool for Events {
             let repaint = ui.ctx().clone();
             let scan_root = root.clone();
             std::thread::spawn(move || {
-                let _ = tx.send(Msg::Scanned(scan(&scan_root)));
+                let _ = tx.send(Msg::Scanned(scan(&scan_root), load_medals()));
                 repaint.request_repaint();
             });
         }
@@ -126,6 +166,50 @@ impl Tool for Events {
         };
 
         let names = super::names::names(&root, ui.ctx());
+        let gold = self.medals.values().filter(|&&m| m == Medal::Gold).count();
+        let silver = self.medals.values().filter(|&&m| m == Medal::Silver).count();
+        let bronze = self.medals.values().filter(|&&m| m == Medal::Bronze).count();
+        ui.horizontal_wrapped(|ui| {
+            widgets::pill(ui, &format!("{gold} Gold"), medal_color(Medal::Gold));
+            widgets::pill(ui, &format!("{silver} Silver"), medal_color(Medal::Silver));
+            widgets::pill(ui, &format!("{bronze} Bronze"), medal_color(Medal::Bronze));
+            if let Some(last) = self.last_launched.clone() {
+                if ui.button(format!("Check result for {}", last.name)).clicked() {
+                    if let Some(out_path) = settings::ac_documents_dir().map(|d| d.join("out").join("race_out.json"))
+                        && let Ok(summary) = race_out::load_race_out(&out_path)
+                        && let Ok(bytes) = std::fs::read(&last.ini)
+                    {
+                        let finish_pos = summary.results.iter().find(|r| r.position == 1).map(|r| r.position);
+                        let earned = events::evaluate_event_medal(
+                            &String::from_utf8_lossy(&bytes),
+                            summary.player_best_lap_ms,
+                            finish_pos,
+                        );
+                        if earned != Medal::None {
+                            let mut store = EventProgressStore::load(&progress_store_path());
+                            store.record_medal(&last.id, earned);
+                            let _ = store.save(&progress_store_path());
+                            self.medals = load_medals();
+                            notices.push(Notice {
+                                text: format!("Recorded {} medal for {}!", earned.label(), last.name),
+                                ok: true,
+                            });
+                        } else {
+                            notices.push(Notice {
+                                text: format!("No medal threshold met yet for {}.", last.name),
+                                ok: false,
+                            });
+                        }
+                    } else {
+                        notices.push(Notice {
+                            text: "Could not read Documents/Assetto Corsa/out/race_out.json.".into(),
+                            ok: false,
+                        });
+                    }
+                }
+            }
+        });
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.career, false, "Special Events");
             ui.selectable_value(&mut self.career, true, "Career");
@@ -164,7 +248,8 @@ impl Tool for Events {
         let mut chosen = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             for (event, playable) in shown.iter().take(MAX_ROWS).map(|pair| (&pair.0, pair.1)) {
-                theme::card().show(ui, |ui| {
+                let medal = self.medals.get(&event.id).copied().unwrap_or(Medal::None);
+                theme::card_elevated().show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
                         let (rect, _) = ui.allocate_exact_size(egui::vec2(150.0, 72.0), egui::Sense::hover());
@@ -180,6 +265,9 @@ impl Tool for Events {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(&event.name).font(theme::bold(15.0)));
                                 widgets::pill(ui, &event.kind, theme::INFO);
+                                if medal != Medal::None {
+                                    widgets::pill(ui, medal.label(), medal_color(medal));
+                                }
                             });
                             let track = names.track(&event.track);
                             let place = if event.layout.is_empty() { track } else { format!("{track}, {}", names.layout(&event.layout)) };
@@ -217,7 +305,8 @@ impl Tool for Events {
             let tx = self.tx.clone();
             let repaint = ui.ctx().clone();
             std::thread::spawn(move || {
-                let _ = tx.send(Msg::Started(start(&root, &event)));
+                let notice = start(&root, &event);
+                let _ = tx.send(Msg::Started(notice, event));
                 repaint.request_repaint();
             });
         }

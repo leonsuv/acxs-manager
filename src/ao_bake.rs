@@ -547,6 +547,7 @@ pub fn write_ao_csv(path: &Path, triangles_count: usize, values: &[f32]) -> Resu
 }
 
 /// Returns true if any triangle other than `skip` is hit by the ray within `max_t`.
+#[allow(dead_code)]
 fn is_occluded(
     origin: [f32; 3],
     dir: [f32; 3],

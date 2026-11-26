@@ -143,6 +143,7 @@ pub fn empty_state(ui: &mut egui::Ui, text: &str) {
 }
 
 /// Small uppercase label above a group of sidebar entries.
+#[allow(dead_code)]
 pub fn nav_section(ui: &mut egui::Ui, text: &str) {
     ui.add_space(9.0);
     ui.horizontal(|ui| {
@@ -176,6 +177,7 @@ pub fn nav_item(ui: &mut egui::Ui, selected: bool, label: &str, badge: Option<&s
 }
 
 /// A collapsible group header for the sidebar tool list. Returns true when toggled.
+#[allow(dead_code)]
 pub fn nav_group(ui: &mut egui::Ui, open: bool, label: &str, count: usize, holds_active: bool) -> bool {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 31.0), Sense::click());
     if ui.is_rect_visible(rect) {
@@ -261,6 +263,7 @@ pub fn glyph_button(ui: &mut egui::Ui, glyph: &str, tip: &str) -> bool {
 }
 
 /// The small drawn icons used in nav & headers.
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
     Home,
@@ -282,6 +285,7 @@ pub enum Icon {
 }
 
 /// Draw `icon` centred in `rect` with strokes of `color`.
+#[allow(dead_code)]
 pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
     let c = rect.center();
     let u = rect.width() / 20.0;
@@ -424,6 +428,7 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
 }
 
 /// A primary sidebar entry: a drawn icon, the label and an optional count on the right.
+#[allow(dead_code)]
 pub fn nav_icon_item(ui: &mut egui::Ui, selected: bool, icon: Icon, label: &str, badge: Option<&str>) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 31.0), Sense::click());
     if ui.is_rect_visible(rect) {

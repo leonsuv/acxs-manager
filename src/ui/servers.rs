@@ -14,15 +14,20 @@ mod detail;
 use super::theme::{self, ACCENT, DANGER, FAINT, INFO, MUTED, OK, TEXT, WARN};
 use super::{media, widgets, App, Msg, Notice};
 use acxs_manager::content::{CarEntry, TrackEntry};
-use acxs_manager::directory;
+use acxs_manager::content_dl;
+use acxs_manager::directory::{self, RecentServer, RecentServers};
+use acxs_manager::lan_discovery::{self, DiscoveredServer};
 use acxs_manager::lobby::{self, LobbyServer};
-use acxs_manager::server_status::{self, ServerCar, ServerStatus};
+use acxs_manager::server_status::{self, BookingRequest, ServerCar, ServerStatus};
+use acxs_manager::uri;
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Rect, RichText, Sense, vec2};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_HTTP_PORT: u16 = 8081;
 /// A server is asked again after this long.
@@ -66,12 +71,34 @@ enum LobbyState {
     Loaded(Instant),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum ServerTab {
+    #[default]
+    Watchlist,
+    Online,
+    Recent,
+    Lan,
+}
+
+struct SlotWatch {
+    entry: Entry,
+    model: String,
+    skin: Option<String>,
+    last_poll: Instant,
+}
+
+struct DownloadUi {
+    cancel: Arc<AtomicBool>,
+    progress: Arc<Mutex<String>>,
+    done: Arc<AtomicBool>,
+}
+
 #[derive(Default)]
 pub struct Servers {
     pub entries: Vec<Entry>,
     pub live: HashMap<String, Live>,
-    /// Showing the public lobby list instead of the watch list.
-    online: bool,
+    /// Active sub-tab: Watchlist | Online | Recent | LAN.
+    tab: ServerTab,
     lobby: HashMap<String, LobbyServer>,
     lobby_state: LobbyState,
     /// Servers seen by the refresh in progress.
@@ -89,6 +116,7 @@ pub struct Servers {
     hide_full: bool,
     hide_empty: bool,
     hide_password: bool,
+    joinable_only: bool,
     selected: Option<String>,
     add_input: String,
     filter: String,
@@ -107,6 +135,23 @@ pub struct Servers {
     installed_only: bool,
     /// The car and skin last chosen on each server, by `host:port`.
     picks: HashMap<String, (String, String)>,
+    /// Recently joined servers persisted in `recent-servers.json`.
+    recent: RecentServers,
+    /// Discovered LAN servers and background scan receiver.
+    lan_servers: Vec<DiscoveredServer>,
+    lan_scanning: bool,
+    lan_rx: Option<Receiver<Vec<DiscoveredServer>>>,
+    /// Active Slot-Watch auto-join subscription.
+    slot_watch: Option<SlotWatch>,
+    pending_auto_join: Option<JoinRequest>,
+    /// Active missing-content download state.
+    download_ui: Option<DownloadUi>,
+    /// Last `/SUB` booking status per server key.
+    booking_status: HashMap<String, String>,
+}
+
+fn recent_path() -> PathBuf {
+    file_path().with_file_name("recent-servers.json")
 }
 
 fn file_path() -> PathBuf {
@@ -126,6 +171,7 @@ impl Servers {
             .unwrap_or_default();
         // A first-time user has no servers of their own: open on the public list.
         let no_own_servers = entries.is_empty();
+        let recent = RecentServers::load(&recent_path());
         let mut servers = Servers {
             entries,
             sort_col: 2,
@@ -135,8 +181,9 @@ impl Servers {
             custom_url: saved["url"].as_str().unwrap_or("").to_string(),
             hide_empty: true,
             installed_only: true,
-            online: no_own_servers,
+            tab: if no_own_servers { ServerTab::Online } else { ServerTab::Watchlist },
             driver: previous_driver_name(),
+            recent,
             ..Servers::default()
         };
         // The list of the last session is there at once; a refresh then updates it in place.
@@ -188,15 +235,73 @@ impl Servers {
 
     /// Show `key` on the Servers page, in the list it belongs to.
     pub fn show(&mut self, key: String) {
-        self.online = self.lobby.contains_key(&key) && !self.entries.iter().any(|e| e.key() == key);
+        self.tab = if self.lobby.contains_key(&key) && !self.entries.iter().any(|e| e.key() == key) {
+            ServerTab::Online
+        } else {
+            ServerTab::Watchlist
+        };
         self.select(key);
     }
 
-    /// The entry for `key`: from the watch list, else from the lobby list.
+    /// The entry for `key`: from the watch list, lobby list, recent list, or LAN scan.
     fn entry_for(&self, key: &str) -> Option<Entry> {
-        self.entries.iter().find(|e| e.key() == key).cloned().or_else(|| {
-            self.lobby.get(key).map(|s| Entry { host: s.ip.clone(), port: s.http_port, favorite: false })
-        })
+        self.entries
+            .iter()
+            .find(|e| e.key() == key)
+            .cloned()
+            .or_else(|| {
+                self.lobby
+                    .get(key)
+                    .map(|s| Entry { host: s.ip.clone(), port: s.http_port, favorite: false })
+            })
+            .or_else(|| {
+                self.recent
+                    .items
+                    .iter()
+                    .find(|r| r.key() == key)
+                    .map(|r| Entry { host: r.host.clone(), port: r.port, favorite: false })
+            })
+            .or_else(|| {
+                self.lan_servers
+                    .iter()
+                    .find(|s| format!("{}:{}", s.host, s.http_port) == key)
+                    .map(|s| Entry { host: s.host.clone(), port: s.http_port, favorite: false })
+            })
+    }
+
+    fn start_lan_scan(&mut self, ctx: &egui::Context) {
+        if self.lan_scanning {
+            return;
+        }
+        self.lan_scanning = true;
+        let (tx, rx) = mpsc::channel();
+        self.lan_rx = Some(rx);
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let found = lan_discovery::scan_lan(Duration::from_millis(1200));
+            let _ = tx.send(found);
+            ctx.request_repaint();
+        });
+    }
+
+    fn poll_lan_scan(&mut self) {
+        if let Some(rx) = &self.lan_rx
+            && let Ok(found) = rx.try_recv()
+        {
+            self.lan_scanning = false;
+            for srv in &found {
+                let key = format!("{}:{}", srv.host, srv.http_port);
+                if let Some(status) = &srv.status {
+                    let live = self.live.entry(key).or_default();
+                    live.status = Some(status.clone());
+                    live.latency_ms = srv.latency_ms;
+                    live.detailed = true;
+                    live.checked = Some(Instant::now());
+                }
+            }
+            self.lan_servers = found;
+            self.lan_rx = None;
+        }
     }
 
     /// Download the public server list. The Steam id is read from the Steam client on this PC
@@ -386,9 +491,11 @@ impl Servers {
     /// At most a few dozen requests run at once so a long list does not flood the network.
     fn refresh(&mut self, tx: &Sender<Msg>, ctx: &egui::Context, force: bool) {
         const MAX_IN_FLIGHT: usize = 24;
+        // Reserve 1 polling slot for active Slot-Watch auto-join so it never starves.
+        let budget = if self.slot_watch.is_some() { MAX_IN_FLIGHT - 1 } else { MAX_IN_FLIGHT };
         let mut in_flight = self.live.values().filter(|l| l.checking).count();
         for entry in &self.entries {
-            if in_flight >= MAX_IN_FLIGHT {
+            if in_flight >= budget {
                 break;
             }
             let key = entry.key();
@@ -421,6 +528,22 @@ impl Servers {
             Ok((status, latency)) => {
                 live.error = None;
                 live.latency_ms = Some(latency);
+                // Check if an active Slot-Watch just opened up.
+                if let Some(watch) = &self.slot_watch
+                    && watch.entry.key() == key
+                    && status.cars.iter().any(|c| {
+                        !c.connected
+                            && c.model == watch.model
+                            && watch.skin.as_deref().is_none_or(|s| s == c.skin)
+                    })
+                {
+                    let watch = self.slot_watch.take().unwrap();
+                    self.pending_auto_join = Some(JoinRequest {
+                        entry: watch.entry,
+                        model: Some(watch.model),
+                        skin: watch.skin,
+                    });
+                }
                 live.status = Some(status);
             }
             Err(error) => {
@@ -452,9 +575,29 @@ impl Servers {
     }
 
     fn add(&mut self, text: &str) -> Result<String, String> {
-        let text = text.trim().trim_start_matches("http://").trim_end_matches('/');
+        let trimmed = text.trim();
+        // Accept pasted acmanager:// or acxs:// invite links directly.
+        if let Ok(parsed) = uri::parse_join_uri(trimmed) {
+            let entry = Entry { host: parsed.host, port: parsed.http_port, favorite: false };
+            let key = entry.key();
+            if !self.entries.iter().any(|e| e.key() == key) {
+                self.entries.push(entry);
+                self.save();
+            }
+            if let Some(pw) = parsed.password {
+                self.password = pw;
+            }
+            if let Some(car) = parsed.car {
+                self.pick_model = Some(car);
+            }
+            if let Some(skin) = parsed.skin {
+                self.pick_skin = Some(skin);
+            }
+            return Ok(key);
+        }
+        let text = trimmed.trim_start_matches("http://").trim_end_matches('/');
         if text.is_empty() || text.contains(char::is_whitespace) {
-            return Err("Enter an address like 192.0.2.10:8081".into());
+            return Err("Enter an address like 192.0.2.10:8081 or an acmanager:// link".into());
         }
         let (host, port) = match text.rsplit_once(':') {
             Some((host, port)) => (host, port.parse::<u16>().map_err(|_| "The port must be a number")?),
@@ -614,30 +757,48 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     let mut notices: Vec<Notice> = Vec::new();
     let ctx = ui.ctx().clone();
 
+    sv.poll_lan_scan();
+    if sv.download_ui.as_ref().is_some_and(|d| d.done.load(Ordering::Acquire)) {
+        sv.download_ui = None;
+        app.refresh();
+    }
+
     widgets::heading(ui, "Servers", "Live players, free cars and your installed content, for your servers and the public lobby.");
 
-    // Tabs.
-    ui.horizontal(|ui| {
-        if ui.selectable_label(!sv.online, "My servers").clicked() {
-            sv.online = false;
-        }
-        let online_label = if sv.lobby.is_empty() { "Online".to_string() } else { format!("Online ({})", sv.lobby.len()) };
-        if ui.selectable_label(sv.online, online_label).clicked() {
-            sv.online = true;
-        }
-    });
+    // AAA animated sub-tabs: Watchlist | Online | Recent | LAN.
+    let online_badge = (!sv.lobby.is_empty()).then(|| sv.lobby.len().to_string());
+    let recent_badge = (!sv.recent.items.is_empty()).then(|| sv.recent.items.len().to_string());
+    let lan_badge = (!sv.lan_servers.is_empty()).then(|| sv.lan_servers.len().to_string());
+    widgets::animated_tabs(
+        ui,
+        "online_paddock_tabs",
+        &mut sv.tab,
+        &[
+            (ServerTab::Watchlist, "Watchlist", None),
+            (ServerTab::Online, "Online", online_badge.as_deref()),
+            (ServerTab::Recent, "Recent", recent_badge.as_deref()),
+            (ServerTab::Lan, "LAN", lan_badge.as_deref()),
+        ],
+    );
     ui.add_space(6.0);
 
     // An open Online tab keeps itself fresh: a list older than five minutes updates in the background.
-    if sv.online
+    if sv.tab == ServerTab::Online
         && sv.lobby_source == 0
         && let LobbyState::Loaded(at) = &sv.lobby_state
         && at.elapsed() > Duration::from_secs(300)
     {
         sv.start_refresh(&app.tx, &ctx);
     }
-    // Poll the watch list, and the selected server in whichever list it is.
+    // Poll the watch list, active Slot-Watch, and the selected server in whichever list it is.
     sv.refresh(&app.tx, &ctx, false);
+    if let Some(watch) = &mut sv.slot_watch
+        && watch.last_poll.elapsed() >= Duration::from_secs(5)
+    {
+        let entry = watch.entry.clone();
+        watch.last_poll = Instant::now();
+        sv.refresh_one(&entry, &app.tx, &ctx);
+    }
     if let Some(entry) = sv.selected.clone().and_then(|key| sv.entry_for(&key))
         && sv.live.get(&entry.key()).is_none_or(|l| !l.detailed && !l.checking)
     {
@@ -646,61 +807,85 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     ctx.request_repaint_after(Duration::from_secs(5));
 
     let mut force = false;
-    if !sv.online {
-        // Add row.
-        ui.horizontal(|ui| {
-            let width = (ui.available_width() - 520.0).max(180.0);
-            let edit = ui.add(
-                egui::TextEdit::singleline(&mut sv.add_input)
-                    .hint_text("Server address, e.g. 192.0.2.10:8081 (HTTP port)")
-                    .desired_width(width)
-                    .margin(egui::Margin::symmetric(10, 7)),
-            );
-            let submit = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.add(widgets::primary_button("Add server")).clicked() || submit {
-                let text = std::mem::take(&mut sv.add_input);
-                let (last, added, problem) = sv.add_many(&text);
-                if let Some(key) = last {
-                    sv.select(key);
-                    sv.refresh(&app.tx, &ctx, true);
-                    if added > 1 {
-                        notices.push(Notice { text: format!("Added {added} servers."), ok: true });
-                    }
-                }
-                if let Some(problem) = problem {
-                    if added == 0 {
-                        sv.add_input = text;
-                    }
-                    notices.push(Notice { text: problem, ok: false });
-                }
-            }
-            if ui.button("My local server").on_hover_text("127.0.0.1 on the default HTTP port").clicked()
-                && let Err(e) = sv.add("127.0.0.1")
-            {
-                notices.push(Notice { text: e, ok: false });
-            }
-            if ui.button("Import file").on_hover_text("A text file with one server per line: ip:port").clicked()
-                && let Some(path) = rfd::FileDialog::new().add_filter("Text", &["txt", "csv", "list"]).pick_file()
-            {
-                match std::fs::read_to_string(&path) {
-                    Ok(text) => {
-                        let (last, added, problem) = sv.add_many(&text);
-                        if last.is_some() {
-                            sv.refresh(&app.tx, &ctx, true);
-                        }
-                        notices.push(Notice { text: format!("Imported {added} server(s) from {}.", path.display()), ok: added > 0 });
-                        if let Some(problem) = problem {
-                            notices.push(Notice { text: problem, ok: false });
+    match sv.tab {
+        ServerTab::Watchlist => {
+            // Add row.
+            ui.horizontal(|ui| {
+                let width = (ui.available_width() - 520.0).max(180.0);
+                let edit = ui.add(
+                    egui::TextEdit::singleline(&mut sv.add_input)
+                        .hint_text("Address (192.0.2.10:8081) or acmanager:// / acxs:// invite link")
+                        .desired_width(width)
+                        .margin(egui::Margin::symmetric(10, 7)),
+                );
+                let submit = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui.add(widgets::primary_button("Add server")).clicked() || submit {
+                    let text = std::mem::take(&mut sv.add_input);
+                    let (last, added, problem) = sv.add_many(&text);
+                    if let Some(key) = last {
+                        sv.select(key);
+                        sv.refresh(&app.tx, &ctx, true);
+                        if added > 1 {
+                            notices.push(Notice { text: format!("Added {added} servers."), ok: true });
                         }
                     }
-                    Err(e) => notices.push(Notice { text: format!("Could not read the file: {e}"), ok: false }),
+                    if let Some(problem) = problem {
+                        if added == 0 {
+                            sv.add_input = text;
+                        }
+                        notices.push(Notice { text: problem, ok: false });
+                    }
                 }
-            }
-            if ui.button("Refresh").clicked() {
-                force = true;
-            }
-        });
-    } else {
+                if ui.button("My local server").on_hover_text("127.0.0.1 on the default HTTP port").clicked()
+                    && let Err(e) = sv.add("127.0.0.1")
+                {
+                    notices.push(Notice { text: e, ok: false });
+                }
+                if ui.button("Import file").on_hover_text("A text file with one server per line: ip:port").clicked()
+                    && let Some(path) = rfd::FileDialog::new().add_filter("Text", &["txt", "csv", "list"]).pick_file()
+                {
+                    match std::fs::read_to_string(&path) {
+                        Ok(text) => {
+                            let (last, added, problem) = sv.add_many(&text);
+                            if last.is_some() {
+                                sv.refresh(&app.tx, &ctx, true);
+                            }
+                            notices.push(Notice { text: format!("Imported {added} server(s) from {}.", path.display()), ok: added > 0 });
+                            if let Some(problem) = problem {
+                                notices.push(Notice { text: problem, ok: false });
+                            }
+                        }
+                        Err(e) => notices.push(Notice { text: format!("Could not read the file: {e}"), ok: false }),
+                    }
+                }
+                if ui.button("Refresh").clicked() {
+                    force = true;
+                }
+            });
+        }
+        ServerTab::Recent => {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Servers you have joined recently (persisted in recent-servers.json).").color(MUTED));
+                if !sv.recent.items.is_empty() && ui.button("Clear recent").clicked() {
+                    sv.recent.items.clear();
+                    let _ = sv.recent.save(&recent_path());
+                }
+            });
+        }
+        ServerTab::Lan => {
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!sv.lan_scanning, widgets::primary_button("Scan LAN")).clicked() {
+                    sv.start_lan_scan(&ctx);
+                }
+                if sv.lan_scanning {
+                    ui.spinner();
+                    ui.label(RichText::new("Listening for UDP beacons (50960) & probing localhost…").color(MUTED));
+                } else {
+                    ui.label(RichText::new("Discovers local servers (127.0.0.1:8081-8090) and ACXS LAN beacons.").color(MUTED));
+                }
+            });
+        }
+        ServerTab::Online => {
         // The lobby needs a click first: it sends the Steam id of whoever is signed in.
         let mut load = false;
         let mut search = false;
@@ -835,39 +1020,51 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         if load {
             sv.load_lobby(&app.tx, &ctx);
         }
+        }
     }
     if force {
         sv.refresh(&app.tx, &ctx, true);
     }
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.add(
             egui::TextEdit::singleline(&mut sv.filter)
                 .hint_text("Filter by name, address, track or car")
                 .desired_width(300.0)
                 .margin(egui::Margin::symmetric(10, 6)),
         );
-        if !sv.online {
+        widgets::toggle(ui, &mut sv.joinable_only);
+        ui.label(RichText::new("100% Joinable").color(MUTED))
+            .on_hover_text("Only show servers where you own the track, have a free owned car, and meet the CSP build requirement.");
+        if sv.tab == ServerTab::Watchlist {
             widgets::toggle(ui, &mut sv.online_only);
             ui.label(RichText::new("Online only").color(MUTED));
         }
-        let (up, total) = if sv.online {
-            (sv.lobby.len(), sv.lobby.len())
-        } else {
-            (sv.entries.iter().filter(|e| sv.live.get(&e.key()).is_some_and(|l| l.status.is_some())).count(), sv.entries.len())
+        let (up, total) = match sv.tab {
+            ServerTab::Online => (sv.lobby.len(), sv.lobby.len()),
+            ServerTab::Recent => (sv.recent.items.len(), sv.recent.items.len()),
+            ServerTab::Lan => (sv.lan_servers.len(), sv.lan_servers.len()),
+            ServerTab::Watchlist => (
+                sv.entries.iter().filter(|e| sv.live.get(&e.key()).is_some_and(|l| l.status.is_some())).count(),
+                sv.entries.len(),
+            ),
         };
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let text = if sv.online { format!("{total} servers") } else { format!("{up} of {total} online") };
-            ui.label(RichText::new(text).size(12.5).color(MUTED));
+            let text = if sv.tab == ServerTab::Watchlist {
+                format!("{up} of {total} online")
+            } else {
+                format!("{total} servers")
+            };
+            ui.label(RichText::new(text).font(theme::mono(12.0)).color(MUTED));
         });
     });
     ui.add_space(8.0);
 
-    if !sv.online && sv.entries.is_empty() {
+    if sv.tab == ServerTab::Watchlist && sv.entries.is_empty() {
         ui.add_space(30.0);
         ui.vertical_centered(|ui| {
             ui.label(RichText::new("No servers yet").font(theme::bold(20.0)));
             ui.add_space(4.0);
-            ui.label(RichText::new("Add the address and HTTP port of a server above, or star one from the Online tab.").color(MUTED));
+            ui.label(RichText::new("Add an address or acmanager:// invite link above, or star one from the Online tab.").color(MUTED));
             ui.label(RichText::new("Hosting your own? Use the Dedicated Server tool, then add it with My local server.").color(FAINT));
         });
         app.servers = sv;
@@ -876,7 +1073,7 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         }
         return;
     }
-    if sv.online && sv.lobby.is_empty() {
+    if sv.tab == ServerTab::Online && sv.lobby.is_empty() {
         app.servers = sv;
         for n in notices {
             app.push_notice(n.text, n.ok);
@@ -886,6 +1083,7 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
 
     let tracks = app.snapshot.tracks.clone();
     let cars_local = app.snapshot.cars.clone();
+    let installed_csp_build = app.snapshot.installed_csp_build;
     let track_for = |status: &ServerStatus| {
         status.track.as_deref().and_then(|raw| resolve_track(raw, &tracks).0)
     };
@@ -893,24 +1091,65 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     // Rows to show: filtered, favourites first, then by the chosen column. Sort keys are
     // computed once per row, not per comparison, so thousands of servers stay cheap.
     let filter = sv.filter.trim().to_lowercase();
-    let candidates: Vec<Entry> = if sv.online {
-        sv.lobby
+    let candidates: Vec<Entry> = match sv.tab {
+        ServerTab::Online => sv
+            .lobby
             .values()
             .map(|s| Entry {
                 host: s.ip.clone(),
                 port: s.http_port,
                 favorite: sv.entries.iter().any(|e| e.host == s.ip && e.port == s.http_port && e.favorite),
             })
-            .collect()
-    } else {
-        sv.entries.clone()
+            .collect(),
+        ServerTab::Recent => sv
+            .recent
+            .items
+            .iter()
+            .map(|r| Entry {
+                host: r.host.clone(),
+                port: r.port,
+                favorite: sv.entries.iter().any(|e| e.host == r.host && e.port == r.port && e.favorite),
+            })
+            .collect(),
+        ServerTab::Lan => sv
+            .lan_servers
+            .iter()
+            .map(|s| Entry {
+                host: s.host.clone(),
+                port: s.http_port,
+                favorite: sv.entries.iter().any(|e| e.host == s.host && e.port == s.http_port && e.favorite),
+            })
+            .collect(),
+        ServerTab::Watchlist => sv.entries.clone(),
     };
+    let track_ids: Vec<&str> = tracks.iter().map(|t| t.id.as_str()).collect();
     let mut keyed: Vec<(Entry, (String, u32, u128))> = candidates
         .into_iter()
         .filter(|e| {
             let key = e.key();
             let status = sv.live.get(&key).and_then(|l| l.status.as_ref());
-            if sv.online {
+            if sv.joinable_only {
+                let Some(s) = status else {
+                    return false;
+                };
+                if let Some(raw_track) = s.track.as_deref() {
+                    let res = server_status::resolve_track_id(raw_track, &track_ids);
+                    if !tracks.iter().any(|t| t.id == res.track_id) {
+                        return false;
+                    }
+                    if let Some(req) = res.min_csp_build
+                        && installed_csp_build.is_none_or(|cur| cur < req)
+                    {
+                        return false;
+                    }
+                }
+                if !s.cars.is_empty()
+                    && !s.cars.iter().any(|c| !c.connected && cars_local.iter().any(|l| l.id == c.model))
+                {
+                    return false;
+                }
+            }
+            if sv.tab == ServerTab::Online {
                 if let Some(s) = sv.lobby.get(&key) {
                     if (sv.hide_empty && s.clients == 0)
                         || (sv.hide_full && s.capacity > 0 && s.clients >= s.capacity)
@@ -922,7 +1161,7 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
                         return true;
                     }
                 }
-            } else if sv.online_only && status.is_none() {
+            } else if sv.tab == ServerTab::Watchlist && sv.online_only && status.is_none() {
                 return false;
             }
             filter.is_empty()
@@ -985,6 +1224,12 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
                 return;
             };
             let key = entry.key();
+            let watching_slot = sv.slot_watch.as_ref().is_some_and(|w| w.entry.key() == key);
+            let download_progress = sv
+                .download_ui
+                .as_ref()
+                .and_then(|d| d.progress.lock().ok().map(|s| s.clone()));
+            let booking_status = sv.booking_status.get(&key).cloned();
             let input = detail::DetailIn {
                 entry: &entry,
                 live: sv.live.get(&key).cloned().unwrap_or_default(),
@@ -992,6 +1237,11 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
                 in_list: sv.entries.iter().any(|e| e.key() == key),
                 tracks: &tracks,
                 cars: &cars_local,
+                installed_csp_build,
+                game_running: app.snapshot.game_running,
+                watching_slot,
+                download_progress,
+                booking_status,
             };
             let (mut pick_model, mut pick_skin) = (sv.pick_model.clone(), sv.pick_skin.clone());
             let (mut driver, mut password, mut car_query) = (sv.driver.clone(), sv.password.clone(), sv.car_query.clone());
@@ -1028,10 +1278,116 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     for action in panel_actions {
         match action {
             detail::Action::Join(request) => join_request = Some(request),
+            detail::Action::BookSlot(request) => {
+                let host = request.entry.host.clone();
+                let port = request.entry.port;
+                let key = request.entry.key();
+                let model = request.model.clone().unwrap_or_default();
+                let skin = request.skin.clone().unwrap_or_default();
+                let driver = if sv.driver.trim().is_empty() { "Driver".into() } else { sv.driver.trim().to_string() };
+                let password = sv.password.clone();
+                sv.booking_status.insert(key.clone(), "Booking (/SUB)…".into());
+                let tx = app.tx.clone();
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    let res = (|| -> Result<(), String> {
+                        let steam_guid = lobby::current_steam_id64(&acxs_manager::steam::default_steam_roots())
+                            .ok_or("Steam is not signed in.")?;
+                        let req = BookingRequest {
+                            driver_name: driver,
+                            steam_guid,
+                            car_model: model,
+                            car_skin: skin,
+                            password,
+                        };
+                        server_status::book(&host, port, &req, Duration::from_secs(5))
+                            .map(|_| ())
+                            .map_err(|e| e.to_string())
+                    })();
+                    let _ = tx.send(Msg::BookingReady(key, res));
+                    ctx.request_repaint();
+                });
+            }
+            detail::Action::ToggleSlotWatch { entry, model, skin } => {
+                if sv.slot_watch.as_ref().is_some_and(|w| w.entry.key() == entry.key()) {
+                    sv.slot_watch = None;
+                    notices.push(Notice { text: "Stopped Slot-Watch auto-join.".into(), ok: true });
+                } else {
+                    notices.push(Notice { text: format!("Watching {model} on {} — will auto-join when free.", entry.key()), ok: true });
+                    sv.slot_watch = Some(SlotWatch {
+                        entry,
+                        model,
+                        skin,
+                        last_poll: Instant::now() - Duration::from_secs(5),
+                    });
+                }
+            }
+            detail::Action::DownloadMissing(plan) => {
+                if let Some(ac_root) = app.settings.ac_root_path() {
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    let progress = Arc::new(Mutex::new(format!("Starting download ({} item(s))…", plan.items.len())));
+                    let done = Arc::new(AtomicBool::new(false));
+                    sv.download_ui = Some(DownloadUi {
+                        cancel: Arc::clone(&cancel),
+                        progress: Arc::clone(&progress),
+                        done: Arc::clone(&done),
+                    });
+                    let tx = app.tx.clone();
+                    let ctx = ctx.clone();
+                    let seven_zip = app.settings.seven_zip_path.clone().map(PathBuf::from);
+                    std::thread::spawn(move || {
+                        let res = content_dl::download_and_install_plan(
+                            &ac_root,
+                            &plan,
+                            acxs_manager::game::is_game_running(),
+                            seven_zip.as_deref(),
+                            &cancel,
+                            |p| {
+                                if let Ok(mut text) = progress.lock() {
+                                    let mb = p.bytes_done as f64 / (1024.0 * 1024.0);
+                                    *text = match p.bytes_total {
+                                        Some(t) if t > 0 => format!("Downloading {} ({mb:.1} / {:.1} MB)…", p.item_id, t as f64 / (1024.0 * 1024.0)),
+                                        _ => format!("Downloading {} ({mb:.1} MB)…", p.item_id),
+                                    };
+                                }
+                                ctx.request_repaint();
+                            },
+                        );
+                        done.store(true, Ordering::Release);
+                        let notice = match res {
+                            Ok(reports) => Notice {
+                                text: format!("Installed {} missing content package(s).", reports.len()),
+                                ok: true,
+                            },
+                            Err(e) => Notice { text: format!("Missing content install failed: {e}"), ok: false },
+                        };
+                        let _ = tx.send(Msg::DownloadFinished(notice));
+                        ctx.request_repaint();
+                    });
+                } else {
+                    notices.push(Notice { text: "Set your Assetto Corsa folder in Settings first.".into(), ok: false });
+                }
+            }
+            detail::Action::CancelDownload => {
+                if let Some(dl) = &sv.download_ui {
+                    dl.cancel.store(true, Ordering::Release);
+                }
+            }
             detail::Action::CheckNow => check = Some(panel_key.clone()),
             detail::Action::CopyAddress => {
                 ctx.copy_text(panel_key.clone());
                 notices.push(Notice { text: "Address copied.".into(), ok: true });
+            }
+            detail::Action::CopyInviteLink => {
+                if let Some(entry) = sv.entry_for(&panel_key) {
+                    let link = uri::format_acmanager_uri(
+                        &entry.host,
+                        entry.port,
+                        (!sv.password.is_empty()).then_some(sv.password.as_str()),
+                    );
+                    ctx.copy_text(link);
+                    notices.push(Notice { text: "acmanager:// invite link copied.".into(), ok: true });
+                }
             }
             detail::Action::Remove => remove = Some(panel_key.clone()),
             detail::Action::AddToList | detail::Action::ToggleFavorite => star = Some(panel_key.clone()),
@@ -1217,9 +1573,37 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         sv.save();
     }
 
+    if join_request.is_none()
+        && let Some(auto_req) = sv.pending_auto_join.take()
+    {
+        notices.push(Notice { text: format!("Slot opened on {} — joining!", auto_req.entry.key()), ok: true });
+        join_request = Some(auto_req);
+    }
     if let Some(request) = join_request {
-        // A server you joined stays in My servers, one click from the next visit.
-        if !sv.entries.iter().any(|entry| entry.key() == request.entry.key()) {
+        // Record in Recent servers and keep in Watchlist.
+        let key = request.entry.key();
+        let live_status = sv.live.get(&key).and_then(|l| l.status.as_ref());
+        let listed = sv.lobby.get(&key);
+        let now_unix = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        sv.recent.record(RecentServer {
+            host: request.entry.host.clone(),
+            port: request.entry.port,
+            name: live_status
+                .and_then(|s| s.name.clone())
+                .or_else(|| listed.map(|s| s.name.clone()))
+                .unwrap_or_else(|| key.clone()),
+            track: live_status
+                .and_then(|s| s.track.clone())
+                .or_else(|| listed.map(|s| s.track.clone()))
+                .unwrap_or_default(),
+            last_car: request.model.clone().unwrap_or_default(),
+            last_skin: request.skin.clone().unwrap_or_default(),
+            last_joined_unix: now_unix,
+            join_count: 1,
+        });
+        let _ = sv.recent.save(&recent_path());
+
+        if !sv.entries.iter().any(|entry| entry.key() == key) {
             sv.entries.push(Entry { favorite: false, ..request.entry.clone() });
             sv.save();
         }
@@ -1266,23 +1650,10 @@ fn previous_driver_name() -> String {
 /// `csp/2651/../la_canyons-freeroam`: a version prefix, the track folder, a dash, the layout
 /// folder. Returns the installed track (when there is one), its folder name and the layout.
 fn resolve_track<'a>(raw: &str, installed: &'a [TrackEntry]) -> (Option<&'a TrackEntry>, String, Option<String>) {
-    let mut name = raw.trim();
-    // Version prefixes: `csp/<number>/../`.
-    while let Some(rest) = name.strip_prefix("csp/") {
-        match rest.split_once("/../") {
-            Some((version, tail)) if !version.is_empty() && version.chars().all(|c| c.is_ascii_digit()) => name = tail,
-            _ => break,
-        }
-    }
-    // Any other path in front of the folder name.
-    let name = name.rsplit('/').next().unwrap_or(name);
-    if let Some(track) = installed.iter().find(|t| t.id == name) {
-        return (Some(track), name.to_string(), None);
-    }
-    match name.split_once('-') {
-        Some((id, layout)) => (installed.iter().find(|t| t.id == id), id.to_string(), Some(layout.to_string())),
-        None => (None, name.to_string(), None),
-    }
+    let ids: Vec<&str> = installed.iter().map(|t| t.id.as_str()).collect();
+    let res = server_status::resolve_track_id(raw, &ids);
+    let found = installed.iter().find(|t| t.id == res.track_id);
+    (found, res.track_id, res.layout)
 }
 
 #[cfg(test)]

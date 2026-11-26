@@ -10,12 +10,16 @@ use std::time::SystemTime;
 
 use acxs_manager::ini::Ini;
 use acxs_manager::ini_merge::{self, MergeConflict, MergeResult};
+use acxs_manager::laptimes::format_lap;
+use acxs_manager::session_recorder::{self, RecordedSession};
+use acxs_manager::setup_ab;
+use acxs_manager::setup_schema::{self, SetupSchema};
 use acxs_manager::setups::{self, SetupDiff, SetupFile};
 use eframe::egui::{self, RichText};
 
 use super::{Tool, ToolContext};
 use crate::ui::theme::{self, DANGER, INFO, MUTED, OK, TEXT, WARN};
-use crate::ui::widgets;
+use crate::ui::widgets::{self, PendingAction, PendingChangesBar};
 use crate::ui::Notice;
 
 /// Folder under the setups root that holds archived setups. It is not a car.
@@ -46,6 +50,12 @@ pub fn tool() -> Box<dyn Tool> {
         allow_conflicts: false,
         editor_for: None,
         editor: None,
+        schema_for: None,
+        schema: None,
+        ab_sessions: None,
+        ab_track: String::new(),
+        ab_hash_a: String::new(),
+        ab_hash_b: String::new(),
         busy: 0,
         tx,
         rx,
@@ -81,6 +91,14 @@ struct SetupsPage {
     editor_for: Option<PathBuf>,
     /// Editable values of `editor_for`, once they have been read.
     editor: Option<ValueEditor>,
+    /// Car id whose `setup.ini` schema is cached.
+    schema_for: Option<String>,
+    schema: Option<SetupSchema>,
+    /// Cached recorded sessions for Setup A/B testing.
+    ab_sessions: Option<Vec<RecordedSession>>,
+    ab_track: String,
+    ab_hash_a: String,
+    ab_hash_b: String,
     /// Number of background jobs still running. Actions are disabled while this is above zero.
     busy: usize,
     tx: Sender<Msg>,
@@ -628,21 +646,33 @@ impl SetupsPage {
 
     /// Editor for the values of the selected setup. Nothing is written until Save is pressed.
     fn draw_values(&mut self, ui: &mut egui::Ui, busy: bool, intent: &mut Option<Intent>) {
+        // Load car-specific setup.ini schema whenever car changes.
+        if self.schema_for != self.car {
+            self.schema_for = self.car.clone();
+            self.schema = match (&self.ac_root, &self.car) {
+                (Some(root), Some(car_id)) => {
+                    setup_schema::read_setup_schema(&root.join("content/cars").join(car_id))
+                }
+                _ => None,
+            };
+        }
+
         let Some(selected) = self.selected.clone() else { return };
         ui.add_space(16.0);
         widgets::section_title(ui, &format!("Values in {}.ini", stem(&selected)));
-        theme::card().show(ui, |ui| {
+        let schema = self.schema.as_ref();
+        theme::card_elevated().show(ui, |ui| {
             let Some(editor) = self.editor.as_mut() else {
                 ui.label(RichText::new("Reading the setup...").color(MUTED));
                 return;
             };
-            let dirty = !editor.pending().is_empty();
+            let pending_count = editor.pending().len();
 
             ui.add_enabled_ui(!busy, |ui| {
                 if editor.rows.is_empty() {
                     widgets::empty_state(ui, "This setup has no values yet.");
                 } else {
-                    draw_value_groups(ui, &mut editor.rows);
+                    draw_value_groups(ui, &mut editor.rows, schema);
                 }
 
                 ui.add_space(8.0);
@@ -669,33 +699,200 @@ impl SetupsPage {
             });
 
             ui.add_space(8.0);
+            let bar = PendingChangesBar {
+                changed_count: pending_count,
+                summary: format!("{pending_count} pending setup value(s) — backup created on save"),
+                can_save: !busy,
+                blocked_reason: busy.then(|| "Saving...".into()),
+            };
+            match widgets::pending_changes_bar(ui, &bar) {
+                PendingAction::Save => *intent = Some(Intent::SaveValues),
+                PendingAction::RevertAll => {
+                    for row in &mut editor.rows {
+                        row.text = row.original.clone();
+                    }
+                    editor.new_section.clear();
+                    editor.new_key.clear();
+                    editor.new_value.clear();
+                }
+                PendingAction::ToggleDiff | PendingAction::None => {}
+            }
+        });
+
+        self.draw_ab_testing(ui);
+    }
+
+    fn draw_ab_testing(&mut self, ui: &mut egui::Ui) {
+        let Some(car_id) = self.car.clone() else { return };
+        ui.add_space(16.0);
+        widgets::section_title(ui, "Setup A/B Testing (Recorded Stints)");
+        theme::card().show(ui, |ui| {
             ui.horizontal(|ui| {
-                if ui.add_enabled(!busy && dirty, widgets::primary_button("Save")).clicked() {
-                    *intent = Some(Intent::SaveValues);
+                if ui.button("Load recorded stints").clicked() {
+                    let all = session_recorder::load_all(&session_recorder::sessions_dir());
+                    self.ab_sessions = Some(all);
                 }
                 ui.label(
-                    RichText::new("Each changed value is written separately, and the file is backed up first.")
+                    RichText::new("Compare pace, consistency, and balance across stints tagged with different setup hashes.")
                         .small()
                         .color(MUTED),
                 );
             });
+            let Some(sessions) = &self.ab_sessions else {
+                return;
+            };
+            let car_sessions: Vec<&RecordedSession> = sessions
+                .iter()
+                .filter(|s| s.car_id.eq_ignore_ascii_case(&car_id) && s.setup_hash.is_some())
+                .collect();
+            if car_sessions.is_empty() {
+                ui.add_space(6.0);
+                ui.label(RichText::new("No recorded sessions with setup hashes found for this car yet.").color(MUTED));
+                return;
+            }
+            let mut tracks: Vec<String> = car_sessions.iter().map(|s| s.full_track_id()).collect();
+            tracks.sort();
+            tracks.dedup();
+            if !tracks.contains(&self.ab_track) {
+                self.ab_track = tracks[0].clone();
+            }
+            let mut hashes: Vec<(String, String)> = car_sessions
+                .iter()
+                .filter(|s| s.full_track_id() == self.ab_track)
+                .filter_map(|s| {
+                    let h = s.setup_hash.clone()?;
+                    let n = s.setup_name.clone().unwrap_or_else(|| h.chars().take(8).collect());
+                    Some((h, n))
+                })
+                .collect();
+            hashes.sort();
+            hashes.dedup_by(|a, b| a.0 == b.0);
+            if !hashes.iter().any(|(h, _)| h == &self.ab_hash_a) {
+                self.ab_hash_a = hashes.first().map(|x| x.0.clone()).unwrap_or_default();
+            }
+            if !hashes.iter().any(|(h, _)| h == &self.ab_hash_b) {
+                self.ab_hash_b = hashes.get(1).or(hashes.first()).map(|x| x.0.clone()).unwrap_or_default();
+            }
+
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                egui::ComboBox::from_id_salt("ab_track")
+                    .selected_text(&self.ab_track)
+                    .show_ui(ui, |ui| {
+                        for t in &tracks {
+                            ui.selectable_value(&mut self.ab_track, t.clone(), t);
+                        }
+                    });
+                egui::ComboBox::from_id_salt("ab_hash_a")
+                    .selected_text(format!("A: {}", self.ab_hash_a.chars().take(8).collect::<String>()))
+                    .show_ui(ui, |ui| {
+                        for (h, n) in &hashes {
+                            ui.selectable_value(&mut self.ab_hash_a, h.clone(), format!("{n} ({})", &h[..h.len().min(8)]));
+                        }
+                    });
+                egui::ComboBox::from_id_salt("ab_hash_b")
+                    .selected_text(format!("B: {}", self.ab_hash_b.chars().take(8).collect::<String>()))
+                    .show_ui(ui, |ui| {
+                        for (h, n) in &hashes {
+                            ui.selectable_value(&mut self.ab_hash_b, h.clone(), format!("{n} ({})", &h[..h.len().min(8)]));
+                        }
+                    });
+            });
+
+            if let Some(card) = setup_ab::compare_stints(
+                sessions,
+                &car_id,
+                &self.ab_track,
+                &self.ab_hash_a,
+                &self.ab_hash_b,
+                self.left.as_deref(),
+                self.right.as_deref(),
+            ) {
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    if let Some(d) = card.mean_delta_ms {
+                        let color = if d < 0.0 { OK } else { WARN };
+                        widgets::pill(ui, &format!("Mean delta (B-A): {d:+.0} ms"), color);
+                    }
+                    if let Some(d) = card.best_delta_ms {
+                        let color = if d < 0 { OK } else { WARN };
+                        widgets::pill(ui, &format!("Best delta (B-A): {d:+} ms"), color);
+                    }
+                });
+                ui.add_space(6.0);
+                ui.columns(2, |cols| {
+                    let (left, right) = cols.split_at_mut(1);
+                    for (col, label, m) in [(&mut left[0], "Setup A", &card.a), (&mut right[0], "Setup B", &card.b)] {
+                        theme::card_elevated().show(col, |ui| {
+                            ui.label(RichText::new(format!("{label}: {}", m.setup_name)).strong());
+                            widgets::key_value(ui, "Laps / sessions", &format!("{} / {}", m.valid_laps, m.session_count));
+                            widgets::key_value(
+                                ui,
+                                "Best lap",
+                                &m.best_lap_ms.map_or("—".into(), format_lap),
+                            );
+                            widgets::key_value(
+                                ui,
+                                "Consistency (stddev)",
+                                &m.lap_stddev_ms.map_or("—".into(), |s| format!("{s:.0} ms")),
+                            );
+                            widgets::key_value(
+                                ui,
+                                "Lockups / Wheelspin (10m)",
+                                &format!("{:.1} / {:.1}", m.lockups_per_10min, m.wheelspins_per_10min),
+                            );
+                            widgets::key_value(
+                                ui,
+                                "Under / Oversteer",
+                                &format!("{:.0}% / {:.0}%", m.understeer_pct, m.oversteer_pct),
+                            );
+                        });
+                    }
+                });
+            }
         });
     }
 }
 
-/// Rows grouped by section, one small table per section, in file order.
-fn draw_value_groups(ui: &mut egui::Ui, rows: &mut [ValueRow]) {
+/// Rows grouped by section, enriched with car-specific `setup.ini` labels and sliders when available.
+fn draw_value_groups(ui: &mut egui::Ui, rows: &mut [ValueRow], schema: Option<&SetupSchema>) {
     for (index, group) in rows.chunk_by_mut(|a, b| a.section == b.section).enumerate() {
+        let sec = &group[0].section;
+        let spec = schema.and_then(|s| s.find(sec));
         ui.add_space(4.0);
-        ui.label(RichText::new(format!("[{}]", group[0].section)).strong().color(TEXT));
+        let heading = match spec {
+            Some(sp) => format!("{}  [{} · {}]", sp.name, sp.tab, sec),
+            None => format!("[{sec}]"),
+        };
+        ui.label(RichText::new(heading).strong().color(TEXT));
         egui::Grid::new(("setups_values", index))
             .num_columns(3)
             .spacing([16.0, 4.0])
             .striped(true)
             .show(ui, |ui| {
                 for row in group.iter_mut() {
-                    ui.label(row.key.as_str());
-                    ui.add(egui::TextEdit::singleline(&mut row.text).desired_width(240.0));
+                    ui.label(RichText::new(row.key.as_str()).font(theme::mono(12.0)));
+                    if row.key.eq_ignore_ascii_case("VALUE")
+                        && let Some(sp) = spec
+                        && sp.max > sp.min
+                        && let Ok(mut num) = row.text.trim().parse::<f64>()
+                    {
+                        let step = if sp.step > 0.0 { sp.step } else { 1.0 };
+                        let resp = ui.add(
+                            egui::Slider::new(&mut num, sp.min..=sp.max)
+                                .step_by(step)
+                                .show_value(true),
+                        );
+                        if resp.changed() {
+                            row.text = if step.fract() == 0.0 {
+                                format!("{num:.0}")
+                            } else {
+                                format!("{num:.2}")
+                            };
+                        }
+                    } else {
+                        ui.add(egui::TextEdit::singleline(&mut row.text).desired_width(240.0));
+                    }
                     if row.text != row.original {
                         ui.label(RichText::new("edited").small().color(WARN));
                     } else {

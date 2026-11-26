@@ -3,16 +3,23 @@
 //! Parsing and writing run on background threads.
 
 use super::{Tool, ToolContext};
+use crate::ui::viewport3d::{self, Camera3D, DrawLines, LineVertex, RenderMode, SceneFrame};
 use crate::ui::{theme, widgets, Notice};
+use acxs_manager::ai_spline::{self, AiSpline};
+use acxs_manager::game;
+use acxs_manager::race;
 use acxs_manager::replay::{
-    format_lap_time, read_replay_samples, ReplayInfo, ReplaySamples, Sample,
+    format_lap_time, read_replay_multicar, trim_replay_file, MultiCarReplay, ReplayInfo, Sample,
 };
 use acxs_manager::replay_analysis;
 use acxs_manager::replay_library::{self, ReplayFile, ReplayPlace};
 use acxs_manager::replay_player::Player;
+use acxs_manager::settings;
 use acxs_manager::telemetry::LapInfo;
 use acxs_manager::telemetry_csv::{laps_to_csv, replay_samples_to_csv, write_csv};
-use eframe::egui::{self, RichText};
+use acxs_manager::track_files::{self, TrackCamera};
+use eframe::egui::{self, Align2, Color32, Pos2, RichText, Sense, Stroke, pos2, vec2};
+use glam::Vec3;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -20,6 +27,20 @@ use std::thread;
 
 /// Playback speeds offered by the speed selector. The player clamps them to its own range.
 const SPEEDS: [f64; 5] = [0.25, 0.5, 1.0, 2.0, 4.0];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplayView {
+    Telemetry,
+    Map2D,
+    View3D,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplayCamMode {
+    Chase,
+    FreeFly,
+    Tv,
+}
 
 pub fn tool() -> Box<dyn Tool> {
     Box::new(ReplayViewer::new())
@@ -29,20 +50,32 @@ pub fn tool() -> Box<dyn Tool> {
 enum Msg {
     Parsed {
         path: PathBuf,
-        result: Result<Box<ReplaySamples>, String>,
+        result: Result<Box<MultiCarReplay>, String>,
+        spline: Option<AiSpline>,
+        cameras: Vec<TrackCamera>,
     },
     Exported(Result<PathBuf, String>),
     /// Result of the samples export: the path written and the number of data rows.
     SamplesExported(Result<(PathBuf, usize), String>),
+    Trimmed(Result<(PathBuf, usize), String>),
 }
 
-/// A replay shown in the viewer: its summary plus the playback model over its samples.
+/// A replay shown in the viewer: its multi-car data plus the playback model.
 struct Loaded {
     path: PathBuf,
     info: ReplayInfo,
+    multicar: MultiCarReplay,
+    car_index: usize,
     player: Player,
     /// True when the file had more frames than were stored.
     capped: bool,
+    spline: Option<AiSpline>,
+    cameras: Vec<TrackCamera>,
+    view: ReplayView,
+    cam_mode: ReplayCamMode,
+    camera_3d: Camera3D,
+    trim_start: u32,
+    trim_end: u32,
 }
 
 struct ReplayViewer {
@@ -68,13 +101,36 @@ impl ReplayViewer {
         }
     }
 
-    /// Parse `path` and decode its samples on a background thread.
-    fn start_parse(&mut self, path: PathBuf, ctx: egui::Context) {
+    /// Parse `path` (all cars) and load optional track `fast_lane.ai` + `cameras.ini` on a background thread.
+    fn start_parse(&mut self, path: PathBuf, ac_root: Option<PathBuf>, ctx: egui::Context) {
         self.busy = true;
         let tx = self.tx.clone();
         thread::spawn(move || {
-            let result = read_replay_samples(&path).map(Box::new).map_err(|e| e.to_string());
-            let _ = tx.send(Msg::Parsed { path, result });
+            let result = read_replay_multicar(&path, 500_000)
+                .map(Box::new)
+                .map_err(|e| e.to_string());
+            let (spline, cameras) = match (&result, &ac_root) {
+                (Ok(mc), Some(root)) => {
+                    let mut track_dir = root.join("content").join("tracks").join(&mc.info.track);
+                    if let Some(cfg) = &mc.info.config_track {
+                        let layout_dir = track_dir.join(cfg);
+                        if layout_dir.is_dir() {
+                            track_dir = layout_dir;
+                        }
+                    }
+                    let sp = ai_spline::read_ai_spline(&track_dir.join("ai").join("fast_lane.ai")).ok();
+                    let cams = track_files::read_cameras(&track_dir.join("data").join("cameras.ini"))
+                        .unwrap_or_default();
+                    (sp, cams)
+                }
+                _ => (None, Vec::new()),
+            };
+            let _ = tx.send(Msg::Parsed {
+                path,
+                result,
+                spline,
+                cameras,
+            });
             ctx.request_repaint();
         });
     }
@@ -131,26 +187,46 @@ impl Tool for ReplayViewer {
         "Telemetry"
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _ctx: &ToolContext, notices: &mut Vec<Notice>) {
+    fn ui(&mut self, ui: &mut egui::Ui, ctx: &ToolContext, notices: &mut Vec<Notice>) {
         while let Ok(msg) = self.rx.try_recv() {
             self.busy = false;
             match msg {
-                Msg::Parsed { path, result: Ok(replay) } => {
+                Msg::Parsed {
+                    path,
+                    result: Ok(mc),
+                    spline,
+                    cameras,
+                } => {
                     notices.push(Notice {
-                        text: format!("Opened {}", file_name(&path)),
+                        text: format!("Opened {} ({} car(s))", file_name(&path), mc.cars.len()),
                         ok: true,
                     });
-                    let capped = replay.is_capped();
-                    let info = replay.info().clone();
-                    let player = Player::new(replay.into_samples());
+                    let capped = mc.capped;
+                    let info = mc.info.clone();
+                    let samples: Vec<Sample> = mc
+                        .cars
+                        .first()
+                        .map(|c| c.frames.iter().map(|f| f.sample).collect())
+                        .unwrap_or_default();
+                    let total_frames = samples.len() as u32;
+                    let player = Player::new(samples);
                     self.loaded = Some(Loaded {
                         path,
                         info,
+                        multicar: *mc,
+                        car_index: 0,
                         player,
                         capped,
+                        spline,
+                        cameras,
+                        view: ReplayView::Telemetry,
+                        cam_mode: ReplayCamMode::Chase,
+                        camera_3d: Camera3D::default(),
+                        trim_start: 0,
+                        trim_end: total_frames.max(1),
                     });
                 }
-                Msg::Parsed { path, result: Err(e) } => {
+                Msg::Parsed { path, result: Err(e), .. } => {
                     self.loaded = None;
                     notices.push(Notice {
                         text: format!("Could not open {}: {e}", file_name(&path)),
@@ -167,6 +243,14 @@ impl Tool for ReplayViewer {
                     ok: true,
                 }),
                 Msg::SamplesExported(Err(e)) => notices.push(Notice { text: e, ok: false }),
+                Msg::Trimmed(Ok((path, bytes))) => notices.push(Notice {
+                    text: format!("Exported clipped replay ({} KB) to {}", bytes / 1024, path.display()),
+                    ok: true,
+                }),
+                Msg::Trimmed(Err(e)) => notices.push(Notice {
+                    text: format!("Could not trim replay: {e}"),
+                    ok: false,
+                }),
             }
         }
 
@@ -182,7 +266,7 @@ impl Tool for ReplayViewer {
         widgets::heading(
             ui,
             "Replay Viewer",
-            "Open an Assetto Corsa .acreplay file to play back its telemetry, see its summary and export the lap times.",
+            "Play back multi-car .acreplay telemetry in 2D/3D, trim shareable clips, or launch directly in AC.",
         );
 
         let files = self.library.get_or_insert_with(read_library);
@@ -197,22 +281,42 @@ impl Tool for ReplayViewer {
         if let Some(path) = open
             && !self.busy
         {
-            self.start_parse(path, ui.ctx().clone());
+            self.start_parse(path, ctx.ac_root.clone(), ui.ctx().clone());
         }
         ui.add_space(6.0);
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let open = ui.add_enabled(!self.busy, widgets::primary_button("Open replay"));
             if open.clicked() {
                 let picked = rfd::FileDialog::new()
                     .add_filter("acreplay", &["acreplay"])
                     .pick_file();
                 if let Some(path) = picked {
-                    self.start_parse(path, ui.ctx().clone());
+                    self.start_parse(path, ctx.ac_root.clone(), ui.ctx().clone());
                 }
             }
 
             let can_export = !self.busy && self.loaded.is_some();
+            if ui
+                .add_enabled(can_export && !ctx.game_running && ctx.ac_valid, egui::Button::new("Watch in AC"))
+                .on_hover_text("Writes [REPLAY] ACTIVE=1 to race.ini and launches Assetto Corsa.")
+                .clicked()
+                && let (Some(loaded), Some(root), Some(cfg)) =
+                    (&self.loaded, &ctx.ac_root, settings::ac_user_cfg_dir())
+            {
+                let fname = file_name(&loaded.path);
+                match race::write_replay_ini(&cfg, &fname).and_then(|_| game::launch_game(root)) {
+                    Ok(_) => notices.push(Notice {
+                        text: format!("Launched AC replay playback for {fname}."),
+                        ok: true,
+                    }),
+                    Err(e) => notices.push(Notice {
+                        text: format!("Could not launch replay in AC: {e}"),
+                        ok: false,
+                    }),
+                }
+            }
+
             let export = ui.add_enabled(can_export, egui::Button::new("Export laps CSV"));
             if export.clicked() {
                 let laps = self
@@ -253,17 +357,321 @@ impl Tool for ReplayViewer {
         });
         ui.add_space(12.0);
 
+        let mut trim_req: Option<(PathBuf, PathBuf, u32, u32)> = None;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| match &mut self.loaded {
                 None => widgets::empty_state(ui, "No replay loaded."),
                 Some(loaded) => {
+                    ui.horizontal(|ui| {
+                        widgets::animated_tabs(
+                            ui,
+                            "replay_view_tabs",
+                            &mut loaded.view,
+                            &[
+                                (ReplayView::Telemetry, "Telemetry", None),
+                                (ReplayView::Map2D, "2D Multi-Car", None),
+                                (ReplayView::View3D, "3D Viewer", None),
+                            ],
+                        );
+                        if loaded.multicar.cars.len() > 1 {
+                            ui.add_space(10.0);
+                            let cur_name = loaded
+                                .multicar
+                                .cars
+                                .get(loaded.car_index)
+                                .map(|c| format!("Car {}: {}", loaded.car_index + 1, c.driver))
+                                .unwrap_or_default();
+                            egui::ComboBox::from_id_salt("replay_car_pick")
+                                .selected_text(cur_name)
+                                .show_ui(ui, |ui| {
+                                    for (i, c) in loaded.multicar.cars.iter().enumerate() {
+                                        if ui
+                                            .selectable_label(
+                                                loaded.car_index == i,
+                                                format!("Car {}: {} ({})", i + 1, c.driver, c.car_id),
+                                            )
+                                            .clicked()
+                                        {
+                                            loaded.car_index = i;
+                                            let samples: Vec<Sample> =
+                                                c.frames.iter().map(|f| f.sample).collect();
+                                            let pos = loaded.player.position_s();
+                                            loaded.player = Player::new(samples);
+                                            loaded.player.seek(pos);
+                                        }
+                                    }
+                                });
+                        }
+                    });
+                    ui.add_space(8.0);
                     playback(ui, loaded);
+                    ui.add_space(10.0);
+                    match loaded.view {
+                        ReplayView::Telemetry => {}
+                        ReplayView::Map2D => replay_map_2d(ui, loaded),
+                        ReplayView::View3D => replay_view_3d(ui, loaded, ctx),
+                    }
+                    ui.add_space(10.0);
+                    if let Some(req) = trim_clip_card(ui, loaded, self.busy) {
+                        trim_req = Some(req);
+                    }
                     ui.add_space(12.0);
                     summary(ui, &loaded.path, &loaded.info, loaded.player.samples());
                 }
             });
+
+        if let Some((src, dst, start, end)) = trim_req {
+            self.busy = true;
+            let tx = self.tx.clone();
+            let repaint = ui.ctx().clone();
+            thread::spawn(move || {
+                let res = trim_replay_file(&src, &dst, start, end)
+                    .map(|n| (dst, n))
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(Msg::Trimmed(res));
+                repaint.request_repaint();
+            });
+        }
     }
+}
+
+fn current_frame_idx(loaded: &Loaded) -> usize {
+    let dt = (loaded.multicar.recording_interval_ms / 1000.0).max(1e-4);
+    (loaded.player.position_s() / dt).floor().max(0.0) as usize
+}
+
+fn replay_map_2d(ui: &mut egui::Ui, loaded: &Loaded) {
+    let idx = current_frame_idx(loaded);
+    theme::card_elevated().show(ui, |ui| {
+        widgets::section_title(ui, "2D Multi-Car Track View");
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 300.0), Sense::hover());
+        let p = ui.painter_at(rect);
+        p.rect_filled(rect, 6, theme::SURFACE_VOID);
+
+        let mut min_x = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut min_z = f32::INFINITY;
+        let mut max_z = f32::NEG_INFINITY;
+        if let Some(sp) = &loaded.spline {
+            for pt in &sp.points {
+                min_x = min_x.min(pt.x);
+                max_x = max_x.max(pt.x);
+                min_z = min_z.min(pt.z);
+                max_z = max_z.max(pt.z);
+            }
+        }
+        for c in &loaded.multicar.cars {
+            for f in c.frames.iter().step_by(8) {
+                min_x = min_x.min(f.sample.x);
+                max_x = max_x.max(f.sample.x);
+                min_z = min_z.min(f.sample.z);
+                max_z = max_z.max(f.sample.z);
+            }
+        }
+        if !min_x.is_finite() {
+            return;
+        }
+        let span = (max_x - min_x).max(max_z - min_z).max(1.0);
+        let scale = ((rect.width() - 36.0).min(rect.height() - 36.0) / span).max(1e-4);
+        let cx = 0.5 * (min_x + max_x);
+        let cz = 0.5 * (min_z + max_z);
+        let to_scr = |x: f32, z: f32| -> Pos2 {
+            pos2(rect.center().x + (x - cx) * scale, rect.center().y + (z - cz) * scale)
+        };
+
+        if let Some(sp) = &loaded.spline {
+            let pts: Vec<Pos2> = sp.points.iter().map(|pt| to_scr(pt.x, pt.z)).collect();
+            p.add(egui::Shape::line(pts, Stroke::new(2.0, Color32::from_gray(85))));
+        } else if let Some(first) = loaded.multicar.cars.first() {
+            let pts: Vec<Pos2> = first
+                .frames
+                .iter()
+                .step_by(4)
+                .map(|f| to_scr(f.sample.x, f.sample.z))
+                .collect();
+            p.add(egui::Shape::line(pts, Stroke::new(1.5, Color32::from_gray(75))));
+        }
+
+        for (ci, car) in loaded.multicar.cars.iter().enumerate() {
+            if let Some(f) = car.frames.get(idx).or_else(|| car.frames.last()) {
+                let pos = to_scr(f.sample.x, f.sample.z);
+                let col = if ci == loaded.car_index { theme::ACCENT } else { theme::CH_SPEED };
+                p.circle_filled(pos, if ci == loaded.car_index { 6.0 } else { 4.0 }, col);
+                p.text(
+                    pos + vec2(8.0, -6.0),
+                    Align2::LEFT_CENTER,
+                    &car.driver,
+                    egui::FontId::proportional(11.0),
+                    Color32::WHITE,
+                );
+            }
+        }
+    });
+}
+
+fn replay_view_3d(ui: &mut egui::Ui, loaded: &mut Loaded, ctx: &ToolContext) {
+    let idx = current_frame_idx(loaded);
+    let focus_pos = loaded
+        .multicar
+        .cars
+        .get(loaded.car_index)
+        .and_then(|c| c.frames.get(idx).or_else(|| c.frames.last()))
+        .map(|f| Vec3::new(f.sample.x, f.sample.y, f.sample.z))
+        .unwrap_or(Vec3::ZERO);
+
+    let mut lines = Vec::new();
+    if let Some(sp) = &loaded.spline {
+        let (l, r) = sp.corridor_edges();
+        let col = [0.40, 0.44, 0.52, 0.9];
+        lines.push(DrawLines {
+            vertices: l.iter().map(|&pos| LineVertex { pos, color: col }).collect(),
+            strip: true,
+        });
+        lines.push(DrawLines {
+            vertices: r.iter().map(|&pos| LineVertex { pos, color: col }).collect(),
+            strip: true,
+        });
+    }
+    // Render car bounding markers in 3D space.
+    for (ci, car) in loaded.multicar.cars.iter().enumerate() {
+        if let Some(f) = car.frames.get(idx).or_else(|| car.frames.last()) {
+            let p = [f.sample.x, f.sample.y + 0.6, f.sample.z];
+            let col = if ci == loaded.car_index {
+                [1.0, 0.45, 0.15, 1.0]
+            } else {
+                [0.2, 0.85, 1.0, 1.0]
+            };
+            lines.push(DrawLines {
+                vertices: vec![
+                    LineVertex { pos: [p[0] - 1.5, p[1], p[2]], color: col },
+                    LineVertex { pos: [p[0] + 1.5, p[1], p[2]], color: col },
+                    LineVertex { pos: [p[0], p[1], p[2] - 2.2], color: col },
+                    LineVertex { pos: [p[0], p[1], p[2] + 2.2], color: col },
+                ],
+                strip: false,
+            });
+        }
+    }
+
+    match loaded.cam_mode {
+        ReplayCamMode::Chase => {
+            loaded.camera_3d = Camera3D::Chase {
+                pos: focus_pos + Vec3::new(0.0, 5.5, -12.0),
+                target: focus_pos + Vec3::new(0.0, 1.0, 0.0),
+                up: Vec3::Y,
+                fov_deg: 55.0,
+            };
+        }
+        ReplayCamMode::Tv => {
+            if let Some(cam) = loaded.cameras.first() {
+                loaded.camera_3d = Camera3D::TracksideTv {
+                    pos: Vec3::from_array(cam.position),
+                    target: focus_pos,
+                    fov_deg: cam.max_fov,
+                };
+            } else {
+                loaded.camera_3d = Camera3D::TracksideTv {
+                    pos: focus_pos + Vec3::new(25.0, 12.0, 25.0),
+                    target: focus_pos,
+                    fov_deg: 40.0,
+                };
+            }
+        }
+        ReplayCamMode::FreeFly => {
+            if !matches!(loaded.camera_3d, Camera3D::FreeFly { .. }) {
+                loaded.camera_3d = Camera3D::FreeFly {
+                    pos: focus_pos + Vec3::new(0.0, 8.0, -16.0),
+                    yaw: 1.57,
+                    pitch: -0.25,
+                    speed: 25.0,
+                };
+            }
+        }
+    }
+
+    let dt = ui.input(|i| i.stable_dt);
+    let gl = ctx.gl.clone();
+    widgets::viewport_3d_frame(
+        ui,
+        vec2(ui.available_width(), 320.0),
+        |ui| {
+            ui.horizontal(|ui| {
+                widgets::pill(ui, "3D REPLAY", theme::CH_SPEED);
+                for (m, lbl) in [
+                    (ReplayCamMode::Chase, "Chase"),
+                    (ReplayCamMode::FreeFly, "FreeFly"),
+                    (ReplayCamMode::Tv, "TV"),
+                ] {
+                    ui.selectable_value(&mut loaded.cam_mode, m, lbl);
+                }
+            });
+        },
+        |ui, rect| {
+            let resp = ui.interact(rect, ui.scope_id().with("replay_3d_vp"), Sense::click_and_drag());
+            ui.input(|i| {
+                if loaded.camera_3d.handle_input(&resp, i, dt) {
+                    ui.ctx().request_repaint();
+                }
+            });
+            let frame = SceneFrame {
+                camera: loaded.camera_3d,
+                render_mode: RenderMode::Shaded,
+                lines,
+                ..SceneFrame::default()
+            };
+            viewport3d::paint_viewport_3d(ui, rect, gl, frame, |ui, r| {
+                ui.painter().rect_filled(r, 0, theme::SURFACE_VOID);
+                ui.painter().text(
+                    r.center(),
+                    Align2::CENTER_CENTER,
+                    "3D Replay Viewport (2D fallback in headless mode)",
+                    egui::FontId::proportional(13.5),
+                    theme::MUTED,
+                );
+            });
+        },
+    );
+}
+
+fn trim_clip_card(
+    ui: &mut egui::Ui,
+    loaded: &mut Loaded,
+    busy: bool,
+) -> Option<(PathBuf, PathBuf, u32, u32)> {
+    let total = loaded.player.samples().len() as u32;
+    if total < 2 {
+        return None;
+    }
+    let mut request = None;
+    theme::card().show(ui, |ui| {
+        widgets::section_title(ui, "Trim & Export Clip");
+        ui.horizontal_wrapped(|ui| {
+            ui.add(egui::Slider::new(&mut loaded.trim_start, 0..=total.saturating_sub(2)).text("Start frame"));
+            if loaded.trim_end <= loaded.trim_start {
+                loaded.trim_end = (loaded.trim_start + 1).min(total);
+            }
+            ui.add(egui::Slider::new(&mut loaded.trim_end, (loaded.trim_start + 1)..=total).text("End frame"));
+            if ui
+                .add_enabled(!busy && loaded.trim_start < loaded.trim_end, egui::Button::new("Export Clip (.acreplay)"))
+                .clicked()
+            {
+                let stem = loaded
+                    .path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "clip".into());
+                if let Some(dst) = rfd::FileDialog::new()
+                    .add_filter("AC Replay", &["acreplay"])
+                    .set_file_name(format!("{stem}_clip.acreplay"))
+                    .save_file()
+                {
+                    request = Some((loaded.path.clone(), dst, loaded.trim_start, loaded.trim_end));
+                }
+            }
+        });
+    });
+    request
 }
 
 /// The game's saved and autosave folders.

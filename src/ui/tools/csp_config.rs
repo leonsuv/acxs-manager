@@ -731,30 +731,26 @@ impl CspConfig {
                         .collect();
                     let dirty = !changes.is_empty();
 
-                    // The save bar stays at the bottom so it is always in reach.
+                    // Shared sticky pending-changes action bar.
                     egui::Panel::bottom("csp_savebar")
-                        .frame(
-                            egui::Frame::new()
-                                .fill(if dirty { theme::CARD_SELECTED } else { theme::CARD })
-                                .stroke(egui::Stroke::new(1.0, if dirty { ACCENT.gamma_multiply(0.7) } else { theme::BORDER }))
-                                .corner_radius(egui::CornerRadius::same(12))
-                                .inner_margin(egui::Margin::symmetric(14, 8)),
-                        )
+                        .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 4)))
                         .show_separator_line(false)
                         .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                if ui.add_enabled(!busy && dirty, widgets::primary_button("Save changes")).clicked() {
-                                    save = Some(changes.clone());
+                            if dirty {
+                                match widgets::pending_changes_bar(
+                                    ui,
+                                    &widgets::PendingChangesBar {
+                                        changed_count: changes.len(),
+                                        summary: format!("{} CSP setting(s) modified", changes.len()),
+                                        can_save: !busy,
+                                        blocked_reason: busy.then(|| "Saving...".to_string()),
+                                    },
+                                ) {
+                                    widgets::PendingAction::Save => save = Some(changes.clone()),
+                                    widgets::PendingAction::RevertAll => edits.clear(),
+                                    _ => {}
                                 }
-                                if ui.add_enabled(!busy && dirty, egui::Button::new("Discard")).clicked() {
-                                    edits.clear();
-                                }
-                                if dirty {
-                                    ui.label(RichText::new(format!("{} unsaved change(s)", changes.len())).color(WARN));
-                                } else {
-                                    ui.label(RichText::new("No changes").color(MUTED));
-                                }
-                            });
+                            }
                             if allow_new {
                                 ui.horizontal(|ui| {
                                     ui.label("Add setting:");
@@ -805,10 +801,11 @@ impl CspConfig {
                                     .iter()
                                     .filter(|(s, _)| edits.get(&(s.section.clone(), s.key.clone())).is_some_and(|v| v != &s.value))
                                     .count();
-                                theme::card().inner_margin(egui::Margin::symmetric(18, 12)).show(ui, |ui| {
+                                theme::card_elevated().inner_margin(egui::Margin::symmetric(18, 12)).show(ui, |ui| {
                                     ui.set_width(ui.available_width());
                                     ui.horizontal(|ui| {
-                                        ui.label(RichText::new(humanize(&section)).font(theme::bold(15.0)));
+                                        ui.label(RichText::new(humanize(&section)).font(theme::display(16.0)));
+                                        ui.label(RichText::new(format!("[{section}]")).font(theme::mono(11.5)).color(theme::FAINT));
                                         if edited > 0 {
                                             widgets::pill(ui, &format!("{edited} changed"), ACCENT);
                                         }

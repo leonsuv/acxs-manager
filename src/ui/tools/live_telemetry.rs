@@ -11,6 +11,8 @@ use crate::ui::widgets;
 use crate::ui::Notice;
 use acxs_manager::charts::{Channel, ChannelBuffers, Ring, Sample};
 use acxs_manager::laptimes::LapStore;
+use acxs_manager::overlay_app::{self, CoachState};
+use acxs_manager::settings;
 use acxs_manager::sharedmem::{self, AcStatus, SharedMemError, Snapshot};
 use acxs_manager::telemetry::{CarUpdate, HandshakeInfo, LapInfo, Packet, summarize_laps};
 use acxs_manager::telemetry_csv;
@@ -245,8 +247,35 @@ impl Tool for LiveTelemetry {
         widgets::heading(
             ui,
             "Live Telemetry",
-            "Reads what a running Assetto Corsa reports over its built-in UDP telemetry.",
+            "Pit-Wall canvas reading Assetto Corsa UDP telemetry, shared memory, and ACXS Coach overlay.",
         );
+        if let Some(root) = tool_ctx.ac_root.as_deref() {
+            ui.horizontal(|ui| {
+                let installed = overlay_app::is_installed(root);
+                widgets::pill(
+                    ui,
+                    if installed { "ACXS Coach Overlay: Ready" } else { "ACXS Coach Overlay: Not installed" },
+                    if installed { OK } else { MUTED },
+                );
+                if ui.button("Sync live coach state").clicked()
+                    && let Some(cfg) = settings::ac_user_cfg_dir()
+                {
+                    let best = self.laps.iter().map(|l| l.lap_time_ms).min().unwrap_or(0);
+                    let state = CoachState {
+                        target_lap_ms: best,
+                        streak_clean_laps: self.laps.len() as u32,
+                        std_dev_ms: 0,
+                        tip_corner: 0,
+                        tip_text: "Live Pit-Wall synced".into(),
+                    };
+                    match overlay_app::write_coach_state(&cfg, &state) {
+                        Ok(_) => notices.push(Notice { text: "Updated ACXS Coach overlay state.".into(), ok: true }),
+                        Err(e) => notices.push(Notice { text: format!("Could not update Coach state: {e}"), ok: false }),
+                    }
+                }
+            });
+            ui.add_space(6.0);
+        }
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             self.connection_card(ui, &ctx, notices);
             ui.add_space(16.0);
@@ -1128,22 +1157,29 @@ fn draw_plot(ui: &mut egui::Ui, channel: Channel, ring: &Ring) {
     };
     let points = ring.downsample(from, last.t, plot.width().max(2.0) as usize);
     let line: Vec<egui::Pos2> = points.iter().map(to_screen).collect();
+    let ch_color = match channel {
+        Channel::Speed => theme::CH_SPEED,
+        Channel::Throttle => theme::CH_THROTTLE,
+        Channel::Brake => theme::CH_BRAKE,
+        Channel::Steering => theme::CH_STEER,
+        Channel::Gear => theme::CH_GEAR,
+    };
     if line.len() >= 2 {
-        painter.add(egui::Shape::line(line, egui::Stroke::new(1.5, INFO)));
+        painter.add(egui::Shape::line(line, egui::Stroke::new(2.0, ch_color)));
     }
 
     painter.text(
         rect.left_top() + egui::vec2(8.0, 4.0),
         egui::Align2::LEFT_TOP,
         format!("{}  {:.1}", channel.label(), last.value),
-        egui::FontId::proportional(12.0),
-        TEXT,
+        theme::mono(12.0),
+        ch_color,
     );
     painter.text(
         rect.right_top() + egui::vec2(-8.0, 4.0),
         egui::Align2::RIGHT_TOP,
         format!("{lo:.1} to {hi:.1}"),
-        egui::FontId::proportional(11.0),
+        theme::mono(11.0),
         MUTED,
     );
 }
@@ -1170,14 +1206,14 @@ fn shm_stats(ui: &mut egui::Ui, snap: &Snapshot) {
         graphics.current_lap_time.clone()
     };
     ui.horizontal_wrapped(|ui| {
-        widgets::stat(ui, "Speed", &format!("{:.0} km/h", physics.speed_kmh), TEXT);
+        widgets::stat(ui, "Speed", &format!("{:.0} km/h", physics.speed_kmh), theme::CH_SPEED);
         let gear = i8::try_from(physics.gear).unwrap_or(i8::MIN);
-        widgets::stat(ui, "Gear", &gear_label(gear), TEXT);
+        widgets::stat(ui, "Gear", &gear_label(gear), theme::CH_GEAR);
         widgets::stat(ui, "RPM", &physics.rpm.to_string(), TEXT);
-        widgets::stat(ui, "Throttle", &format!("{:.0}%", physics.throttle * 100.0), TEXT);
-        widgets::stat(ui, "Brake", &format!("{:.0}%", physics.brake * 100.0), TEXT);
+        widgets::stat(ui, "Throttle", &format!("{:.0}%", physics.throttle * 100.0), theme::CH_THROTTLE);
+        widgets::stat(ui, "Brake", &format!("{:.0}%", physics.brake * 100.0), theme::CH_BRAKE);
         widgets::stat(ui, "Lap time", &lap, TEXT);
-        widgets::stat(ui, "Status", &ac_status_label(graphics.status), TEXT);
+        widgets::stat(ui, "Status", &ac_status_label(graphics.status), INFO);
     });
 }
 

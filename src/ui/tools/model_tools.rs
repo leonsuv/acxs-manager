@@ -7,13 +7,16 @@
 use super::{Tool, ToolContext};
 use crate::ui::{theme, widgets, Notice};
 use acxs_manager::acd::{self, AcdEntry};
-use acxs_manager::ao_bake::{self, AoSettings};
+use acxs_manager::ao_bake::{self, AoSettings, UvTriangle};
 use acxs_manager::fbx::{self, FbxMesh};
 use acxs_manager::kn5::{self, Kn5Info};
 use acxs_manager::kn5_export::{self, ObjStats};
+use acxs_manager::kn5_scene::{self, LoadOptions};
 use acxs_manager::kn5_writer;
 use acxs_manager::obj_import;
-use acxs_manager::ortho::{self, View};
+use acxs_manager::ortho::{self, Triangle, View};
+use acxs_manager::png;
+use acxs_manager::vao_patch::{self, VaoMeshPatch, VaoPatch, VAO_PATCH_VERSION};
 use eframe::egui::{self, RichText};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -296,7 +299,7 @@ impl ModelTools {
                         }
                     }
 
-                let ao = ui.add_enabled(has_file && !self.ao_busy, egui::Button::new("Bake AO"));
+                let ao = ui.add_enabled(has_file && !self.ao_busy, egui::Button::new("Bake AO (CSV)"));
                 if ao.clicked()
                     && let Some(kn5_file) = self.kn5_path.clone()
                     && let Some(csv_file) = rfd::FileDialog::new()
@@ -315,6 +318,44 @@ impl ModelTools {
                     });
                 }
 
+                let uv_ao = ui.add_enabled(has_file && !self.ao_busy, egui::Button::new("Bake UV AO (PNG)"));
+                if uv_ao.clicked()
+                    && let Some(kn5_file) = self.kn5_path.clone()
+                    && let Some(png_file) = rfd::FileDialog::new()
+                        .add_filter("png", &["png"])
+                        .set_file_name(format!("{}_ao.png", default_stem(&kn5_file)))
+                        .save_file()
+                {
+                    self.ao_busy = true;
+                    self.spawn(ui.ctx(), move || {
+                        let result = bake_uv_ao_png(&kn5_file, &png_file, 512);
+                        Msg::AoBaked {
+                            kn5: kn5_file,
+                            path: png_file,
+                            result,
+                        }
+                    });
+                }
+
+                let vao = ui.add_enabled(has_file && !self.ao_busy, widgets::primary_button("Export CSP .vao-patch"));
+                if vao.clicked()
+                    && let Some(kn5_file) = self.kn5_path.clone()
+                    && let Some(vao_file) = rfd::FileDialog::new()
+                        .add_filter("vao-patch", &["vao-patch"])
+                        .set_file_name(format!("{}.vao-patch", default_stem(&kn5_file)))
+                        .save_file()
+                {
+                    self.ao_busy = true;
+                    self.spawn(ui.ctx(), move || {
+                        let result = bake_vao_patch(&kn5_file, &vao_file);
+                        Msg::AoBaked {
+                            kn5: kn5_file,
+                            path: vao_file,
+                            result,
+                        }
+                    });
+                }
+
                 if self.fbx_busy || self.obj_busy || self.ao_busy {
                     ui.add(egui::Spinner::new());
                     ui.label(RichText::new("Working...").color(theme::MUTED));
@@ -323,9 +364,8 @@ impl ModelTools {
             ui.add_space(4.0);
             ui.label(
                 RichText::new(
-                    "Export FBX and Bake AO use the KN5 file chosen above. Export FBX writes one \
-                     mesh with no normals. Bake AO asks for a .csv file and writes one row per \
-                     triangle corner with its AO value.",
+                    "BVH-accelerated AO baker supports up to 2,000,000 triangles: export per-corner CSV, \
+                     512x512 UV AO PNG texture, or a zlib-compressed CSP .vao-patch file.",
                 )
                 .small()
                 .color(theme::MUTED),
@@ -704,6 +744,129 @@ fn bake_ao(kn5_file: &Path, csv_file: &Path) -> Result<(usize, f64), String> {
     let count = values.len();
     let average = values.iter().map(|&v| f64::from(v)).sum::<f64>() / count as f64;
     Ok((count, average))
+}
+
+/// Bakes UV-space ambient occlusion from `kn5_file` into a new PNG at `png_file`.
+fn bake_uv_ao_png(kn5_file: &Path, png_file: &Path, size: u32) -> Result<(usize, f64), String> {
+    if png_file.exists() {
+        return Err(format!("{} already exists, choose another name", file_name(png_file)));
+    }
+    let opts = LoadOptions {
+        load_textures: false,
+        skip_ac_helpers: true,
+        max_vertices: 2_000_000,
+        max_triangles: ao_bake::MAX_TRIANGLES,
+    };
+    let scene = kn5_scene::load_kn5(kn5_file, &opts).map_err(|e| e.to_string())?;
+    let mut uv_tris = Vec::new();
+    for mesh in &scene.meshes {
+        if mesh.name.starts_with("AC_") {
+            continue;
+        }
+        for tri in mesh.indices.chunks_exact(3) {
+            let (i0, i1, i2) = (usize::from(tri[0]), usize::from(tri[1]), usize::from(tri[2]));
+            let a = kn5_scene::mat4_transform(&mesh.transform, &mesh.positions[i0], true);
+            let b = kn5_scene::mat4_transform(&mesh.transform, &mesh.positions[i1], true);
+            let c = kn5_scene::mat4_transform(&mesh.transform, &mesh.positions[i2], true);
+            uv_tris.push(UvTriangle {
+                tri: Triangle { a, b, c, color: [255, 255, 255] },
+                uv_a: mesh.uvs.get(i0).copied().unwrap_or([0.0, 0.0]),
+                uv_b: mesh.uvs.get(i1).copied().unwrap_or([0.0, 0.0]),
+                uv_c: mesh.uvs.get(i2).copied().unwrap_or([0.0, 0.0]),
+            });
+        }
+    }
+    if uv_tris.is_empty() {
+        return Err(format!("{} has no triangles", file_name(kn5_file)));
+    }
+    let settings = AoSettings {
+        rays: AO_RAYS,
+        max_distance: AO_MAX_DISTANCE,
+        bias: AO_BIAS,
+    };
+    let rgba = ao_bake::bake_uv_ao_rgba(&uv_tris, size, size, &settings).map_err(|e| e.to_string())?;
+    let encoded = png::encode_rgba(size, size, &rgba).map_err(|e| e.to_string())?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(png_file)
+        .map_err(|e| e.to_string())?;
+    file.write_all(&encoded).map_err(|e| e.to_string())?;
+    let avg = rgba.chunks_exact(4).map(|px| f64::from(px[0]) / 255.0).sum::<f64>()
+        / (size as f64 * size as f64);
+    Ok((uv_tris.len(), avg))
+}
+
+/// Bakes per-mesh vertex AO via BVH and exports a CSP `.vao-patch` binary file.
+fn bake_vao_patch(kn5_file: &Path, vao_file: &Path) -> Result<(usize, f64), String> {
+    if vao_file.exists() {
+        return Err(format!("{} already exists, choose another name", file_name(vao_file)));
+    }
+    let opts = LoadOptions {
+        load_textures: false,
+        skip_ac_helpers: true,
+        max_vertices: 2_000_000,
+        max_triangles: ao_bake::MAX_TRIANGLES,
+    };
+    let scene = kn5_scene::load_kn5(kn5_file, &opts).map_err(|e| e.to_string())?;
+    let mut all_tris = Vec::new();
+    let mut mesh_ranges: Vec<(String, usize, Vec<[usize; 3]>)> = Vec::new();
+    for mesh in &scene.meshes {
+        if mesh.name.starts_with("AC_") || mesh.indices.len() < 3 {
+            continue;
+        }
+        let mut tri_indices = Vec::with_capacity(mesh.indices.len() / 3);
+        for tri in mesh.indices.chunks_exact(3) {
+            let (i0, i1, i2) = (usize::from(tri[0]), usize::from(tri[1]), usize::from(tri[2]));
+            let a = kn5_scene::mat4_transform(&mesh.transform, &mesh.positions[i0], true);
+            let b = kn5_scene::mat4_transform(&mesh.transform, &mesh.positions[i1], true);
+            let c = kn5_scene::mat4_transform(&mesh.transform, &mesh.positions[i2], true);
+            all_tris.push(Triangle { a, b, c, color: [255, 255, 255] });
+            tri_indices.push([i0, i1, i2]);
+        }
+        mesh_ranges.push((mesh.name.clone(), mesh.positions.len(), tri_indices));
+    }
+    if all_tris.is_empty() {
+        return Err(format!("{} has no triangles", file_name(kn5_file)));
+    }
+    let settings = AoSettings {
+        rays: AO_RAYS,
+        max_distance: AO_MAX_DISTANCE,
+        bias: AO_BIAS,
+    };
+    let corner_ao = ao_bake::bake_vertex_ao(&all_tris, &settings).map_err(|e| e.to_string())?;
+
+    let mut meshes = Vec::with_capacity(mesh_ranges.len());
+    let mut cursor = 0usize;
+    let mut total_verts = 0usize;
+    let mut sum_ao = 0.0f64;
+    for (name, vert_count, tri_indices) in mesh_ranges {
+        let mut accum = vec![0.0f32; vert_count];
+        let mut hits = vec![0u32; vert_count];
+        for idxs in tri_indices {
+            for (ci, &v_idx) in idxs.iter().enumerate() {
+                accum[v_idx] += corner_ao[cursor + ci];
+                hits[v_idx] += 1;
+            }
+            cursor += 3;
+        }
+        let per_vert: Vec<f32> = accum
+            .into_iter()
+            .zip(hits)
+            .map(|(s, c)| if c > 0 { s / c as f32 } else { 1.0 })
+            .collect();
+        total_verts += per_vert.len();
+        sum_ao += per_vert.iter().map(|&v| f64::from(v)).sum::<f64>();
+        meshes.push(VaoMeshPatch::from_scalar_ao(name, &per_vert));
+    }
+
+    let patch = VaoPatch {
+        version: VAO_PATCH_VERSION,
+        meshes,
+    };
+    vao_patch::write_vao_patch(vao_file, &patch).map_err(|e| e.to_string())?;
+    let avg = if total_verts > 0 { sum_ao / total_verts as f64 } else { 1.0 };
+    Ok((total_verts, avg))
 }
 
 /// Turns a file stem into an FBX mesh name: quotes and control characters become
