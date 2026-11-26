@@ -319,15 +319,34 @@ export default function CspPage() {
     );
   }, [modules, fileSearch]);
 
+  const masterEnableEntry = useMemo(
+    () =>
+      activeModule.entries.find(
+        (e) =>
+          e.section.toUpperCase() === "BASIC" &&
+          (e.key.toUpperCase() === "ENABLED" || e.key.toUpperCase() === "ACTIVE") &&
+          e.kind === "bool"
+      ) ?? null,
+    [activeModule]
+  );
+
   const groupedEntries = useMemo(() => {
     const q = keySearch.trim().toLowerCase();
-    const list = activeModule.entries.filter(
-      (e) =>
+    const list = activeModule.entries.filter((e) => {
+      if (
+        masterEnableEntry &&
+        e.section === masterEnableEntry.section &&
+        e.key === masterEnableEntry.key
+      ) {
+        return false;
+      }
+      return (
         !q ||
         e.label.toLowerCase().includes(q) ||
         e.key.toLowerCase().includes(q) ||
         e.section.toLowerCase().includes(q)
-    );
+      );
+    });
     const map = new Map<string, CspEntry[]>();
     for (const e of list) {
       const arr = map.get(e.section) ?? [];
@@ -335,7 +354,7 @@ export default function CspPage() {
       map.set(e.section, arr);
     }
     return Array.from(map.entries());
-  }, [activeModule, keySearch]);
+  }, [activeModule, keySearch, masterEnableEntry]);
 
   const changedInActive = useMemo(
     () => activeModule.entries.filter((e) => e.value !== e.defaultValue).length,
@@ -489,19 +508,29 @@ export default function CspPage() {
           {/* Right Full Section & Key Editor */}
           <div className="space-y-4 min-w-0">
             <Card padding="md" className="flex flex-wrap items-center justify-between gap-3">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <h2 className="font-display text-2xl font-bold tracking-wide text-[var(--text-primary)]">
-                    {activeModule.title}
-                  </h2>
-                  <Badge variant="neutral">{activeModule.file}</Badge>
-                  {changedInActive > 0 && (
-                    <Badge variant="warning">{changedInActive} modified</Badge>
-                  )}
+              <div className="flex items-center gap-4 min-w-0">
+                {masterEnableEntry && (
+                  <Toggle
+                    checked={masterEnableEntry.value === "1"}
+                    onChange={(v) =>
+                      updateEntry(masterEnableEntry.section, masterEnableEntry.key, v ? "1" : "0")
+                    }
+                  />
+                )}
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <h2 className="font-display text-2xl font-bold tracking-wide text-[var(--text-primary)]">
+                      {activeModule.title}
+                    </h2>
+                    <Badge variant="neutral">{activeModule.file}</Badge>
+                    {changedInActive > 0 && (
+                      <Badge variant="warning">{changedInActive} modified</Badge>
+                    )}
+                  </div>
+                  <p className="text-xs text-[var(--text-secondary)] mt-0.5">
+                    {activeModule.description}
+                  </p>
                 </div>
-                <p className="text-xs text-[var(--text-secondary)] mt-0.5">
-                  {activeModule.description}
-                </p>
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
@@ -546,7 +575,11 @@ export default function CspPage() {
                   />
                 </div>
 
-                <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                <div
+                  className={`grid grid-cols-1 xl:grid-cols-2 gap-4 transition-opacity ${
+                    masterEnableEntry && masterEnableEntry.value !== "1" ? "opacity-45" : ""
+                  }`}
+                >
                   {groupedEntries.map(([section, entries]) => (
                     <Card key={section} variant="elevated" padding="md" className="space-y-4">
                       <div className="flex items-center justify-between border-b border-white/[0.06] pb-2.5">
