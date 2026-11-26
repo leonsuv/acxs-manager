@@ -176,6 +176,7 @@ mod tests {
             year: "2015".to_string(),
             tags: tags.iter().map(|t| t.to_string()).collect(),
             path: PathBuf::from("/ac/content/cars").join(id),
+            ..CarEntry::default()
         }
     }
 
@@ -189,6 +190,7 @@ mod tests {
             pitboxes,
             layouts: vec!["gp".to_string(), "short".to_string()],
             path: PathBuf::from("/ac/content/tracks").join(id),
+            ..TrackEntry::default()
         }
     }
 

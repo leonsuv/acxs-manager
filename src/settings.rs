@@ -12,6 +12,45 @@ const DEFAULT_AC_ROOTS: &[&str] = &[
     r"C:\Program Files\Steam\steamapps\common\assettocorsa",
 ];
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LaunchTarget {
+    #[default]
+    QuickRace,
+    OnlineServer {
+        host: String,
+        port: u16,
+    },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ArmedSession {
+    pub car_id: String,
+    pub skin_id: String,
+    pub track_id: String,
+    pub layout_id: String,
+    pub mode: String,
+    pub target: LaunchTarget,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AccentPreset {
+    #[default]
+    MotorsportRed,
+    TelemetryCyan,
+    AmberGold,
+    Emerald,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QuickSwitches {
+    pub vr_mode: bool,
+    pub show_fps: bool,
+    pub auto_record: bool,
+    pub skip_intro: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -20,6 +59,14 @@ pub struct Settings {
     /// Send stored crash reports to the developer's GlitchTip server on start.
     /// Off by default. Panics are stored locally either way.
     pub crash_reports: bool,
+    pub armed_session: Option<ArmedSession>,
+    pub accent_preset: AccentPreset,
+    pub quick_switches: QuickSwitches,
+    pub active_rig_profile: Option<String>,
+    pub adaptive_ai_enabled: bool,
+    pub seven_zip_path: Option<PathBuf>,
+    pub mods_dir: Option<PathBuf>,
+    pub csp_catalog_url: Option<String>,
 }
 
 impl Settings {
@@ -170,9 +217,60 @@ mod tests {
             ac_root: r"D:\Games\assettocorsa".into(),
             patch_library: r"D:\Patches".into(),
             crash_reports: true,
+            armed_session: Some(ArmedSession {
+                car_id: "ks_ferrari_488_gt3".into(),
+                skin_id: "01_red".into(),
+                track_id: "monza".into(),
+                layout_id: String::new(),
+                mode: "race".into(),
+                target: LaunchTarget::OnlineServer {
+                    host: "127.0.0.1".into(),
+                    port: 9600,
+                },
+            }),
+            accent_preset: AccentPreset::TelemetryCyan,
+            quick_switches: QuickSwitches {
+                vr_mode: true,
+                show_fps: true,
+                auto_record: false,
+                skip_intro: true,
+            },
+            active_rig_profile: Some("DD1 + Heusinkveld".into()),
+            adaptive_ai_enabled: true,
+            seven_zip_path: Some(PathBuf::from(r"C:\Program Files\7-Zip\7z.exe")),
+            mods_dir: Some(PathBuf::from(r"D:\ACMods")),
+            csp_catalog_url: Some("https://example.invalid/csp.json".into()),
+            ..Settings::default()
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn loads_legacy_json_without_new_fields() {
+        let dir = std::env::temp_dir().join(format!("acxs-legacy-settings-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        fs::write(
+            &path,
+            r#"{
+  "ac_root": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\assettocorsa",
+  "patch_library": "D:\\Patches",
+  "crash_reports": true
+}"#,
+        )
+        .unwrap();
+        let loaded = Settings::load(&path);
+        assert_eq!(
+            loaded,
+            Settings {
+                ac_root: r"C:\Program Files (x86)\Steam\steamapps\common\assettocorsa".into(),
+                patch_library: r"D:\Patches".into(),
+                crash_reports: true,
+                ..Settings::default()
+            }
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 

@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct CarEntry {
     pub id: String,
     pub name: String,
@@ -16,10 +16,16 @@ pub struct CarEntry {
     pub car_class: String,
     pub year: String,
     pub tags: Vec<String>,
+    pub parent: Option<String>,
+    pub country: String,
+    pub author: String,
+    pub bhp: Option<f64>,
+    pub weight_kg: Option<f64>,
+    pub pwratio: Option<f64>,
     pub path: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TrackEntry {
     pub id: String,
     pub name: String,
@@ -28,6 +34,7 @@ pub struct TrackEntry {
     pub length_m: Option<f64>,
     pub pitboxes: Option<u32>,
     pub layouts: Vec<String>,
+    pub tags: Vec<String>,
     pub path: PathBuf,
 }
 
@@ -124,9 +131,56 @@ fn text_field(map: &Map<String, Value>, key: &str) -> String {
 fn number_field(map: &Map<String, Value>, key: &str) -> Option<f64> {
     match map.get(key)? {
         Value::Number(n) => n.as_f64(),
-        Value::String(s) => s.replace(',', "").trim().parse().ok(),
+        Value::String(s) => parse_lenient_f64(s),
         _ => None,
     }
+}
+
+/// Leniently parse the first numeric value in a string such as `"570 bhp"`,
+/// `"1,350 kg"`, `"2.37 kg/hp"`, or `"~450bhp"`.
+pub fn parse_lenient_f64(s: &str) -> Option<f64> {
+    let bytes = s.as_bytes();
+    let mut start = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b.is_ascii_digit()
+            || (b == b'-' && bytes.get(i + 1).is_some_and(|n| n.is_ascii_digit()))
+        {
+            start = Some(i);
+            break;
+        }
+    }
+    let start = start?;
+    let mut token = String::new();
+    let mut seen_dot = false;
+    for (offset, &b) in bytes[start..].iter().enumerate() {
+        if offset == 0 && b == b'-' {
+            token.push('-');
+        } else if b.is_ascii_digit() {
+            token.push(b as char);
+        } else if b == b',' {
+            // Thousands separator inside a number, e.g. "1,350 kg"
+            if bytes
+                .get(start + offset + 1)
+                .is_some_and(|n| n.is_ascii_digit())
+            {
+                continue;
+            }
+            break;
+        } else if b == b'.' && !seen_dot {
+            seen_dot = true;
+            token.push('.');
+        } else {
+            break;
+        }
+    }
+    token.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+fn spec_number_field(map: &Map<String, Value>, key: &str) -> Option<f64> {
+    map.get("specs")
+        .and_then(|v| v.as_object())
+        .and_then(|specs| number_field(specs, key))
+        .or_else(|| number_field(map, key))
 }
 
 fn tag_field(map: &Map<String, Value>) -> Vec<String> {
@@ -177,6 +231,12 @@ pub fn scan_cars(ac_root: &Path) -> Vec<CarEntry> {
                 car_class: text_field(&ui, "class"),
                 year: text_field(&ui, "year"),
                 tags: tag_field(&ui),
+                parent: Some(text_field(&ui, "parent")).filter(|s| !s.is_empty()),
+                country: text_field(&ui, "country"),
+                author: text_field(&ui, "author"),
+                bhp: spec_number_field(&ui, "bhp"),
+                weight_kg: spec_number_field(&ui, "weight"),
+                pwratio: spec_number_field(&ui, "pwratio"),
                 id,
                 path: folder,
             })
@@ -237,6 +297,7 @@ pub fn scan_tracks(ac_root: &Path) -> Vec<TrackEntry> {
                 length_m: number_field(&ui, "length"),
                 pitboxes: number_field(&ui, "pitboxes").map(|v| v as u32),
                 layouts,
+                tags: tag_field(&ui),
                 id,
                 path: folder,
             })
@@ -342,6 +403,67 @@ mod tests {
         assert_eq!(tracks[0].pitboxes, Some(20));
         assert_eq!(tracks[0].layouts, vec!["gp".to_string()]);
         assert_eq!(filter_tracks(&tracks, "italy").len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn parses_car_specs_and_track_tags_leniently() {
+        let root = fixture("specs_and_tags");
+        write(
+            &root.join("content/cars/ferrari_488_s1/ui/ui_car.json"),
+            r##"{
+                "name": "Ferrari 488 GT3 S1",
+                "brand": "Ferrari",
+                "class": "race",
+                "country": "Italy",
+                "author": "Kunos",
+                "parent": "ks_ferrari_488_gt3",
+                "specs": {
+                    "bhp": "570 bhp",
+                    "weight": "1,260 kg",
+                    "pwratio": "2.21 kg/hp"
+                },
+                "tags": ["#GT3", "italy"]
+            }"##,
+        );
+        write(
+            &root.join("content/cars/no_specs/ui/ui_car.json"),
+            r#"{
+                "name": "Mystery Car",
+                "specs": { "bhp": "N/A", "weight": "--" }
+            }"#,
+        );
+        write(
+            &root.join("content/tracks/spa/ui/ui_track.json"),
+            r#"{
+                "name": "Spa-Francorchamps",
+                "country": "Belgium",
+                "tags": ["circuit", "gp", "belgium"]
+            }"#,
+        );
+
+        let cars = scan_cars(&root);
+        let ferrari = cars.iter().find(|c| c.id == "ferrari_488_s1").unwrap();
+        assert_eq!(ferrari.parent.as_deref(), Some("ks_ferrari_488_gt3"));
+        assert_eq!(ferrari.country, "Italy");
+        assert_eq!(ferrari.author, "Kunos");
+        assert_eq!(ferrari.bhp, Some(570.0));
+        assert_eq!(ferrari.weight_kg, Some(1260.0));
+        assert_eq!(ferrari.pwratio, Some(2.21));
+
+        let mystery = cars.iter().find(|c| c.id == "no_specs").unwrap();
+        assert_eq!(mystery.parent, None);
+        assert_eq!(mystery.bhp, None);
+        assert_eq!(mystery.weight_kg, None);
+        assert_eq!(mystery.pwratio, None);
+
+        let tracks = scan_tracks(&root);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(
+            tracks[0].tags,
+            vec!["circuit".to_string(), "gp".to_string(), "belgium".to_string()]
+        );
+
         fs::remove_dir_all(root).unwrap();
     }
 }

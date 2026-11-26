@@ -143,6 +143,7 @@ fn load_track(track_dir: &Path) -> io::Result<(TrackEntry, Vec<Surface>)> {
         length_m: meta.length_m,
         pitboxes: meta.pitboxes,
         layouts: crate::content::track_layouts(track_dir),
+        tags: meta.tags.unwrap_or_default(),
         id,
         path: track_dir.to_path_buf(),
     };

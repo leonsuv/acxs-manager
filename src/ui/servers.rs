@@ -1298,6 +1298,7 @@ mod track_tests {
             length_m: None,
             pitboxes: None,
             layouts: Vec::new(),
+            tags: Vec::new(),
             path: std::path::PathBuf::new(),
         }
     }

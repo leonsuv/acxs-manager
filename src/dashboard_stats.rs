@@ -140,6 +140,7 @@ mod tests {
             year: "2000".to_string(),
             tags: tags.iter().map(|t| t.to_string()).collect(),
             path: PathBuf::new(),
+            ..CarEntry::default()
         }
     }
 
@@ -159,6 +160,7 @@ mod tests {
             pitboxes,
             layouts: layouts.iter().map(|l| l.to_string()).collect(),
             path: PathBuf::new(),
+            ..TrackEntry::default()
         }
     }
 
