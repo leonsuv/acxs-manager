@@ -14,7 +14,6 @@ import { Toggle } from "./Primitives";
 export function TopBar() {
   const {
     pillar,
-    subTab,
     navigate,
     gameRunning,
     cspBuild,
@@ -42,70 +41,71 @@ export function TopBar() {
     return () => window.removeEventListener("mousedown", onPointerDown);
   }, [quickSwitchesOpen, setQuickSwitchesOpen]);
 
-  const activePillarDef = PILLAR_NAV.find((p) => p.id === pillar);
-  const subTabs = activePillarDef?.subTabs ?? [];
-
   return (
     <header className="shrink-0 z-30 select-none">
-      {/* Primary 56px Glass Top Bar */}
+      {/* Primary 56px Glass Top Bar — Brand + Left-Aligned Pillars + Right Utility Cluster */}
       <div className="h-14 px-4 glass-bar border-b flex items-center justify-between gap-4">
-        {/* Left: Glowing A Motorsport Mark + ACXS */}
-        <button
-          type="button"
-          onClick={() => navigate("paddock")}
-          className="flex items-center gap-2.5 group cursor-pointer shrink-0"
-        >
-          <div
-            className="w-8 h-8 rounded-lg flex items-center justify-center relative overflow-hidden border border-white/15 transition-transform duration-150 group-hover:scale-[1.04]"
-            style={{
-              background:
-                "linear-gradient(135deg, var(--accent) 0%, rgba(var(--accent-rgb), 0.65) 100%)",
-              boxShadow: "0 0 18px var(--accent-glow)",
-            }}
+        <div className="flex items-center h-full gap-4 min-w-0">
+          {/* Glowing A Motorsport Mark + ACXS */}
+          <button
+            type="button"
+            onClick={() => navigate("paddock")}
+            className="flex items-center gap-2.5 group cursor-pointer shrink-0"
           >
-            <span className="font-display text-xl font-bold text-white leading-none tracking-tight">
-              A
-            </span>
-          </div>
-          <div className="flex flex-col items-start leading-none">
-            <span className="font-display text-[19px] font-bold tracking-[0.14em] text-[var(--text-primary)]">
-              ACXS
-            </span>
-            <span className="text-[9px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">
-              MANAGER
-            </span>
-          </div>
-        </button>
+            <div
+              className="w-8 h-8 rounded-lg flex items-center justify-center relative overflow-hidden border border-white/15 transition-transform duration-150 group-hover:scale-[1.04]"
+              style={{
+                background:
+                  "linear-gradient(135deg, var(--accent) 0%, rgba(var(--accent-rgb), 0.65) 100%)",
+                boxShadow: "0 0 18px var(--accent-glow)",
+              }}
+            >
+              <span className="font-display text-xl font-bold text-white leading-none tracking-tight">
+                A
+              </span>
+            </div>
+            <div className="flex flex-col items-start leading-none">
+              <span className="font-display text-[19px] font-bold tracking-[0.14em] text-[var(--text-primary)]">
+                ACXS
+              </span>
+              <span className="text-[9px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">
+                MANAGER
+              </span>
+            </div>
+          </button>
 
-        {/* Center: 6 Clean Pillars with Active Bottom Glow Indicator */}
-        <nav aria-label="Primary pillars" className="flex items-center h-full gap-1">
-          {PILLAR_NAV.map((item) => {
-            const active = item.id === pillar;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => navigate(item.id)}
-                className={`relative h-full px-3.5 flex items-center text-[13px] font-medium transition-colors duration-150 cursor-pointer ${
-                  active
-                    ? "text-[var(--text-primary)]"
-                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                }`}
-              >
-                <span>{item.label}</span>
-                {active && (
-                  <span
-                    className="absolute inset-x-2.5 bottom-0 h-[2px] rounded-full"
-                    style={{
-                      background: "var(--accent)",
-                      boxShadow: "0 0 12px var(--accent-glow), 0 -1px 8px var(--accent-glow)",
-                    }}
-                  />
-                )}
-              </button>
-            );
-          })}
-        </nav>
+          <div className="h-5 w-px bg-white/[0.08] shrink-0" />
+
+          {/* Left-Aligned Primary Pillars — Visually Grounded Above the Left Rail */}
+          <nav aria-label="Primary pillars" className="flex items-center h-full gap-0.5">
+            {PILLAR_NAV.map((item) => {
+              const active = item.id === pillar;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => navigate(item.id)}
+                  className={`relative h-full px-3.5 flex items-center text-[13px] font-medium transition-colors duration-150 cursor-pointer ${
+                    active
+                      ? "text-[var(--text-primary)]"
+                      : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                  }`}
+                >
+                  <span>{item.label}</span>
+                  {active && (
+                    <span
+                      className="absolute inset-x-2.5 bottom-0 h-[2px] rounded-full"
+                      style={{
+                        background: "var(--accent)",
+                        boxShadow: "0 0 12px var(--accent-glow), 0 -1px 8px var(--accent-glow)",
+                      }}
+                    />
+                  )}
+                </button>
+              );
+            })}
+          </nav>
+        </div>
 
         {/* Right: Status Pills, Cmd+K, Rescan, Quick Switches & Accent Popover */}
         <div className="flex items-center gap-2 shrink-0">
@@ -249,29 +249,6 @@ export function TopBar() {
           </div>
         </div>
       </div>
-
-      {/* Minimal 40px Sub-Nav Bar (ONLY rendered when active pillar has sub-tabs) */}
-      {subTabs.length > 0 && (
-        <div className="h-10 px-5 bg-[#090C12]/80 backdrop-blur-md border-b border-white/[0.06] flex items-center gap-1 overflow-x-auto">
-          {subTabs.map((tab) => {
-            const active = tab.id === subTab;
-            return (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => navigate(pillar, tab.id)}
-                className={`h-7 px-3 rounded-lg text-xs font-medium whitespace-nowrap transition-all duration-150 cursor-pointer ${
-                  active
-                    ? "bg-white/[0.09] text-[var(--text-primary)] border border-white/[0.11] shadow-sm"
-                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/[0.04] border border-transparent"
-                }`}
-              >
-                {tab.label}
-              </button>
-            );
-          })}
-        </div>
-      )}
     </header>
   );
 }

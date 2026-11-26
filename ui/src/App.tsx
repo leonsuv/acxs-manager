@@ -1,5 +1,5 @@
 import { Component, Suspense, lazy, type ReactNode } from "react";
-import { AppProvider, useAppStore } from "./store/appStore";
+import { AppProvider, PILLAR_NAV, useAppStore } from "./store/appStore";
 import { TopBar } from "./components/TopBar";
 import { BottomDock } from "./components/BottomDock";
 import { CommandPalette } from "./components/CommandPalette";
@@ -148,7 +148,11 @@ function ActiveView() {
     case "setup":
       switch (subTab) {
         case "csp":
-          return <CspPage />;
+          return <CspPage view="editor" />;
+        case "csp-patches":
+          return <CspPage view="patches" />;
+        case "csp-weather":
+          return <CspPage view="weather" />;
         case "app":
           return <AppSettingsPage />;
         case "game":
@@ -161,15 +165,52 @@ function ActiveView() {
 }
 
 function MainContent() {
-  const { pillar, subTab } = useAppStore();
+  const { pillar, subTab, navigate } = useAppStore();
+  const activePillar = PILLAR_NAV.find((p) => p.id === pillar);
+  const subTabs = activePillar?.subTabs ?? [];
+
   return (
-    <main className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
-      <PageErrorBoundary resetKey={`${pillar}:${subTab}`}>
-        <Suspense fallback={<PageFallback />}>
-          <ActiveView />
-        </Suspense>
-      </PageErrorBoundary>
-    </main>
+    <div className="flex-1 min-h-0 flex overflow-hidden">
+      {/* Unified Level-2 Left Navigation Rail — anchored directly under TopBar */}
+      {subTabs.length > 0 && (
+        <aside className="w-[196px] shrink-0 border-r border-white/[0.06] bg-[#080B11]/85 backdrop-blur-md px-2.5 py-4 flex flex-col gap-1 select-none overflow-y-auto">
+          <div className="px-2.5 pb-2 text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">
+            {activePillar?.label}
+          </div>
+          {subTabs.map((tab) => {
+            const active = tab.id === subTab;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => navigate(pillar, tab.id)}
+                className={`relative w-full text-left px-3 py-2 rounded-lg text-[13px] font-medium transition-all duration-150 cursor-pointer flex items-center ${
+                  active
+                    ? "bg-[var(--accent-soft)] text-[var(--text-primary)] border border-[var(--accent-border)]"
+                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/[0.04] border border-transparent"
+                }`}
+              >
+                {active && (
+                  <span
+                    className="absolute left-0 top-2 bottom-2 w-[3px] rounded-r-full"
+                    style={{ background: "var(--accent)" }}
+                  />
+                )}
+                <span className="truncate">{tab.label}</span>
+              </button>
+            );
+          })}
+        </aside>
+      )}
+
+      <main className="flex-1 min-w-0 min-h-0 overflow-y-auto overflow-x-hidden">
+        <PageErrorBoundary resetKey={`${pillar}:${subTab}`}>
+          <Suspense fallback={<PageFallback />}>
+            <ActiveView />
+          </Suspense>
+        </PageErrorBoundary>
+      </main>
+    </div>
   );
 }
 

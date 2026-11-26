@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  CloudRain,
   Code2,
   Download,
   FileCode2,
@@ -11,7 +10,6 @@ import {
   Sliders,
   Sparkles,
   Trash2,
-  Wrench,
 } from "lucide-react";
 import { api } from "../lib/api";
 import type { CspPatchInfo, WeatherController } from "../lib/types";
@@ -195,9 +193,13 @@ function serializeToIni(entries: CspEntry[]): string {
   return lines.join("\n");
 }
 
-export default function CspPage() {
+export default function CspPage({
+  view = "editor",
+}: {
+  view?: "patches" | "editor" | "weather";
+}) {
   const { cspBuild, notify } = useAppStore();
-  const [tab, setTab] = useState<"patches" | "editor" | "weather">("editor");
+  const tab = view;
   const [patches, setPatches] = useState<CspPatchInfo[]>([]);
   const [syncing, setSyncing] = useState(false);
   const [busyPatch, setBusyPatch] = useState<string | null>(null);
@@ -445,18 +447,19 @@ export default function CspPage() {
     <div className="p-6 max-w-[1660px] mx-auto space-y-5 animate-fade-in">
       <PageHeader
         eyebrow="SETUP · CUSTOM SHADERS PATCH"
-        title="CSP & Lights Patch"
-        subtitle="Edit every CSP module INI with live sliders, toggles, and raw INI view, or manage installed builds & WeatherFX."
-        actions={
-          <SegmentedControl
-            value={tab}
-            onChange={setTab}
-            options={[
-              { value: "editor", label: "CSP Config Editor", icon: <Wrench className="w-3.5 h-3.5" /> },
-              { value: "patches", label: "Patches & Catalog", icon: <Sparkles className="w-3.5 h-3.5" /> },
-              { value: "weather", label: "WeatherFX", icon: <CloudRain className="w-3.5 h-3.5" /> },
-            ]}
-          />
+        title={
+          tab === "editor"
+            ? "CSP Config Editor"
+            : tab === "patches"
+              ? "CSP Patches & Catalog"
+              : "WeatherFX Controller"
+        }
+        subtitle={
+          tab === "editor"
+            ? "Toggle modules and tune every CSP INI section with live sliders, enum pills, or raw INI view."
+            : tab === "patches"
+              ? "Install, switch, or remove Custom Shaders Patch builds and sync GitHub car/track configs."
+              : "Configure Sol, Pure, and RainFX dynamic sky & wet-track physics."
         }
       />
 

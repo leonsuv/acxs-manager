@@ -86,7 +86,9 @@ export const PILLAR_NAV: PillarDefinition[] = [
     label: "Setup",
     subTabs: [
       { id: "game", label: "Game Settings" },
-      { id: "csp", label: "CSP & Lights" },
+      { id: "csp", label: "CSP Config" },
+      { id: "csp-patches", label: "CSP Patches" },
+      { id: "csp-weather", label: "WeatherFX" },
       { id: "app", label: "App Settings" },
     ],
   },

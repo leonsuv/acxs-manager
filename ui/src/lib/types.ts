@@ -25,7 +25,7 @@ export type TelemetrySubTab =
   | "replay"
   | "trajectory"
   | "strategy";
-export type SetupSubTab = "game" | "csp" | "app";
+export type SetupSubTab = "game" | "csp" | "csp-patches" | "csp-weather" | "app";
 
 export type SubTab =
   | DriveSubTab
