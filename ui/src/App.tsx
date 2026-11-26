@@ -1,10 +1,56 @@
-import { Suspense, lazy } from "react";
+import { Component, Suspense, lazy, type ReactNode } from "react";
 import { AppProvider, useAppStore } from "./store/appStore";
 import { TopBar } from "./components/TopBar";
 import { BottomDock } from "./components/BottomDock";
 import { CommandPalette } from "./components/CommandPalette";
 import { ToastContainer } from "./components/ToastContainer";
-import { Skeleton } from "./components/Primitives";
+import { Button, Card, Skeleton } from "./components/Primitives";
+
+interface ErrorBoundaryProps {
+  resetKey: string;
+  children: ReactNode;
+}
+interface ErrorBoundaryState {
+  error: Error | null;
+}
+
+class PageErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  state: ErrorBoundaryState = { error: null };
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { error };
+  }
+
+  componentDidUpdate(prevProps: ErrorBoundaryProps) {
+    if (prevProps.resetKey !== this.props.resetKey && this.state.error) {
+      this.setState({ error: null });
+    }
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="p-8 max-w-2xl mx-auto">
+          <Card variant="elevated" className="p-6 space-y-4 border-red-500/30">
+            <div className="text-xs font-mono uppercase tracking-widest text-red-400">
+              View Error
+            </div>
+            <h2 className="font-display text-2xl font-bold tracking-wide">
+              Something failed while rendering this page
+            </h2>
+            <pre className="p-3 rounded-lg bg-black/40 border border-white/10 text-xs font-mono text-red-300 overflow-x-auto whitespace-pre-wrap">
+              {this.state.error.message}
+            </pre>
+            <Button onClick={() => this.setState({ error: null })}>
+              Retry
+            </Button>
+          </Card>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 // Wave T2A pages
 const PaddockPage = lazy(() => import("./pages/PaddockPage"));
@@ -114,16 +160,25 @@ function ActiveView() {
   }
 }
 
+function MainContent() {
+  const { pillar, subTab } = useAppStore();
+  return (
+    <main className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
+      <PageErrorBoundary resetKey={`${pillar}:${subTab}`}>
+        <Suspense fallback={<PageFallback />}>
+          <ActiveView />
+        </Suspense>
+      </PageErrorBoundary>
+    </main>
+  );
+}
+
 export default function App() {
   return (
     <AppProvider>
       <div className="h-screen w-screen flex flex-col overflow-hidden acxs-atmosphere text-[var(--text-primary)]">
         <TopBar />
-        <main className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
-          <Suspense fallback={<PageFallback />}>
-            <ActiveView />
-          </Suspense>
-        </main>
+        <MainContent />
         <BottomDock />
         <CommandPalette />
         <ToastContainer />

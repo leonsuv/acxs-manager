@@ -116,10 +116,29 @@ export function DedicatedServerPage() {
     { id: 2, name: "K. Tanaka", car: "ks_mazda_787b", pingMs: 48, ballastKg: 0 },
   ]);
 
+  const normalizeStatus = (raw: unknown): DedicatedServerStatus => {
+    const obj = (raw ?? {}) as Record<string, unknown>;
+    const running =
+      typeof obj.running === "boolean"
+        ? obj.running
+        : obj.status === "running";
+    const logsRaw = Array.isArray(obj.recentLogs)
+      ? obj.recentLogs
+      : Array.isArray(obj.recentLines)
+        ? obj.recentLines
+        : [];
+    return {
+      running,
+      pid: typeof obj.pid === "number" ? obj.pid : null,
+      uptimeSec: typeof obj.uptimeSec === "number" ? obj.uptimeSec : 0,
+      recentLogs: logsRaw.map((l) => String(l)),
+    };
+  };
+
   const refreshStatus = async () => {
     try {
       const s = await api.getDedicatedServerStatus();
-      if (s) setStatus(s);
+      if (s) setStatus(normalizeStatus(s));
     } catch {
       // ignore poll errors
     }
@@ -180,7 +199,7 @@ export function DedicatedServerPage() {
       } else {
         const next = await api.startDedicatedServer(serverDir);
         if (next) {
-          setStatus(next);
+          setStatus(normalizeStatus(next));
         } else {
           setStatus({
             running: true,
