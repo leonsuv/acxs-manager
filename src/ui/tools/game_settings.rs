@@ -153,6 +153,7 @@ impl VideoForm {
             shadow_map_size: self.shadow_map_size,
             world_detail: self.world_detail,
             post_processing: self.post_processing,
+            ..VideoSettings::default()
         })
     }
 }

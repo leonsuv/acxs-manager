@@ -4,9 +4,118 @@
 //! game takes it nearly as it is. Reading is read-only; [`to_race_ini`] builds the file to start
 //! one with, and the game's folders are never changed.
 
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::ini::Ini;
+
+/// Medal earned on a Special Event or Career event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+pub enum Medal {
+    #[default]
+    None,
+    Bronze,
+    Silver,
+    Gold,
+}
+
+impl Medal {
+    pub fn from_level(level: i64) -> Self {
+        match level {
+            1 => Medal::Bronze,
+            2 => Medal::Silver,
+            3.. => Medal::Gold,
+            _ => Medal::None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Medal::None => "None",
+            Medal::Bronze => "Bronze",
+            Medal::Silver => "Silver",
+            Medal::Gold => "Gold",
+        }
+    }
+}
+
+/// Reads earned medals from AC's `Documents/Assetto Corsa/cfg/progress.ini` (read-only).
+/// Maps event id (e.g. `"SPECIAL_EVENT_2"`) -> [`Medal`].
+pub fn read_progress_ini(cfg_dir: &Path) -> BTreeMap<String, Medal> {
+    let mut out = BTreeMap::new();
+    let Some(ini) = read_ini(&cfg_dir.join("progress.ini")) else {
+        return out;
+    };
+    for sec in ini.section_names() {
+        if let Some(level) = ini.get_i64(sec, "COMPLETED") {
+            let medal = Medal::from_level(level);
+            if medal != Medal::None {
+                out.insert(sec.to_string(), medal);
+            }
+        }
+    }
+    out
+}
+
+/// Evaluates an event's `CONDITION_0..2` against an observed lap time (ms) or race position.
+/// `CONDITION_0` = Bronze, `CONDITION_1` = Silver, `CONDITION_2` = Gold.
+pub fn evaluate_event_medal(event_text: &str, best_lap_ms: Option<u32>, finish_pos: Option<u32>) -> Medal {
+    let ini = Ini::parse(event_text);
+    let mut earned = Medal::None;
+    for (i, medal) in [(0, Medal::Bronze), (1, Medal::Silver), (2, Medal::Gold)] {
+        let sec = format!("CONDITION_{i}");
+        let Some(kind) = ini.get(&sec, "TYPE").and_then(|s| s.split(';').next()).map(|s| s.trim().to_uppercase()) else {
+            continue;
+        };
+        let Some(obj) = ini.get(&sec, "OBJECTIVE").and_then(|s| s.split(';').next()).and_then(|s| s.trim().parse::<u32>().ok()) else {
+            continue;
+        };
+        let met = match kind.as_str() {
+            "TIME" => best_lap_ms.is_some_and(|t| t > 0 && t <= obj),
+            "AI" => finish_pos.is_some_and(|p| p > 0 && p <= obj),
+            _ => false,
+        };
+        if met && medal > earned {
+            earned = medal;
+        }
+    }
+    earned
+}
+
+/// Local ACXS event medal store (`%APPDATA%\ACXS\event-progress.json`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EventProgressStore {
+    pub medals: BTreeMap<String, Medal>,
+}
+
+impl EventProgressStore {
+    pub fn load(path: &Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        let text = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(tmp, path)
+    }
+
+    /// Merges a newly observed medal, keeping the highest medal ever earned.
+    pub fn record_medal(&mut self, event_id: &str, medal: Medal) {
+        let entry = self.medals.entry(event_id.to_string()).or_default();
+        if medal > *entry {
+            *entry = medal;
+        }
+    }
+}
 
 /// One event that can be started.
 #[derive(Debug, Clone, PartialEq)]
@@ -205,5 +314,26 @@ mod tests {
         assert_eq!(ini.get("SESSION_0", "SPAWN_SET"), Some("HOTLAP_START"));
         assert_eq!(ini.get_i64("REMOTE", "ACTIVE"), Some(0));
         assert_eq!(ini.get_i64("HEADER", "VERSION"), Some(2));
+    }
+
+    #[test]
+    fn events_progress_ini_and_medal_evaluation() {
+        let dir = std::env::temp_dir().join(format!("acxs-events-prog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("progress.ini"),
+            "[SPECIAL_EVENT_2]\nCOMPLETED=3\n[SPECIAL_EVENT_5]\nCOMPLETED=1\n",
+        )
+        .unwrap();
+        let prog = read_progress_ini(&dir);
+        assert_eq!(prog.get("SPECIAL_EVENT_2"), Some(&Medal::Gold));
+        assert_eq!(prog.get("SPECIAL_EVENT_5"), Some(&Medal::Bronze));
+
+        let ev = "[CONDITION_0]\nTYPE=TIME\nOBJECTIVE=95000\n[CONDITION_1]\nTYPE=TIME\nOBJECTIVE=92000\n[CONDITION_2]\nTYPE=TIME\nOBJECTIVE=90000\n";
+        assert_eq!(evaluate_event_medal(ev, Some(91_500), None), Medal::Silver);
+        assert_eq!(evaluate_event_medal(ev, Some(89_900), None), Medal::Gold);
+        assert_eq!(evaluate_event_medal(ev, Some(99_000), None), Medal::None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

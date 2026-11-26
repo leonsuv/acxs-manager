@@ -22,7 +22,132 @@ const DYNAMIC_TRACK: &str = "DYNAMIC_TRACK";
 /// Largest entry list the server reads: sections `CAR_0` to `CAR_254`.
 const MAX_ENTRIES: usize = 255;
 
-/// The `[SERVER]` keys this module owns, plus the optional `[DYNAMIC_TRACK]` section.
+/// `[BOOKING]`, `[PRACTICE]`, or `[QUALIFY]` session section.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionCfg {
+    pub name: String,
+    pub time_min: u32,
+    pub is_open: u8,
+}
+
+/// `[RACE]` session section.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RaceSessionCfg {
+    pub name: String,
+    pub laps: u32,
+    pub time_min: u32,
+    pub wait_time_sec: u32,
+    pub is_open: u8,
+    pub reversed_grid_positions: i32,
+}
+
+/// One `[WEATHER_n]` section.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WeatherSlot {
+    pub graphics: String,
+    pub base_temp_ambient: i32,
+    pub base_temp_road: i32,
+    pub variation_ambient: i32,
+    pub variation_road: i32,
+    pub wind_speed_min: u32,
+    pub wind_speed_max: u32,
+    pub wind_direction: u32,
+    pub wind_variation_direction: u32,
+}
+
+impl Default for WeatherSlot {
+    fn default() -> Self {
+        Self {
+            graphics: "3_clear".to_string(),
+            base_temp_ambient: 22,
+            base_temp_road: 8,
+            variation_ambient: 1,
+            variation_road: 1,
+            wind_speed_min: 5,
+            wind_speed_max: 15,
+            wind_direction: 0,
+            wind_variation_direction: 15,
+        }
+    }
+}
+
+/// Realism and assist rules in `[SERVER]`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RealismConfig {
+    pub abs_allowed: u8,
+    pub tc_allowed: u8,
+    pub stability_allowed: bool,
+    pub autoclutch_allowed: bool,
+    pub tyre_blankets_allowed: bool,
+    pub force_virtual_mirror: bool,
+    pub fuel_rate: u32,
+    pub damage_multiplier: u32,
+    pub tyre_wear_rate: u32,
+    pub allowed_tyres_out: i32,
+    pub max_ballast_kg: u32,
+    pub qualify_max_wait_perc: u32,
+    pub start_rule: u8,
+    pub race_gas_penalty_disabled: bool,
+    pub legal_tyres: Vec<String>,
+    pub fixed_setup: String,
+}
+
+impl Default for RealismConfig {
+    fn default() -> Self {
+        Self {
+            abs_allowed: 1,
+            tc_allowed: 1,
+            stability_allowed: false,
+            autoclutch_allowed: false,
+            tyre_blankets_allowed: true,
+            force_virtual_mirror: true,
+            fuel_rate: 100,
+            damage_multiplier: 100,
+            tyre_wear_rate: 100,
+            allowed_tyres_out: 2,
+            max_ballast_kg: 50,
+            qualify_max_wait_perc: 120,
+            start_rule: 2,
+            race_gas_penalty_disabled: false,
+            legal_tyres: Vec::new(),
+            fixed_setup: String::new(),
+        }
+    }
+}
+
+/// Voting, kicking, lobby registration, and UDP plugin endpoints in `[SERVER]`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VotingPluginsConfig {
+    pub kick_quorum: u32,
+    pub voting_quorum: u32,
+    pub vote_duration: u32,
+    pub blacklist_mode: u8,
+    pub max_contacts_per_km: i32,
+    pub register_to_lobby: bool,
+    pub client_send_interval_hz: u32,
+    pub udp_plugin_local_port: u16,
+    pub udp_plugin_address: String,
+    pub auth_plugin_address: String,
+}
+
+impl Default for VotingPluginsConfig {
+    fn default() -> Self {
+        Self {
+            kick_quorum: 85,
+            voting_quorum: 80,
+            vote_duration: 20,
+            blacklist_mode: 1,
+            max_contacts_per_km: -1,
+            register_to_lobby: true,
+            client_send_interval_hz: 18,
+            udp_plugin_local_port: 0,
+            udp_plugin_address: String::new(),
+            auth_plugin_address: String::new(),
+        }
+    }
+}
+
+/// The `[SERVER]` keys this module owns, plus optional session, weather, and `[DYNAMIC_TRACK]` sections.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServerConfig {
     /// `NAME`.
@@ -53,6 +178,20 @@ pub struct ServerConfig {
     pub pickup_mode: bool,
     /// `[DYNAMIC_TRACK]`. `None` means the section is absent, and writing leaves it out.
     pub dynamic_track: Option<DynamicTrack>,
+    /// Optional `[BOOKING]` session.
+    pub booking: Option<SessionCfg>,
+    /// Optional `[PRACTICE]` session.
+    pub practice: Option<SessionCfg>,
+    /// Optional `[QUALIFY]` session.
+    pub qualify: Option<SessionCfg>,
+    /// Optional `[RACE]` session.
+    pub race: Option<RaceSessionCfg>,
+    /// `[WEATHER_0..N]` slots. Empty leaves weather sections untouched.
+    pub weather: Vec<WeatherSlot>,
+    /// Optional realism/assists block in `[SERVER]`.
+    pub realism: Option<RealismConfig>,
+    /// Optional voting/kicking/UDP plugin settings in `[SERVER]`.
+    pub voting_plugins: Option<VotingPluginsConfig>,
 }
 
 /// The `[DYNAMIC_TRACK]` section: grip evolution over a session.
@@ -87,6 +226,13 @@ impl Default for ServerConfig {
             sun_angle: 48,
             pickup_mode: true,
             dynamic_track: None,
+            booking: None,
+            practice: None,
+            qualify: None,
+            race: None,
+            weather: Vec::new(),
+            realism: None,
+            voting_plugins: None,
         }
     }
 }
@@ -141,6 +287,100 @@ pub fn read_server_config(cfg_dir: &Path) -> io::Result<ServerConfig> {
     } else {
         None
     };
+    let read_session = |sec: &str, def_name: &str| -> Option<SessionCfg> {
+        if !has_section(&ini, sec) {
+            return None;
+        }
+        Some(SessionCfg {
+            name: text(&ini, sec, "NAME", def_name.to_string()),
+            time_min: num(&ini, sec, "TIME", 15),
+            is_open: num(&ini, sec, "IS_OPEN", 1),
+        })
+    };
+    let race = if has_section(&ini, "RACE") {
+        Some(RaceSessionCfg {
+            name: text(&ini, "RACE", "NAME", "Race".to_string()),
+            laps: num(&ini, "RACE", "LAPS", 10),
+            time_min: num(&ini, "RACE", "TIME", 0),
+            wait_time_sec: num(&ini, "RACE", "WAIT_TIME", 60),
+            is_open: num(&ini, "RACE", "IS_OPEN", 1),
+            reversed_grid_positions: num(&ini, "RACE", "REVERSED_GRID_RACE_POSITIONS", 0),
+        })
+    } else {
+        None
+    };
+    let mut weather = Vec::new();
+    for idx in 0..32 {
+        let sec = format!("WEATHER_{idx}");
+        if !has_section(&ini, &sec) {
+            break;
+        }
+        let wd = WeatherSlot::default();
+        weather.push(WeatherSlot {
+            graphics: text(&ini, &sec, "GRAPHICS", wd.graphics),
+            base_temp_ambient: num(&ini, &sec, "BASE_TEMPERATURE_AMBIENT", wd.base_temp_ambient),
+            base_temp_road: num(&ini, &sec, "BASE_TEMPERATURE_ROAD", wd.base_temp_road),
+            variation_ambient: num(&ini, &sec, "VARIATION_AMBIENT", wd.variation_ambient),
+            variation_road: num(&ini, &sec, "VARIATION_ROAD", wd.variation_road),
+            wind_speed_min: num(&ini, &sec, "WIND_BASE_SPEED_MIN", wd.wind_speed_min),
+            wind_speed_max: num(&ini, &sec, "WIND_BASE_SPEED_MAX", wd.wind_speed_max),
+            wind_direction: num(&ini, &sec, "WIND_BASE_DIRECTION", wd.wind_direction),
+            wind_variation_direction: num(&ini, &sec, "WIND_VARIATION_DIRECTION", wd.wind_variation_direction),
+        });
+    }
+    let has_realism = ["ABS_ALLOWED", "TC_ALLOWED", "FUEL_RATE", "DAMAGE_MULTIPLIER", "TYRE_WEAR_RATE"]
+        .iter()
+        .any(|k| ini.get(SERVER, k).is_some());
+    let realism = if has_realism {
+        let rd = RealismConfig::default();
+        Some(RealismConfig {
+            abs_allowed: num(&ini, SERVER, "ABS_ALLOWED", rd.abs_allowed),
+            tc_allowed: num(&ini, SERVER, "TC_ALLOWED", rd.tc_allowed),
+            stability_allowed: flag(&ini, SERVER, "STABILITY_ALLOWED", rd.stability_allowed),
+            autoclutch_allowed: flag(&ini, SERVER, "AUTOCLUTCH_ALLOWED", rd.autoclutch_allowed),
+            tyre_blankets_allowed: flag(&ini, SERVER, "TYRE_BLANKETS_ALLOWED", rd.tyre_blankets_allowed),
+            force_virtual_mirror: flag(&ini, SERVER, "FORCE_VIRTUAL_MIRROR", rd.force_virtual_mirror),
+            fuel_rate: num(&ini, SERVER, "FUEL_RATE", rd.fuel_rate),
+            damage_multiplier: num(&ini, SERVER, "DAMAGE_MULTIPLIER", rd.damage_multiplier),
+            tyre_wear_rate: num(&ini, SERVER, "TYRE_WEAR_RATE", rd.tyre_wear_rate),
+            allowed_tyres_out: num(&ini, SERVER, "ALLOWED_TYRES_OUT", rd.allowed_tyres_out),
+            max_ballast_kg: num(&ini, SERVER, "MAX_BALLAST_KG", rd.max_ballast_kg),
+            qualify_max_wait_perc: num(&ini, SERVER, "QUALIFY_MAX_WAIT_PERC", rd.qualify_max_wait_perc),
+            start_rule: num(&ini, SERVER, "START_RULE", rd.start_rule),
+            race_gas_penalty_disabled: flag(&ini, SERVER, "RACE_GAS_PENALTY_DISABLED", rd.race_gas_penalty_disabled),
+            legal_tyres: ini.get(SERVER, "LEGAL_TYRES").map(split_list).unwrap_or_default(),
+            fixed_setup: text(&ini, SERVER, "FIXED_SETUP", rd.fixed_setup),
+        })
+    } else {
+        None
+    };
+    let has_voting = [
+        "KICK_QUORUM",
+        "VOTING_QUORUM",
+        "UDP_PLUGIN_LOCAL_PORT",
+        "UDP_PLUGIN_ADDRESS",
+        "REGISTER_TO_LOBBY",
+    ]
+    .iter()
+    .any(|k| ini.get(SERVER, k).is_some());
+    let voting_plugins = if has_voting {
+        let vd = VotingPluginsConfig::default();
+        Some(VotingPluginsConfig {
+            kick_quorum: num(&ini, SERVER, "KICK_QUORUM", vd.kick_quorum),
+            voting_quorum: num(&ini, SERVER, "VOTING_QUORUM", vd.voting_quorum),
+            vote_duration: num(&ini, SERVER, "VOTE_DURATION", vd.vote_duration),
+            blacklist_mode: num(&ini, SERVER, "BLACKLIST_MODE", vd.blacklist_mode),
+            max_contacts_per_km: num(&ini, SERVER, "MAX_CONTACTS_PER_KM", vd.max_contacts_per_km),
+            register_to_lobby: flag(&ini, SERVER, "REGISTER_TO_LOBBY", vd.register_to_lobby),
+            client_send_interval_hz: num(&ini, SERVER, "CLIENT_SEND_INTERVAL_HZ", vd.client_send_interval_hz),
+            udp_plugin_local_port: num(&ini, SERVER, "UDP_PLUGIN_LOCAL_PORT", vd.udp_plugin_local_port),
+            udp_plugin_address: text(&ini, SERVER, "UDP_PLUGIN_ADDRESS", vd.udp_plugin_address),
+            auth_plugin_address: text(&ini, SERVER, "AUTH_PLUGIN_ADDRESS", vd.auth_plugin_address),
+        })
+    } else {
+        None
+    };
+
     Ok(ServerConfig {
         name: text(&ini, SERVER, "NAME", d.name),
         password: text(&ini, SERVER, "PASSWORD", d.password),
@@ -156,6 +396,13 @@ pub fn read_server_config(cfg_dir: &Path) -> io::Result<ServerConfig> {
         sun_angle: num(&ini, SERVER, "SUN_ANGLE", d.sun_angle),
         pickup_mode: flag(&ini, SERVER, "PICKUP_MODE_ENABLED", d.pickup_mode),
         dynamic_track,
+        booking: read_session("BOOKING", "Booking"),
+        practice: read_session("PRACTICE", "Practice"),
+        qualify: read_session("QUALIFY", "Qualify"),
+        race,
+        weather,
+        realism,
+        voting_plugins,
     })
 }
 
@@ -192,6 +439,68 @@ pub fn write_server_config(cfg_dir: &Path, cfg: &ServerConfig) -> io::Result<()>
         ini.set(DYNAMIC_TRACK, "RANDOMNESS", dt.randomness);
         ini.set(DYNAMIC_TRACK, "SESSION_TRANSFER", dt.session_transfer);
         ini.set(DYNAMIC_TRACK, "LAP_GAIN", dt.lap_gain);
+    }
+    if let Some(r) = &cfg.realism {
+        check_strings([&r.fixed_setup].into_iter().chain(&r.legal_tyres))?;
+        ini.set(SERVER, "ABS_ALLOWED", r.abs_allowed);
+        ini.set(SERVER, "TC_ALLOWED", r.tc_allowed);
+        ini.set(SERVER, "STABILITY_ALLOWED", u8::from(r.stability_allowed));
+        ini.set(SERVER, "AUTOCLUTCH_ALLOWED", u8::from(r.autoclutch_allowed));
+        ini.set(SERVER, "TYRE_BLANKETS_ALLOWED", u8::from(r.tyre_blankets_allowed));
+        ini.set(SERVER, "FORCE_VIRTUAL_MIRROR", u8::from(r.force_virtual_mirror));
+        ini.set(SERVER, "FUEL_RATE", r.fuel_rate);
+        ini.set(SERVER, "DAMAGE_MULTIPLIER", r.damage_multiplier);
+        ini.set(SERVER, "TYRE_WEAR_RATE", r.tyre_wear_rate);
+        ini.set(SERVER, "ALLOWED_TYRES_OUT", r.allowed_tyres_out);
+        ini.set(SERVER, "MAX_BALLAST_KG", r.max_ballast_kg);
+        ini.set(SERVER, "QUALIFY_MAX_WAIT_PERC", r.qualify_max_wait_perc);
+        ini.set(SERVER, "START_RULE", r.start_rule);
+        ini.set(SERVER, "RACE_GAS_PENALTY_DISABLED", u8::from(r.race_gas_penalty_disabled));
+        ini.set(SERVER, "LEGAL_TYRES", r.legal_tyres.join(";"));
+        ini.set(SERVER, "FIXED_SETUP", &r.fixed_setup);
+    }
+    if let Some(v) = &cfg.voting_plugins {
+        check_strings([&v.udp_plugin_address, &v.auth_plugin_address])?;
+        ini.set(SERVER, "KICK_QUORUM", v.kick_quorum);
+        ini.set(SERVER, "VOTING_QUORUM", v.voting_quorum);
+        ini.set(SERVER, "VOTE_DURATION", v.vote_duration);
+        ini.set(SERVER, "BLACKLIST_MODE", v.blacklist_mode);
+        ini.set(SERVER, "MAX_CONTACTS_PER_KM", v.max_contacts_per_km);
+        ini.set(SERVER, "REGISTER_TO_LOBBY", u8::from(v.register_to_lobby));
+        ini.set(SERVER, "CLIENT_SEND_INTERVAL_HZ", v.client_send_interval_hz);
+        ini.set(SERVER, "UDP_PLUGIN_LOCAL_PORT", v.udp_plugin_local_port);
+        ini.set(SERVER, "UDP_PLUGIN_ADDRESS", &v.udp_plugin_address);
+        ini.set(SERVER, "AUTH_PLUGIN_ADDRESS", &v.auth_plugin_address);
+    }
+    for (sec, sess) in [("BOOKING", &cfg.booking), ("PRACTICE", &cfg.practice), ("QUALIFY", &cfg.qualify)] {
+        if let Some(s) = sess {
+            check_strings([&s.name])?;
+            ini.set(sec, "NAME", &s.name);
+            ini.set(sec, "TIME", s.time_min);
+            ini.set(sec, "IS_OPEN", s.is_open);
+        }
+    }
+    if let Some(r) = &cfg.race {
+        check_strings([&r.name])?;
+        ini.set("RACE", "NAME", &r.name);
+        ini.set("RACE", "LAPS", r.laps);
+        ini.set("RACE", "TIME", r.time_min);
+        ini.set("RACE", "WAIT_TIME", r.wait_time_sec);
+        ini.set("RACE", "IS_OPEN", r.is_open);
+        ini.set("RACE", "REVERSED_GRID_RACE_POSITIONS", r.reversed_grid_positions);
+    }
+    for (idx, w) in cfg.weather.iter().enumerate() {
+        check_strings([&w.graphics])?;
+        let sec = format!("WEATHER_{idx}");
+        ini.set(&sec, "GRAPHICS", &w.graphics);
+        ini.set(&sec, "BASE_TEMPERATURE_AMBIENT", w.base_temp_ambient);
+        ini.set(&sec, "BASE_TEMPERATURE_ROAD", w.base_temp_road);
+        ini.set(&sec, "VARIATION_AMBIENT", w.variation_ambient);
+        ini.set(&sec, "VARIATION_ROAD", w.variation_road);
+        ini.set(&sec, "WIND_BASE_SPEED_MIN", w.wind_speed_min);
+        ini.set(&sec, "WIND_BASE_SPEED_MAX", w.wind_speed_max);
+        ini.set(&sec, "WIND_BASE_DIRECTION", w.wind_direction);
+        ini.set(&sec, "WIND_VARIATION_DIRECTION", w.wind_variation_direction);
     }
     ini.save_with_backup(&path)
 }
@@ -418,6 +727,7 @@ mod tests {
                 session_transfer: 80,
                 lap_gain: 12,
             }),
+            ..ServerConfig::default()
         };
         write_server_config(tmp.path(), &cfg).unwrap();
         assert_eq!(read_server_config(tmp.path()).unwrap(), cfg);
@@ -663,5 +973,168 @@ mod content_copy_tests {
         assert!(server.join("tracks/spa/gp/data/surfaces.ini").is_file());
         assert!(server.join("tracks/spa/models_gp.ini").is_file());
         std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+/// Validates that no two concurrent server instances share any UDP, TCP, HTTP, or
+/// UDP-plugin local port. Returns human-readable collision descriptions.
+pub fn validate_multi_instance_ports(instances: &[(&str, &ServerConfig)]) -> Vec<String> {
+    use std::collections::HashMap;
+    let mut problems = Vec::new();
+    let mut used_udp: HashMap<u16, &str> = HashMap::new();
+    let mut used_tcp: HashMap<u16, &str> = HashMap::new();
+
+    for &(label, cfg) in instances {
+        for (kind, port) in [
+            ("UDP_PORT", cfg.udp_port),
+            ("UDP_PLUGIN_LOCAL_PORT", cfg.voting_plugins.as_ref().map_or(0, |v| v.udp_plugin_local_port)),
+        ] {
+            if port == 0 {
+                continue;
+            }
+            if let Some(prev) = used_udp.insert(port, label)
+                && prev != label
+            {
+                problems.push(format!("UDP port {port} ({kind}) collides between {prev:?} and {label:?}"));
+            }
+        }
+        for (kind, port) in [("TCP_PORT", cfg.tcp_port), ("HTTP_PORT", cfg.http_port)] {
+            if port == 0 {
+                continue;
+            }
+            if let Some(prev) = used_tcp.insert(port, label)
+                && prev != label
+            {
+                problems.push(format!("TCP port {port} ({kind}) collides between {prev:?} and {label:?}"));
+            }
+        }
+    }
+    problems
+}
+
+/// Saves a named multi-instance server preset under `<presets_root>/<slug>/`.
+pub fn save_preset_dir(
+    presets_root: &Path,
+    slug: &str,
+    cfg: &ServerConfig,
+    entries: &[Entry],
+) -> io::Result<std::path::PathBuf> {
+    let clean: String = slug
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        .collect();
+    if clean.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "preset name is empty"));
+    }
+    let dir = presets_root.join(&clean);
+    std::fs::create_dir_all(&dir)?;
+    write_server_config(&dir, cfg)?;
+    if !entries.is_empty() {
+        write_entry_list(&dir, entries)?;
+    }
+    Ok(dir)
+}
+
+/// Lists saved preset folder slugs under `presets_root`, sorted alphabetically.
+pub fn list_preset_dirs(presets_root: &Path) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(presets_root) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = rd
+        .filter_map(Result::ok)
+        .filter(|e| e.path().join(SERVER_CFG).is_file())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[cfg(test)]
+mod extended_server_tests {
+    use super::*;
+
+    #[test]
+    fn full_server_cfg_sessions_weather_realism_round_trip_preserves_comments() {
+        let dir = std::env::temp_dir().join(format!("acxs-server-full-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(SERVER_CFG), "; header comment\r\n[SERVER]\r\nCUSTOM=keep\r\n").unwrap();
+
+        let cfg = ServerConfig {
+            name: "League Round 1".into(),
+            admin_password: "secret".into(),
+            booking: Some(SessionCfg { name: "Booking".into(), time_min: 10, is_open: 1 }),
+            practice: Some(SessionCfg { name: "Practice".into(), time_min: 20, is_open: 1 }),
+            qualify: Some(SessionCfg { name: "Qualify".into(), time_min: 15, is_open: 1 }),
+            race: Some(RaceSessionCfg {
+                name: "Feature Race".into(),
+                laps: 25,
+                time_min: 0,
+                wait_time_sec: 60,
+                is_open: 2,
+                reversed_grid_positions: 8,
+            }),
+            weather: vec![WeatherSlot::default()],
+            realism: Some(RealismConfig {
+                legal_tyres: vec!["M".into(), "S".into()],
+                fixed_setup: "gt3_base.ini".into(),
+                ..RealismConfig::default()
+            }),
+            voting_plugins: Some(VotingPluginsConfig {
+                udp_plugin_local_port: 11000,
+                udp_plugin_address: "127.0.0.1:12000".into(),
+                ..VotingPluginsConfig::default()
+            }),
+            ..ServerConfig::default()
+        };
+
+        write_server_config(&dir, &cfg).unwrap();
+        let loaded = read_server_config(&dir).unwrap();
+        assert_eq!(loaded, cfg);
+
+        let raw = std::fs::read_to_string(dir.join(SERVER_CFG)).unwrap();
+        assert!(raw.starts_with("; header comment\r\n"));
+        assert!(raw.contains("CUSTOM=keep\r\n"));
+        assert!(raw.contains("[RACE]\r\n"));
+        assert!(raw.contains("[WEATHER_0]\r\n"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn multi_instance_port_collision_validator_catches_overlap() {
+        let a = ServerConfig {
+            udp_port: 9600,
+            tcp_port: 9600,
+            http_port: 8081,
+            voting_plugins: Some(VotingPluginsConfig {
+                udp_plugin_local_port: 11000,
+                ..VotingPluginsConfig::default()
+            }),
+            ..ServerConfig::default()
+        };
+        let b = ServerConfig {
+            udp_port: 9600,
+            tcp_port: 9601,
+            http_port: 8081,
+            voting_plugins: Some(VotingPluginsConfig {
+                udp_plugin_local_port: 11001,
+                ..VotingPluginsConfig::default()
+            }),
+            ..ServerConfig::default()
+        };
+        let problems = validate_multi_instance_ports(&[("GT3", &a), ("Drift", &b)]);
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems.iter().any(|p| p.contains("9600")));
+        assert!(problems.iter().any(|p| p.contains("8081")));
+
+        let c = ServerConfig {
+            udp_port: 9602,
+            tcp_port: 9602,
+            http_port: 8082,
+            ..ServerConfig::default()
+        };
+        assert!(validate_multi_instance_ports(&[("GT3", &a), ("Cup", &c)]).is_empty());
     }
 }

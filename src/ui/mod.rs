@@ -1,29 +1,38 @@
-//! The egui front end. Heavy work (scanning, hashing, installing) runs on
+//! The AAA 6-Pillar egui front end. Heavy work (scanning, hashing, installing) runs on
 //! background threads and reports back through a channel, so the window stays responsive.
 
 mod media;
+pub mod nav;
 mod pages;
 mod servers;
 mod showroom;
-mod tools;
 mod theme;
+mod tools;
+pub mod viewport3d;
 mod widgets;
 pub mod window_state;
 
 use crate::content::{scan_cars, scan_tracks, CarEntry, TrackEntry};
 use crate::csp::{self, LightsPatch};
 use crate::game;
-use crate::settings::{self, Settings};
-use eframe::egui::{self, RichText};
+use crate::settings::{self, AccentPreset, ArmedSession, LaunchTarget, Settings};
+use acxs_manager::ipc::{self, IpcListener, IpcMessage};
+use acxs_manager::uri::JoinUri;
+use eframe::egui::{self, Align2, Color32, CornerRadius, Margin, Rect, RichText, Sense, Stroke, StrokeKind, vec2};
+use nav::{
+    CarSubView, ControlsView, CspView, DriveTab, FocusNav, GarageTab, LibraryView, NavState, OnlineTab, PaddockTab,
+    Pillar, Route, SetupTab, SetupsView, StudioView, SystemView, TelemetryTab, TrackSubView, VideoView,
+};
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
 const MAX_NOTICES: usize = 8;
 
+/// Legacy page enum retained in sync with [`Route`] for backward compatibility with Wave 3 pages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Home,
@@ -38,7 +47,6 @@ pub enum Page {
 }
 
 #[derive(Debug, Clone)]
-/// A notice that is also shown briefly in the corner.
 struct Toast {
     text: String,
     ok: bool,
@@ -57,33 +65,38 @@ pub struct Snapshot {
     pub cars: Vec<CarEntry>,
     pub tracks: Vec<TrackEntry>,
     pub installed: Option<String>,
+    /// Numeric CSP build parsed from `extension/config/data_manifest.ini` or known patches.
+    pub installed_csp_build: Option<u32>,
     /// sha256 of the live dwrite.dll, used to tell which patch is active.
     pub installed_sha: Option<String>,
     pub patches: Vec<LightsPatch>,
     pub game_running: bool,
 }
 
-enum Msg {
+#[allow(dead_code)]
+pub(crate) enum Msg {
     Notice(Notice),
-    /// A rescan result, tagged with the generation of the request that made it.
     Snapshot(u64, Snapshot),
-    /// The current answer of the periodic game check.
     GameRunning(bool),
-    /// The answer of one server poll, keyed by `host:port`.
     Server(String, Result<(acxs_manager::server_status::ServerStatus, u128), String>),
-    /// The public server list from the lobby.
     Lobby(Result<Vec<acxs_manager::lobby::LobbyServer>, String>),
-    /// One page of the background refresh of the public list; `last` closes the refresh.
     LobbyPart { servers: Vec<acxs_manager::lobby::LobbyServer>, total: u64, last: bool },
+    OpenUri(JoinUri),
+    FocusWindow,
+    DownloadFinished(Notice),
+    BookingReady(String, Result<(), String>),
 }
 
-/// How often the background thread checks whether the game is running.
 const GAME_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub struct App {
     settings: Settings,
     recorder: Arc<acxs_manager::session_recorder::RecorderControl>,
     page: Page,
+    last_synced_page: Page,
+    pub route: Route,
+    pub nav_state: NavState,
+    pub focus: FocusNav,
     ac_input: String,
     library_input: String,
     car_query: String,
@@ -95,9 +108,7 @@ pub struct App {
     confirm_uninstall: bool,
     snapshot: Snapshot,
     busy: bool,
-    /// Number of background jobs started by [`App::spawn`] that have not reported yet.
     pending: usize,
-    /// Generation of the newest rescan request; older snapshots are dropped.
     generation: u64,
     notices: VecDeque<Notice>,
     ctx: egui::Context,
@@ -112,22 +123,19 @@ pub struct App {
     palette_sel: usize,
     toasts: Vec<Toast>,
     servers: servers::Servers,
-    /// Cards per row in the last grid drawn, for arrow-key movement.
     grid_columns: usize,
-    /// Set by a detail panel; the Quick Race tool is filled in and opened after the frame.
     race_request: Option<pages::RaceAction>,
-    /// Set while the Cars or Tracks page is choosing something for Quick Race.
     picker: Option<tools::PickKind>,
     window: window_state::Tracker,
-    /// Entries pinned to the top of the sidebar, by name.
+    /// Legacy pinned entries migrated read-only from `sidebar.json` into `Ctrl+K`.
     pinned: Vec<String>,
-    /// "More tools" is unfolded.
-    more_open: bool,
+    gl_renderer: Option<Arc<Mutex<viewport3d::GlRenderer>>>,
+    _ipc: Option<IpcListener>,
+    quick_switches_open: bool,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
 }
 
-/// Collect everything the UI shows. Runs on a background thread.
 fn gather(ac_root: Option<PathBuf>, library: PathBuf) -> Snapshot {
     let game_running = game::is_game_running();
     let mut snapshot = Snapshot { game_running, ..Snapshot::default() };
@@ -137,6 +145,7 @@ fn gather(ac_root: Option<PathBuf>, library: PathBuf) -> Snapshot {
         snapshot.cars = scan_cars(&root);
         snapshot.tracks = scan_tracks(&root);
         snapshot.installed = csp::installed_version(&root).ok().flatten();
+        snapshot.installed_csp_build = csp::installed_build(&root);
         snapshot.installed_sha = csp::sha256_file(&root.join(csp::DLL_NAME)).ok();
         roots.push(csp::archive_dir(&root));
     }
@@ -144,8 +153,6 @@ fn gather(ac_root: Option<PathBuf>, library: PathBuf) -> Snapshot {
     snapshot
 }
 
-/// Checks every [`GAME_POLL`] whether the game runs and reports changes, so the
-/// "running" state the pages and tools rely on never goes stale.
 fn start_game_watch(tx: Sender<Msg>, ctx: egui::Context) {
     thread::spawn(move || {
         let mut last = None;
@@ -164,9 +171,16 @@ fn start_game_watch(tx: Sender<Msg>, ctx: egui::Context) {
 }
 
 impl App {
+    /// Standard constructor (delegates to [`App::new_with_uri`] with `None`).
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        theme::apply(&cc.egui_ctx);
+        Self::new_with_uri(cc, None)
+    }
+
+    /// Construct the app with an optional initial `acmanager://` / `acxs://` join URI.
+    pub fn new_with_uri(cc: &eframe::CreationContext<'_>, initial_uri: Option<JoinUri>) -> Self {
         let mut settings = Settings::load(&settings::settings_path());
+        theme::apply_with_accent(&cc.egui_ctx, settings.accent_preset);
+
         if settings.ac_root_path().is_none()
             && let Some(found) = settings::detect_ac_root()
         {
@@ -182,19 +196,45 @@ impl App {
                 let _ = acxs_manager::crash_report::send_pending(&dsn, &dir, std::time::Duration::from_secs(10));
             });
         }
+
         let recorder = Arc::new(acxs_manager::session_recorder::RecorderControl::default());
         {
             let ctx = cc.egui_ctx.clone();
             acxs_manager::session_recorder::spawn(Arc::clone(&recorder), move || ctx.request_repaint());
         }
-        let sidebar = App::load_sidebar();
+
+        let gl_renderer = cc
+            .wgpu_render_state
+            .as_ref()
+            .and_then(|rs| viewport3d::GlRenderer::new(rs).ok())
+            .map(|r| Arc::new(Mutex::new(r)));
+
         let (tx, rx) = mpsc::channel();
+
+        // Start single-instance IPC listener (no-op on non-Windows).
+        let ipc_tx = tx.clone();
+        let ipc_ctx = cc.egui_ctx.clone();
+        let ipc_listener = ipc::start_listener(move |msg| {
+            let sent = match msg {
+                IpcMessage::Focus => ipc_tx.send(Msg::FocusWindow),
+                IpcMessage::OpenUri(uri) => ipc_tx.send(Msg::OpenUri(uri)),
+            };
+            if sent.is_ok() {
+                ipc_ctx.request_repaint();
+            }
+        });
+
+        let pinned = App::load_legacy_pins();
         let mut app = App {
             ac_input: settings.ac_root.clone(),
             library_input: settings.patch_library.clone(),
             settings,
             recorder: Arc::clone(&recorder),
             page: Page::Home,
+            last_synced_page: Page::Home,
+            route: Route::Paddock(PaddockTab::Hub),
+            nav_state: NavState::default(),
+            focus: FocusNav::default(),
             car_query: String::new(),
             track_query: String::new(),
             car_skin: None,
@@ -223,15 +263,20 @@ impl App {
             race_request: None,
             picker: None,
             window: window_state::Tracker::new(),
-            pinned: sidebar.0,
-            more_open: sidebar.1,
+            pinned,
+            gl_renderer,
+            _ipc: Some(ipc_listener),
+            quick_switches_open: false,
             tx,
             rx,
         };
-        app.refresh();
-        // The public server list: the saved one is already loaded, this brings it up to date.
-        app.servers.start_refresh(&app.tx, &app.ctx);
 
+        if let Some(uri) = initial_uri {
+            let _ = app.tx.send(Msg::OpenUri(uri));
+        }
+
+        app.refresh();
+        app.servers.start_refresh(&app.tx, &app.ctx);
         start_game_watch(app.tx.clone(), app.ctx.clone());
         app
     }
@@ -247,7 +292,6 @@ impl App {
         self.notices.truncate(MAX_NOTICES);
     }
 
-    /// Run `work` on a background thread, then rescan and send the new snapshot.
     fn spawn(&mut self, work: impl FnOnce(Option<PathBuf>, PathBuf) -> Option<Notice> + Send + 'static) {
         self.busy = true;
         self.pending += 1;
@@ -270,18 +314,85 @@ impl App {
         self.spawn(|_, _| None);
     }
 
+    /// Navigate to a [`Route`], remembering the pillar's active tab and syncing `self.page`.
+    pub fn set_route(&mut self, route: Route) {
+        self.route = route;
+        self.nav_state.remember(route);
+        self.page = self.route_to_page(route);
+        self.last_synced_page = self.page;
+    }
+
+    fn route_to_page(&self, route: Route) -> Page {
+        match route {
+            Route::Paddock(PaddockTab::Hub) => Page::Home,
+            Route::Garage(GarageTab::Showroom) => Page::Showroom,
+            Route::Garage(GarageTab::Cars(CarSubView::Browser)) => Page::Cars,
+            Route::Garage(GarageTab::Tracks(TrackSubView::Browser)) => Page::Tracks,
+            Route::Online(OnlineTab::Browser) => Page::Servers,
+            Route::Setup(SetupTab::Csp(CspView::Installer)) => Page::Patches,
+            Route::Setup(SetupTab::App) => Page::Settings,
+            other => match other.tool_name() {
+                Some(name) => Page::Tool(self.tool_index(name)),
+                None => Page::Home,
+            },
+        }
+    }
+
+    fn sync_route_from_page(&mut self) {
+        if self.page == self.last_synced_page {
+            return;
+        }
+        let next = match self.page {
+            Page::Home => Route::Paddock(PaddockTab::Hub),
+            Page::Showroom => Route::Garage(GarageTab::Showroom),
+            Page::Servers => Route::Online(OnlineTab::Browser),
+            Page::Cars => Route::Garage(GarageTab::Cars(CarSubView::Browser)),
+            Page::Tracks => Route::Garage(GarageTab::Tracks(TrackSubView::Browser)),
+            Page::Patches => Route::Setup(SetupTab::Csp(CspView::Installer)),
+            Page::Settings => Route::Setup(SetupTab::App),
+            Page::Tool(i) => self
+                .tools
+                .get(i)
+                .and_then(|t| Route::from_tool_name(t.name()))
+                .unwrap_or(self.route),
+        };
+        self.route = next;
+        self.nav_state.remember(next);
+        self.last_synced_page = self.page;
+    }
+
+    fn handle_open_uri(&mut self, uri: JoinUri) {
+        let key = format!("{}:{}", uri.host, uri.http_port);
+        if !self.servers.entries.iter().any(|e| e.key() == key) {
+            self.servers.entries.push(servers::Entry {
+                host: uri.host.clone(),
+                port: uri.http_port,
+                favorite: false,
+            });
+        }
+        self.servers.show(key.clone());
+        self.set_route(Route::Online(OnlineTab::Browser));
+        self.push_notice(format!("Opened server invite {key}"), true);
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
     fn poll(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                Msg::Notice(notice) => self.push_notice(notice.text, notice.ok),
+                Msg::Notice(notice) | Msg::DownloadFinished(notice) => self.push_notice(notice.text, notice.ok),
                 Msg::GameRunning(running) => self.snapshot.game_running = running,
                 Msg::Server(key, result) => self.servers.apply(key, result),
                 Msg::Lobby(result) => self.servers.apply_lobby(result),
                 Msg::LobbyPart { servers, total, last } => self.servers.apply_part(servers, total, last),
+                Msg::OpenUri(uri) => self.handle_open_uri(uri),
+                Msg::FocusWindow => self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus),
+                Msg::BookingReady(key, outcome) => match outcome {
+                    Ok(()) => self.push_notice(format!("Booked slot on {key}"), true),
+                    Err(err) => self.push_notice(format!("Booking failed on {key}: {err}"), false),
+                },
                 Msg::Snapshot(generation, snapshot) => {
                     self.pending = self.pending.saturating_sub(1);
                     self.busy = self.pending > 0;
-                    // A slower, older rescan must not replace a newer result.
                     if generation < self.generation {
                         continue;
                     }
@@ -294,8 +405,26 @@ impl App {
                     if self.selected_track.as_deref().is_some_and(|id| !track_ids.contains(&id)) {
                         self.selected_track = None;
                     }
+                    self.ensure_armed_session();
                 }
             }
+        }
+    }
+
+    fn ensure_armed_session(&mut self) {
+        let armed = self.settings.armed_session.get_or_insert_with(ArmedSession::default);
+        if armed.car_id.is_empty()
+            && let Some(first) = self.snapshot.cars.first()
+        {
+            armed.car_id = first.id.clone();
+        }
+        if armed.track_id.is_empty()
+            && let Some(first) = self.snapshot.tracks.first()
+        {
+            armed.track_id = first.id.clone();
+        }
+        if armed.mode.is_empty() {
+            armed.mode = "Quick Race".into();
         }
     }
 
@@ -307,6 +436,10 @@ impl App {
             Err(e) => self.push_notice(format!("Could not save settings: {e}"), false),
         }
         self.refresh();
+    }
+
+    fn save_settings_quiet(&self) {
+        let _ = self.settings.save(&settings::settings_path());
     }
 
     fn install_patch(&mut self, patch: LightsPatch) {
@@ -361,22 +494,6 @@ impl App {
         }
     }
 
-    /// Tool indices grouped for the sidebar, in a fixed group order.
-    fn tool_groups(&self) -> Vec<(&'static str, Vec<usize>)> {
-        const ORDER: [&str; 10] =
-            ["Content", "Car", "Setup", "Race", "Graphics", "Telemetry", "Config", "Launch", "Server", "Diagnostics"];
-        let mut groups: Vec<(&'static str, Vec<usize>)> = Vec::new();
-        for (i, tool) in self.tools.iter().enumerate() {
-            match groups.iter_mut().find(|(g, _)| *g == tool.group()) {
-                Some((_, list)) => list.push(i),
-                None => groups.push((tool.group(), vec![i])),
-            }
-        }
-        groups.sort_by_key(|(g, _)| ORDER.iter().position(|o| o == g).unwrap_or(ORDER.len()));
-        groups
-    }
-
-    /// Index of the tool called `name`, or 0 when there is none.
     fn tool_index(&self, name: &str) -> usize {
         self.tools.iter().position(|t| t.name() == name).unwrap_or(0)
     }
@@ -405,7 +522,6 @@ impl App {
         }
     }
 
-    /// Pick a random car for the home banner.
     pub fn pick_random_car(&mut self) {
         let len = self.snapshot.cars.len();
         if len == 0 {
@@ -415,7 +531,6 @@ impl App {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.subsec_nanos() as usize)
             .unwrap_or(0);
-        // A few tries to land on a car that has a preview.
         for step in 0..40 {
             let car = &self.snapshot.cars[(nanos / 7 + step * 31) % len];
             if media::car_preview(&car.path, None).is_some() {
@@ -426,314 +541,515 @@ impl App {
         self.home_pick = Some(self.snapshot.cars[nanos % len].id.clone());
     }
 
-    fn page_title(&self) -> (Option<&'static str>, String) {
-        match self.page {
-            Page::Home => (None, "Home".into()),
-            Page::Showroom => (None, "Showroom".into()),
-            Page::Servers => (None, "Servers".into()),
-            Page::Cars => (None, "Cars".into()),
-            Page::Tracks => (None, "Tracks".into()),
-            Page::Patches => (None, "CSP Lights Patch".into()),
-            Page::Settings => (None, "Settings".into()),
-            Page::Tool(i) => match self.tools.get(i) {
-                Some(tool) => (Some(tool.group()), tool.name().to_string()),
-                None => (None, "Tools".into()),
-            },
-        }
-    }
-
-    fn sidebar_path() -> PathBuf {
+    /// Read-only migration of legacy `sidebar.json` pinned entries into `Ctrl+K`.
+    fn load_legacy_pins() -> Vec<String> {
         let settings_file = settings::settings_path();
-        settings_file.parent().unwrap_or(Path::new(".")).join("sidebar.json")
-    }
-
-    /// The pinned entries and whether "More tools" was left open, from the last session.
-    fn load_sidebar() -> (Vec<String>, bool) {
-        let value: serde_json::Value = std::fs::read_to_string(Self::sidebar_path())
+        let path = settings_file.parent().unwrap_or(Path::new(".")).join("sidebar.json");
+        let value: serde_json::Value = std::fs::read_to_string(path)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
-        let pinned = value["pinned"]
+        value["pinned"]
             .as_array()
             .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-            .unwrap_or_default();
-        (pinned, value["more_open"].as_bool().unwrap_or(false))
+            .unwrap_or_default()
     }
 
-    fn save_sidebar(&self) {
-        let value = serde_json::json!({ "pinned": self.pinned, "more_open": self.more_open });
-        let _ = std::fs::write(Self::sidebar_path(), value.to_string());
-    }
+    // -----------------------------------------------------------------------
+    // AAA 6-Pillar Top Bar (56 px)
+    // -----------------------------------------------------------------------
+    fn top_bar(&mut self, ui: &mut egui::Ui) {
+        let accent = theme::active_accent(ui.ctx());
+        let mut current_pillar = self.route.pillar();
+        let mut switched = false;
 
-    /// The Everyday sections of the sidebar. Everything else lives under "More tools".
-    fn nav_sections() -> Vec<(&'static str, Vec<NavEntry>)> {
-        use widgets::Icon;
-        let page = |key, icon, page| NavEntry { key, icon, page: Some(page) };
-        let tool = |key, icon| NavEntry { key, icon, page: None };
-        vec![
-            (
-                "Drive",
-                vec![
-                    page("Home", Icon::Home, Page::Home),
-                    tool("Quick Race", Icon::Play),
-                    tool("Events", Icon::Clock),
-                    page("Servers", Icon::Globe, Page::Servers),
-                ],
-            ),
-            (
-                "Garage",
-                vec![
-                    page("Cars", Icon::Car, Page::Cars),
-                    page("Tracks", Icon::Track, Page::Tracks),
-                    tool("Skins", Icon::Paint),
-                    tool("Livery Painter", Icon::Paint),
-                    tool("Setups", Icon::Sliders),
-                    tool("Mods", Icon::Grid),
-                ],
-            ),
-            (
-                "Results",
-                vec![
-                    tool("Sessions", Icon::Chart),
-                    tool("Lap Times", Icon::Clock),
-                    tool("Replay Viewer", Icon::Replay),
-                    tool("Live Telemetry", Icon::Chart),
-                    tool("Screenshots", Icon::Camera),
-                ],
-            ),
-            (
-                "Game setup",
-                vec![
-                    tool("Game Settings", Icon::Gear),
-                    tool("CSP Config", Icon::Layers),
-                    page("Lights Patch", Icon::Bulb, Page::Patches),
-                ],
-            ),
-        ]
-    }
-
-    /// Where a sidebar entry leads, when it exists in this build.
-    fn nav_target(&self, entry: &NavEntry) -> Option<Page> {
-        entry
-            .page
-            .or_else(|| self.tools.iter().position(|t| t.name() == entry.key).map(Page::Tool))
-    }
-
-    fn nav(&mut self, ui: &mut egui::Ui) {
-        // Brand.
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(34.0, 34.0), egui::Sense::hover());
-            ui.painter().rect_filled(rect, egui::CornerRadius::same(10), theme::ACCENT);
-            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "A", theme::bold(20.0), theme::BG);
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                ui.label(RichText::new("ACXS Manager").font(theme::bold(16.0)));
-                ui.label(RichText::new("Assetto Corsa").size(11.5).color(theme::FAINT));
-            });
-        });
-        ui.add_space(14.0);
-
-        // Looks like a search field, opens the command palette.
-        let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 36.0), egui::Sense::click());
-        let hovered = response.hovered();
-        ui.painter().rect_filled(rect, egui::CornerRadius::same(9), theme::INPUT);
-        ui.painter().rect_stroke(
-            rect,
-            egui::CornerRadius::same(9),
-            egui::Stroke::new(1.0, if hovered { theme::ACCENT.gamma_multiply(0.7) } else { theme::BORDER }),
-            egui::StrokeKind::Inside,
-        );
-        ui.painter().text(
-            rect.left_center() + egui::vec2(12.0, 0.0),
-            egui::Align2::LEFT_CENTER,
-            "Search or jump to…",
-            egui::FontId::proportional(13.5),
-            theme::MUTED,
-        );
-        let key = egui::Rect::from_center_size(rect.right_center() - egui::vec2(32.0, 0.0), egui::vec2(46.0, 20.0));
-        ui.painter().rect_filled(key, egui::CornerRadius::same(5), theme::CARD_HOVER);
-        ui.painter().text(key.center(), egui::Align2::CENTER_CENTER, "Ctrl K", egui::FontId::proportional(11.0), theme::MUTED);
-        if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-            self.palette_open = true;
-            self.palette_query.clear();
-            self.palette_sel = 0;
-        }
-        ui.add_space(4.0);
-
-        let mut goto: Option<Page> = None;
-        let mut toggle_pin: Option<String> = None;
-        let mut toggle_more = false;
-
-        // Settings and the version stay at the bottom, outside the scrolling list.
-        egui::Panel::bottom("nav_footer")
-            .frame(egui::Frame::new())
-            .show_separator_line(false)
-            .show(ui, |ui| {
-                ui.add_space(6.0);
-                if widgets::nav_icon_item(ui, self.page == Page::Settings, widgets::Icon::Gear, "Settings", None).clicked() {
-                    goto = Some(Page::Settings);
-                }
-                ui.horizontal(|ui| {
-                    ui.add_space(10.0);
-                    let version = format!("v{}  ·  Check for updates", env!("CARGO_PKG_VERSION"));
-                    let link = ui.add(egui::Label::new(RichText::new(version).size(11.5).color(theme::FAINT)).sense(egui::Sense::click()));
-                    if link.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                        ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique(pages::UPDATE_RUN_ID), true));
-                        goto = Some(Page::Settings);
-                    }
-                });
-            });
-
-        let sections = Self::nav_sections();
-        let curated_tools: HashSet<&str> = sections
-            .iter()
-            .flat_map(|(_, entries)| entries.iter().filter(|e| e.page.is_none()).map(|e| e.key))
-            .collect();
-        let have = self.snapshot.ac_valid;
-        let counts = [("Cars", self.snapshot.cars.len().to_string()), ("Tracks", self.snapshot.tracks.len().to_string())];
-        let active_tool = match self.page {
-            Page::Tool(i) => self.tools.get(i).map(|t| t.name()),
-            _ => None,
-        };
-
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            // One entry: icon, label, count; right-click pins or unpins it.
-            let mut entry_ui = |ui: &mut egui::Ui, this: &Self, entry: &NavEntry| {
-                let Some(target) = this.nav_target(entry) else { return };
-                let badge = counts.iter().find(|(k, _)| *k == entry.key && have).map(|(_, n)| n.as_str());
-                let response = widgets::nav_icon_item(ui, this.page == target, entry.icon, entry.key, badge);
-                let pinned = this.pinned.iter().any(|p| p == entry.key);
-                let response = response.on_hover_text("Right-click to pin or unpin");
-                if response.clicked() {
-                    goto = Some(target);
-                }
-                response.context_menu(|ui| {
-                    if ui.button(if pinned { "Unpin from the top" } else { "Pin to the top" }).clicked() {
-                        toggle_pin = Some(entry.key.to_string());
-                        ui.close();
-                    }
-                });
-            };
-
-            // Pinned entries, in the order they were pinned.
-            let everyday: Vec<&NavEntry> = sections.iter().flat_map(|(_, e)| e.iter()).collect();
-            let pinned_entries: Vec<NavEntry> = self
-                .pinned
-                .iter()
-                .filter_map(|key| {
-                    everyday.iter().find(|e| e.key == key.as_str()).map(|e| NavEntry { key: e.key, icon: e.icon, page: e.page }).or_else(|| {
-                        self.tools.iter().find(|t| t.name() == key).map(|t| NavEntry { key: t.name(), icon: widgets::Icon::Pin, page: None })
-                    })
-                })
-                .collect();
-            if !pinned_entries.is_empty() {
-                widgets::nav_section(ui, "Pinned");
-                for entry in &pinned_entries {
-                    entry_ui(ui, self, entry);
-                }
-            }
-
-            for (title, entries) in &sections {
-                widgets::nav_section(ui, title);
-                for entry in entries {
-                    entry_ui(ui, self, entry);
-                }
-            }
-
-            // Everything else, folded away until wanted.
-            let rest: Vec<(&'static str, Vec<usize>)> = self
-                .tool_groups()
-                .into_iter()
-                .map(|(group, indices)| (group, indices.into_iter().filter(|i| !curated_tools.contains(self.tools[*i].name())).collect::<Vec<_>>()))
-                .filter(|(_, indices)| !indices.is_empty())
-                .collect();
-            let rest_count: usize = rest.iter().map(|(_, i)| i.len()).sum();
-            let holds_active = active_tool.is_some_and(|name| rest.iter().any(|(_, idx)| idx.iter().any(|i| self.tools[*i].name() == name)));
-            let open = self.more_open || holds_active;
-            ui.add_space(10.0);
-            if widgets::nav_group(ui, open, "More tools", rest_count, holds_active) && !holds_active {
-                toggle_more = true;
-            }
-            if open {
-                for (group, indices) in &rest {
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(14.0);
-                        ui.label(RichText::new(group.to_uppercase()).font(theme::bold(10.5)).color(theme::FAINT));
-                    });
-                    for &i in indices {
-                        let name = self.tools[i].name();
-                        let response = widgets::nav_item(ui, active_tool == Some(name), name, None, 14.0)
-                            .on_hover_text("Right-click to pin or unpin");
-                        if response.clicked() {
-                            goto = Some(Page::Tool(i));
-                        }
-                        let pinned = self.pinned.iter().any(|p| p == name);
-                        response.context_menu(|ui| {
-                            if ui.button(if pinned { "Unpin from the top" } else { "Pin to the top" }).clicked() {
-                                toggle_pin = Some(name.to_string());
-                                ui.close();
-                            }
-                        });
-                    }
-                }
-            }
-            ui.add_space(8.0);
-        });
-
-        if toggle_more {
-            self.more_open = !self.more_open;
-            self.save_sidebar();
-        }
-        if let Some(key) = toggle_pin {
-            match self.pinned.iter().position(|p| *p == key) {
-                Some(i) => {
-                    self.pinned.remove(i);
-                }
-                None => self.pinned.push(key),
-            }
-            self.save_sidebar();
-        }
-        if let Some(page) = goto {
-            self.page = page;
-        }
-    }
-
-    fn header(&mut self, ui: &mut egui::Ui) {
-        let (group, title) = self.page_title();
         ui.horizontal_centered(|ui| {
-            if let Some(group) = group {
-                let _ = group;
-            }
-            ui.label(RichText::new(title).font(theme::bold(15.0)));
+            ui.spacing_mut().item_spacing.x = 12.0;
 
+            // Minimal ACXS motorsport emblem.
+            let (badge_rect, badge_resp) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::click());
+            ui.painter().rect_filled(badge_rect, CornerRadius::same(8), accent);
+            ui.painter().text(badge_rect.center(), Align2::CENTER_CENTER, "A", theme::display(20.0), theme::SURFACE_VOID);
+            if badge_resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                self.set_route(Route::Paddock(PaddockTab::Hub));
+            }
+            ui.label(RichText::new("ACXS").font(theme::display(20.0)).color(Color32::WHITE));
+            ui.add_space(6.0);
+
+            // 6 Primary Pillars with animated sliding underline.
+            let tabs: [(Pillar, &str, Option<&str>); 6] = [
+                (Pillar::Paddock, "Paddock", None),
+                (Pillar::Drive, "Drive", None),
+                (Pillar::Garage, "Garage", None),
+                (Pillar::Online, "Online", None),
+                (Pillar::Telemetry, "Telemetry", None),
+                (Pillar::Setup, "Setup", None),
+            ];
+            if widgets::animated_tabs(ui, "aaa_pillars", &mut current_pillar, &tabs) {
+                switched = true;
+            }
+
+            // Right utility cluster: Quick Switches, Live Status dots, Rescan, Ctrl+K.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Home has its own, larger launch button.
-                if self.page != Page::Home {
-                    let can_launch = self.snapshot.ac_valid && !self.snapshot.game_running;
-                    if ui.add_enabled(can_launch, widgets::primary_button("Launch Assetto Corsa")).clicked() {
-                        self.launch_game();
-                    }
+                ui.spacing_mut().item_spacing.x = 8.0;
+
+                // Quick Switches toggle button.
+                let qs_btn = ui
+                    .add(egui::Button::new(RichText::new("⚡").size(14.0)).min_size(vec2(32.0, 30.0)))
+                    .on_hover_text("Quick Switches & Accent");
+                if qs_btn.clicked() {
+                    self.quick_switches_open = !self.quick_switches_open;
                 }
-                if ui.add_enabled(!self.busy, egui::Button::new("Rescan")).clicked() {
+
+                // Compact Ctrl+K command palette trigger.
+                let (k_rect, k_resp) = ui.allocate_exact_size(vec2(138.0, 30.0), Sense::click());
+                let k_hov = k_resp.hovered();
+                ui.painter().rect_filled(k_rect, CornerRadius::same(8), theme::SURFACE_VOID);
+                ui.painter().rect_stroke(
+                    k_rect,
+                    CornerRadius::same(8),
+                    Stroke::new(1.0, if k_hov { accent.gamma_multiply(0.75) } else { theme::BORDER_SUBTLE }),
+                    StrokeKind::Inside,
+                );
+                ui.painter().text(
+                    k_rect.left_center() + vec2(10.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    "Search…",
+                    egui::FontId::proportional(12.5),
+                    theme::MUTED,
+                );
+                let chip = Rect::from_center_size(k_rect.right_center() - vec2(26.0, 0.0), vec2(40.0, 18.0));
+                ui.painter().rect_filled(chip, CornerRadius::same(4), theme::SURFACE_RAISED);
+                ui.painter().text(chip.center(), Align2::CENTER_CENTER, "Ctrl K", theme::mono(10.0), theme::MUTED);
+                if k_resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    self.palette_open = true;
+                    self.palette_query.clear();
+                    self.palette_sel = 0;
+                }
+
+                // Rescan icon button.
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new("Rescan").min_size(vec2(0.0, 30.0)))
+                    .clicked()
+                {
                     self.refresh();
                 }
-                ui.add_space(6.0);
-                let (csp_text, csp_color) = match self.snapshot.installed.as_deref() {
-                    None => ("CSP: none".to_string(), theme::FAINT),
-                    Some(crate::csp::UNRECOGNIZED) => ("CSP: unrecognized".to_string(), theme::WARN),
-                    Some(v) => (format!("CSP {v}"), theme::INFO),
+
+                // Compact live status dot cluster (Game / CSP / Recording).
+                let recording = self.recorder.recording.load(std::sync::atomic::Ordering::Relaxed);
+                if recording {
+                    widgets::status_pill(ui, "REC", theme::DANGER);
+                }
+                let (csp_text, csp_color) = match (&self.snapshot.installed, self.snapshot.installed_csp_build) {
+                    (None, _) => ("CSP off".to_string(), theme::FAINT),
+                    (Some(v), Some(b)) if v == crate::csp::UNRECOGNIZED => (format!("CSP #{b}"), theme::INFO),
+                    (Some(v), _) if v == crate::csp::UNRECOGNIZED => ("CSP custom".to_string(), theme::WARN),
+                    (Some(v), _) => (format!("CSP {v}"), theme::INFO),
                 };
                 widgets::status_pill(ui, &csp_text, csp_color);
                 let (game_text, game_color) =
-                    if self.snapshot.game_running { ("Game running", theme::OK) } else { ("Game closed", theme::FAINT) };
+                    if self.snapshot.game_running { ("LIVE", theme::OK) } else { ("IDLE", theme::FAINT) };
                 widgets::status_pill(ui, game_text, game_color);
-                if self.recorder.recording.load(std::sync::atomic::Ordering::Relaxed) {
-                    widgets::status_pill(ui, "Recording session", theme::INFO);
+            });
+        });
+
+        if switched {
+            let next = self.nav_state.route_for(current_pillar);
+            self.set_route(next);
+        }
+    }
+
+    /// Floating Quick Switches & Accent Preset popover anchored below the Top Bar.
+    fn quick_switches_popover(&mut self, ctx: &egui::Context) {
+        if !self.quick_switches_open {
+            return;
+        }
+        let mut changed = false;
+        let mut close = false;
+        let area = egui::Area::new(egui::Id::unique("quick_switches_pop"))
+            .anchor(Align2::RIGHT_TOP, vec2(-18.0, 62.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                theme::card_glass().show(ui, |ui| {
+                    ui.set_width(250.0);
+                    ui.label(theme::micro_label("Quick Switches"));
+                    ui.add_space(6.0);
+                    for (label, flag) in [
+                        ("VR Mode", &mut self.settings.quick_switches.vr_mode),
+                        ("Show FPS", &mut self.settings.quick_switches.show_fps),
+                        ("Auto-record sessions", &mut self.settings.quick_switches.auto_record),
+                        ("Skip intro", &mut self.settings.quick_switches.skip_intro),
+                    ] {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(label).size(13.0));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if widgets::toggle(ui, flag).changed() {
+                                    changed = true;
+                                }
+                            });
+                        });
+                    }
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+                    ui.label(theme::micro_label("Accent Theme"));
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        for (preset, name) in [
+                            (AccentPreset::MotorsportRed, "Racing"),
+                            (AccentPreset::TelemetryCyan, "Cyan"),
+                            (AccentPreset::AmberGold, "Amber"),
+                            (AccentPreset::Emerald, "Emerald"),
+                        ] {
+                            let c = theme::accent_color(preset);
+                            let selected = self.settings.accent_preset == preset;
+                            let (r, resp) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::click());
+                            ui.painter().circle_filled(r.center(), 10.0, c);
+                            if selected {
+                                ui.painter().circle_stroke(r.center(), 12.5, Stroke::new(2.0, Color32::WHITE));
+                            }
+                            if resp.on_hover_text(name).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                self.settings.accent_preset = preset;
+                                theme::apply_accent(ctx, preset);
+                                changed = true;
+                            }
+                        }
+                    });
+                });
+            });
+        let clicked_outside = ctx.input(|i| i.pointer.any_click())
+            && ctx.pointer_interact_pos().is_some_and(|p| !area.response.rect.contains(p));
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) || clicked_outside {
+            close = true;
+        }
+        if changed {
+            self.save_settings_quiet();
+        }
+        if close {
+            self.quick_switches_open = false;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Contextual Sub-Nav Strip (38 px)
+    // -----------------------------------------------------------------------
+    fn sub_nav(&mut self, ui: &mut egui::Ui) {
+        let mut next: Option<Route> = None;
+        let cars_badge = self.snapshot.ac_valid.then(|| self.snapshot.cars.len().to_string());
+        let tracks_badge = self.snapshot.ac_valid.then(|| self.snapshot.tracks.len().to_string());
+
+        ui.horizontal_centered(|ui| {
+            match self.route {
+                Route::Paddock(_) => {}
+                Route::Drive(mut tab) => {
+                    let tabs = [
+                        (DriveTab::QuickRace, "Quick Race", None),
+                        (DriveTab::Events, "Events", None),
+                        (DriveTab::Championships, "Championships", None),
+                        (DriveTab::Launcher, "Launcher", None),
+                    ];
+                    if widgets::animated_tabs(ui, "sub_drive", &mut tab, &tabs) {
+                        next = Some(Route::Drive(tab));
+                    }
+                }
+                Route::Garage(tab) => {
+                    #[derive(Clone, Copy, PartialEq, Eq)]
+                    enum G { Showroom, Cars, Tracks, Setups, Studio, Library }
+                    let mut g = match tab {
+                        GarageTab::Showroom => G::Showroom,
+                        GarageTab::Cars(_) => G::Cars,
+                        GarageTab::Tracks(_) => G::Tracks,
+                        GarageTab::Setups(_) => G::Setups,
+                        GarageTab::Studio(_) => G::Studio,
+                        GarageTab::Library(_) => G::Library,
+                    };
+                    let tabs = [
+                        (G::Showroom, "Showroom", None),
+                        (G::Cars, "Cars", cars_badge.as_deref()),
+                        (G::Tracks, "Tracks", tracks_badge.as_deref()),
+                        (G::Setups, "Setups", None),
+                        (G::Studio, "Studio", None),
+                        (G::Library, "Library", None),
+                    ];
+                    if widgets::animated_tabs(ui, "sub_garage", &mut g, &tabs) {
+                        next = Some(Route::Garage(match g {
+                            G::Showroom => GarageTab::Showroom,
+                            G::Cars => GarageTab::Cars(CarSubView::Browser),
+                            G::Tracks => GarageTab::Tracks(TrackSubView::Browser),
+                            G::Setups => GarageTab::Setups(SetupsView::Editor),
+                            G::Studio => GarageTab::Studio(StudioView::Skins),
+                            G::Library => GarageTab::Library(LibraryView::Mods),
+                        }));
+                    }
+                    // Secondary sub-view pills on the right when applicable.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match tab {
+                        GarageTab::Cars(cur) => {
+                            for (v, lbl) in [(CarSubView::Tuning, "Tuning"), (CarSubView::Specs, "Specs"), (CarSubView::Browser, "Grid")] {
+                                if ui.selectable_label(cur == v, lbl).clicked() {
+                                    next = Some(Route::Garage(GarageTab::Cars(v)));
+                                }
+                            }
+                        }
+                        GarageTab::Tracks(cur) => {
+                            for (v, lbl) in [(TrackSubView::Inspector, "Inspector"), (TrackSubView::Browser, "Grid")] {
+                                if ui.selectable_label(cur == v, lbl).clicked() {
+                                    next = Some(Route::Garage(GarageTab::Tracks(v)));
+                                }
+                            }
+                        }
+                        GarageTab::Setups(cur) => {
+                            for (v, lbl) in [(SetupsView::AbTest, "A/B Test"), (SetupsView::Advice, "Advice"), (SetupsView::Editor, "Editor")] {
+                                if ui.selectable_label(cur == v, lbl).clicked() {
+                                    next = Some(Route::Garage(GarageTab::Setups(v)));
+                                }
+                            }
+                        }
+                        GarageTab::Studio(cur) => {
+                            for (v, lbl) in [
+                                (StudioView::ModelTools, "3D / AO"),
+                                (StudioView::PlateDesigner, "Plates"),
+                                (StudioView::LiveryPainter, "Livery Painter"),
+                                (StudioView::Skins, "Skins"),
+                            ] {
+                                if ui.selectable_label(cur == v, lbl).clicked() {
+                                    next = Some(Route::Garage(GarageTab::Studio(v)));
+                                }
+                            }
+                        }
+                        GarageTab::Library(cur) => {
+                            for (v, lbl) in [
+                                (LibraryView::Exports, "Exports"),
+                                (LibraryView::Metadata, "Metadata"),
+                                (LibraryView::Collections, "Collections"),
+                                (LibraryView::Installer, "Installer"),
+                                (LibraryView::Mods, "Mods"),
+                            ] {
+                                if ui.selectable_label(cur == v, lbl).clicked() {
+                                    next = Some(Route::Garage(GarageTab::Library(v)));
+                                }
+                            }
+                        }
+                        GarageTab::Showroom => {}
+                    });
+                }
+                Route::Online(mut tab) => {
+                    let tabs = [
+                        (OnlineTab::Browser, "Server Browser", None),
+                        (OnlineTab::HostServer, "Dedicated Server", None),
+                    ];
+                    if widgets::animated_tabs(ui, "sub_online", &mut tab, &tabs) {
+                        next = Some(Route::Online(tab));
+                    }
+                }
+                Route::Telemetry(mut tab) => {
+                    let tabs = [
+                        (TelemetryTab::Sessions, "Sessions", None),
+                        (TelemetryTab::Live, "Live", None),
+                        (TelemetryTab::Replay, "Replay", None),
+                        (TelemetryTab::Trajectory, "Trajectory", None),
+                        (TelemetryTab::LapTimes, "Lap Times", None),
+                        (TelemetryTab::Timing, "Timing", None),
+                        (TelemetryTab::Strategy, "Strategy", None),
+                        (TelemetryTab::Engineer, "Engineer", None),
+                        (TelemetryTab::Media, "Media", None),
+                    ];
+                    if widgets::animated_tabs(ui, "sub_telemetry", &mut tab, &tabs) {
+                        next = Some(Route::Telemetry(tab));
+                    }
+                }
+                Route::Setup(tab) => {
+                    #[derive(Clone, Copy, PartialEq, Eq)]
+                    enum S { VideoAudio, ControlsHud, Csp, WeatherFx, System, App }
+                    let mut s = match tab {
+                        SetupTab::VideoAudio(_) => S::VideoAudio,
+                        SetupTab::ControlsHud(_) => S::ControlsHud,
+                        SetupTab::Csp(_) => S::Csp,
+                        SetupTab::WeatherFx => S::WeatherFx,
+                        SetupTab::System(_) => S::System,
+                        SetupTab::App => S::App,
+                    };
+                    let tabs = [
+                        (S::VideoAudio, "Video & Audio", None),
+                        (S::ControlsHud, "Controls & HUD", None),
+                        (S::Csp, "CSP & Lights", None),
+                        (S::WeatherFx, "WeatherFX", None),
+                        (S::System, "System", None),
+                        (S::App, "App", None),
+                    ];
+                    if widgets::animated_tabs(ui, "sub_setup", &mut s, &tabs) {
+                        next = Some(Route::Setup(match s {
+                            S::VideoAudio => SetupTab::VideoAudio(VideoView::Video),
+                            S::ControlsHud => SetupTab::ControlsHud(ControlsView::Controls),
+                            S::Csp => SetupTab::Csp(CspView::Config),
+                            S::WeatherFx => SetupTab::WeatherFx,
+                            S::System => SetupTab::System(SystemView::InstallFinder),
+                            S::App => SetupTab::App,
+                        }));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match tab {
+                        SetupTab::VideoAudio(cur) => {
+                            for (v, lbl) in [
+                                (VideoView::Profiles, "Profiles"),
+                                (VideoView::CameraReplay, "Camera & Replay"),
+                                (VideoView::Audio, "Audio"),
+                                (VideoView::VrTriple, "VR & Triple"),
+                                (VideoView::Video, "Video"),
+                            ] {
+                                if ui.selectable_label(cur == v, lbl).clicked() {
+                                    next = Some(Route::Setup(SetupTab::VideoAudio(v)));
+                                }
+                            }
+                        }
+                        SetupTab::ControlsHud(cur) => {
+                            for (v, lbl) in [
+                                (ControlsView::HudLayout, "HUD Layout"),
+                                (ControlsView::RigProfiles, "Rig Profiles"),
+                                (ControlsView::Ffb, "FFB"),
+                                (ControlsView::Controls, "Controls"),
+                            ] {
+                                if ui.selectable_label(cur == v, lbl).clicked() {
+                                    next = Some(Route::Setup(SetupTab::ControlsHud(v)));
+                                }
+                            }
+                        }
+                        SetupTab::Csp(cur) => {
+                            for (v, lbl) in [
+                                (CspView::Lighting, "Lighting"),
+                                (CspView::Installer, "Lights Patch"),
+                                (CspView::Config, "CSP Config"),
+                            ] {
+                                if ui.selectable_label(cur == v, lbl).clicked() {
+                                    next = Some(Route::Setup(SetupTab::Csp(v)));
+                                }
+                            }
+                        }
+                        SetupTab::System(cur) => {
+                            for (v, lbl) in [(SystemView::Logs, "Logs"), (SystemView::InstallFinder, "Installs")] {
+                                if ui.selectable_label(cur == v, lbl).clicked() {
+                                    next = Some(Route::Setup(SetupTab::System(v)));
+                                }
+                            }
+                        }
+                        SetupTab::WeatherFx | SetupTab::App => {}
+                    });
+                }
+            }
+        });
+
+        if let Some(route) = next {
+            self.set_route(route);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Persistent Bottom Paddock Dock (62 px)
+    // -----------------------------------------------------------------------
+    fn paddock_dock(&mut self, ui: &mut egui::Ui) {
+        let armed = self.settings.armed_session.clone().unwrap_or_default();
+        let car_label = self
+            .snapshot
+            .cars
+            .iter()
+            .find(|c| c.id == armed.car_id)
+            .map(|c| c.name.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(if armed.car_id.is_empty() { "Select car" } else { armed.car_id.as_str() });
+        let track_label = self
+            .snapshot
+            .tracks
+            .iter()
+            .find(|t| t.id == armed.track_id)
+            .map(|t| t.name.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(if armed.track_id.is_empty() { "Select track" } else { armed.track_id.as_str() });
+        let mode_label = if armed.mode.is_empty() { "Quick Race" } else { armed.mode.as_str() };
+
+        let mut goto: Option<Route> = None;
+        let mut launch = false;
+
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = 14.0;
+
+            // Armed car pill (click → Garage Cars).
+            let car_btn = ui
+                .add(
+                    egui::Button::new(
+                        RichText::new(format!(
+                            "CAR  {}",
+                            if armed.skin_id.is_empty() {
+                                car_label.to_string()
+                            } else {
+                                format!("{car_label} · {}", armed.skin_id)
+                            }
+                        ))
+                        .font(theme::bold(13.0)),
+                    )
+                    .fill(theme::SURFACE_RAISED)
+                    .min_size(vec2(0.0, 36.0)),
+                )
+                .on_hover_text("Change armed car in Garage");
+            if car_btn.clicked() {
+                goto = Some(Route::Garage(GarageTab::Cars(CarSubView::Browser)));
+            }
+
+            // Armed track pill (click → Drive Quick Race).
+            let track_btn = ui
+                .add(
+                    egui::Button::new(
+                        RichText::new(format!(
+                            "TRACK  {}",
+                            if armed.layout_id.is_empty() {
+                                track_label.to_string()
+                            } else {
+                                format!("{track_label} · {}", armed.layout_id)
+                            }
+                        ))
+                        .font(theme::bold(13.0)),
+                    )
+                    .fill(theme::SURFACE_RAISED)
+                    .min_size(vec2(0.0, 36.0)),
+                )
+                .on_hover_text("Configure race & conditions in Drive");
+            if track_btn.clicked() {
+                goto = Some(Route::Drive(DriveTab::QuickRace));
+            }
+
+            widgets::pill(ui, mode_label, theme::INFO);
+
+            // Compact live status / last notice readout.
+            if self.busy {
+                ui.add(egui::Spinner::new().size(14.0));
+                ui.label(RichText::new("Working…").size(12.5).color(theme::MUTED));
+            } else if let Some(notice) = self.notices.front().cloned() {
+                let color = if notice.ok { theme::OK } else { theme::DANGER };
+                let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
+                ui.painter().circle_filled(dot.center(), 3.5, color);
+                ui.add(egui::Label::new(RichText::new(notice.text).size(12.5).color(theme::MUTED)).truncate());
+            }
+
+            // Right: Single unambiguous DRIVE ▶ CTA.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let can_launch = self.snapshot.ac_valid && !self.snapshot.game_running;
+                let cta_text = if self.snapshot.game_running {
+                    "GAME RUNNING"
+                } else {
+                    match &armed.target {
+                        LaunchTarget::QuickRace => "DRIVE  ▶",
+                        LaunchTarget::OnlineServer { .. } => "REJOIN  ▶",
+                    }
+                };
+                if widgets::cta_button(ui, cta_text, vec2(148.0, 40.0), can_launch).clicked() {
+                    launch = true;
                 }
             });
         });
+
+        if let Some(route) = goto {
+            self.set_route(route);
+        }
+        if launch {
+            self.launch_game();
+        }
     }
 
     fn tool_page(&mut self, ui: &mut egui::Ui, index: usize) {
@@ -742,68 +1058,47 @@ impl App {
             ac_valid: self.snapshot.ac_valid,
             game_running: self.snapshot.game_running,
             sessions_saved: self.recorder.saved.load(std::sync::atomic::Ordering::Relaxed),
+            gl: self.gl_renderer.clone(),
         };
         let mut notices = Vec::new();
         if let Some(tool) = self.tools.get_mut(index) {
             let full = ui.max_rect();
             let width = full.width().min(tool.content_width());
-            let rect = egui::Rect::from_center_size(full.center(), egui::vec2(width, full.height()));
+            let rect = Rect::from_center_size(full.center(), vec2(width, full.height()));
             ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| tool.ui(ui, &ctx, &mut notices));
         } else {
             widgets::empty_state(ui, "This tool is not available.");
         }
         if let Some(name) = self.tools.get_mut(index).and_then(|tool| tool.take_goto()) {
-            self.page = Page::Tool(self.tool_index(name));
+            if let Some(route) = Route::from_tool_name(name) {
+                self.set_route(route);
+            } else {
+                self.page = Page::Tool(self.tool_index(name));
+                self.last_synced_page = self.page;
+            }
         }
         let picked = self.tools.get_mut(index).and_then(|tool| tool.take_pick());
         if let Some(kind) = picked {
             self.picker = Some(kind);
-            self.page = match kind {
-                tools::PickKind::Car => Page::Cars,
-                tools::PickKind::Track => Page::Tracks,
-            };
+            match kind {
+                tools::PickKind::Car => self.set_route(Route::Garage(GarageTab::Cars(CarSubView::Browser))),
+                tools::PickKind::Track => self.set_route(Route::Garage(GarageTab::Tracks(TrackSubView::Browser))),
+            }
         }
         for notice in notices {
             self.push_notice(notice.text, notice.ok);
         }
     }
 
-    fn status_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_centered(|ui| {
-            if self.busy {
-                ui.add(egui::Spinner::new().size(14.0));
-                ui.label(RichText::new("Working…").size(13.0).color(theme::MUTED));
-            }
-            let response = if let Some(notice) = self.notices.front().cloned() {
-                let color = if notice.ok { theme::OK } else { theme::DANGER };
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                ui.painter().circle_filled(rect.center(), 3.5, color);
-                ui.add(egui::Label::new(RichText::new(notice.text).size(13.0)).truncate())
-            } else if self.busy {
-                ui.label("")
-            } else {
-                ui.label(RichText::new("Ready").size(13.0).color(theme::MUTED))
-            };
-            if self.notices.len() > 1 {
-                response.on_hover_ui(|ui| {
-                    ui.label(RichText::new("Recent messages").font(theme::bold(12.5)).color(theme::MUTED));
-                    for notice in &self.notices {
-                        let color = if notice.ok { theme::TEXT } else { theme::DANGER };
-                        ui.label(RichText::new(&notice.text).size(12.5).color(color));
-                    }
-                });
-            }
-        });
-    }
-
-    /// The Ctrl+K command palette: pages, tools, actions, cars and tracks in one list.
-    #[allow(deprecated)]
+    // -----------------------------------------------------------------------
+    // Ctrl+K Command Palette (Pillars, SubTabs, Tools, Legacy Pins, Cars, Tracks, Servers)
+    // -----------------------------------------------------------------------
     fn palette(&mut self, ctx: &egui::Context) {
         if !self.palette_open {
             return;
         }
         enum Do {
-            Go(Page),
+            Go(Route),
             Car(String),
             Track(String),
             Server(String),
@@ -813,28 +1108,41 @@ impl App {
         let query = self.palette_query.trim().to_lowercase();
         let hit = |text: &str| query.is_empty() || text.to_lowercase().contains(&query);
         let mut items: Vec<(String, String, Do)> = Vec::new();
-        for (page, name) in [
-            (Page::Home, "Home"),
-            (Page::Showroom, "Showroom"),
-            (Page::Servers, "Servers"),
-            (Page::Cars, "Cars"),
-            (Page::Tracks, "Tracks"),
-            (Page::Patches, "CSP Lights Patch"),
-            (Page::Settings, "Settings"),
-        ] {
-            if hit(name) {
-                items.push((name.into(), "Go to".into(), Do::Go(page)));
+
+        // Legacy pinned entries from `sidebar.json` appear first when query is empty.
+        if query.is_empty() {
+            for pin in &self.pinned {
+                if let Some(route) = Route::from_tool_name(pin) {
+                    items.push((pin.clone(), "Pinned".into(), Do::Go(route)));
+                }
             }
         }
-        if hit("launch assetto corsa") {
+
+        for pillar in Pillar::ALL {
+            if hit(pillar.label()) {
+                items.push((pillar.label().into(), "Pillar".into(), Do::Go(self.nav_state.route_for(pillar))));
+            }
+        }
+        if hit("launch assetto corsa") || hit("drive") {
             items.push(("Launch Assetto Corsa".into(), "Action".into(), Do::Launch));
         }
         if hit("rescan") {
             items.push(("Rescan content".into(), "Action".into(), Do::Rescan));
         }
-        for (i, tool) in self.tools.iter().enumerate() {
-            if hit(tool.name()) || hit(tool.group()) {
-                items.push((tool.name().into(), format!("Tool  ·  {}", tool.group()), Do::Go(Page::Tool(i))));
+        for route in Route::all_routes() {
+            if hit(route.title()) || hit(route.pillar().label()) {
+                let title = route.title().to_string();
+                if !items.iter().any(|(l, _, _)| *l == title) {
+                    items.push((title, format!("{} · Workspace", route.pillar().label()), Do::Go(route)));
+                }
+            }
+        }
+        for tool in &self.tools {
+            if (hit(tool.name()) || hit(tool.group()))
+                && !items.iter().any(|(l, _, _)| l == tool.name())
+                && let Some(route) = Route::from_tool_name(tool.name())
+            {
+                items.push((tool.name().into(), format!("Tool · {}", tool.group()), Do::Go(route)));
             }
         }
         if query.len() >= 2 {
@@ -845,13 +1153,13 @@ impl App {
                 .filter(|c| hit(&c.name) || hit(&c.brand) || hit(&c.id))
                 .take(8)
             {
-                items.push((car.name.clone(), format!("Car  ·  {}", car.brand), Do::Car(car.id.clone())));
+                items.push((car.name.clone(), format!("Car · {}", car.brand), Do::Car(car.id.clone())));
             }
             for track in self.snapshot.tracks.iter().filter(|t| hit(&t.name) || hit(&t.country)).take(5) {
-                items.push((track.name.clone(), format!("Track  ·  {}", track.country), Do::Track(track.id.clone())));
+                items.push((track.name.clone(), format!("Track · {}", track.country), Do::Track(track.id.clone())));
             }
             for (key, name, hint) in self.servers.search(&query, 6) {
-                items.push((name, format!("Server  ·  {hint}"), Do::Server(key)));
+                items.push((name, format!("Server · {hint}"), Do::Server(key)));
             }
         }
         items.truncate(14);
@@ -872,73 +1180,71 @@ impl App {
             self.palette_sel = (self.palette_sel + items.len() - 1) % items.len();
         }
 
-        // Dim everything behind.
         let screen = ctx.content_rect();
-        let dim = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("palette_dim")));
-        dim.rect_filled(screen, 0, egui::Color32::from_black_alpha(150));
+        let dim = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("palette_dim")));
+        dim.rect_filled(screen, 0, Color32::from_black_alpha(160));
 
+        let accent = theme::active_accent(ctx);
         let mut chosen: Option<usize> = None;
-        let area = egui::Area::new(egui::Id::new("palette"))
-            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 90.0))
+        let area = egui::Area::new(egui::Id::unique("palette"))
+            .anchor(Align2::CENTER_TOP, vec2(0.0, 84.0))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                egui::Frame::new()
-                    .fill(theme::CARD)
-                    .stroke(egui::Stroke::new(1.0, theme::BORDER_STRONG))
-                    .corner_radius(egui::CornerRadius::same(16))
-                    .shadow(ctx.global_style().visuals.popup_shadow)
-                    .inner_margin(egui::Margin::same(10))
-                    .show(ui, |ui| {
-                        ui.set_width(560.0);
-                        let edit = ui.add(
-                            egui::TextEdit::singleline(&mut self.palette_query)
-                                .hint_text("Type to search tools, cars, tracks, servers…")
-                                .desired_width(f32::INFINITY)
-                                .font(egui::FontId::proportional(17.0))
-                                .margin(egui::Margin::symmetric(12, 10)),
+                theme::card_glass().inner_margin(Margin::same(12)).show(ui, |ui| {
+                    ui.set_width(580.0);
+                    let edit = ui.add(
+                        egui::TextEdit::singleline(&mut self.palette_query)
+                            .hint_text("Jump to pillars, tools, cars, tracks, servers…")
+                            .desired_width(f32::INFINITY)
+                            .font(egui::FontId::proportional(16.5))
+                            .margin(Margin::symmetric(12, 10)),
+                    );
+                    edit.request_focus();
+                    if edit.changed() {
+                        self.palette_sel = 0;
+                    }
+                    ui.add_space(6.0);
+                    if items.is_empty() {
+                        ui.add_space(14.0);
+                        ui.vertical_centered(|ui| ui.label(RichText::new("Nothing matches.").color(theme::MUTED)));
+                        ui.add_space(14.0);
+                    }
+                    for (i, (label, hint, _)) in items.iter().enumerate() {
+                        let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::click());
+                        if response.hovered() && ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
+                            self.palette_sel = i;
+                        }
+                        let selected = i == self.palette_sel;
+                        if selected {
+                            ui.painter().rect_filled(rect, CornerRadius::same(9), accent.gamma_multiply(0.16));
+                            let bar = Rect::from_center_size(rect.left_center() + vec2(3.0, 0.0), vec2(3.0, 18.0));
+                            ui.painter().rect_filled(bar, CornerRadius::same(2), accent);
+                        }
+                        ui.painter().text(
+                            rect.left_center() + vec2(16.0, 0.0),
+                            Align2::LEFT_CENTER,
+                            label,
+                            if selected { theme::bold(14.0) } else { egui::FontId::proportional(14.0) },
+                            theme::TEXT,
                         );
-                        edit.request_focus();
-                        if edit.changed() {
-                            self.palette_sel = 0;
+                        ui.painter().text(
+                            rect.right_center() - vec2(14.0, 0.0),
+                            Align2::RIGHT_CENTER,
+                            hint,
+                            theme::mono(11.5),
+                            theme::FAINT,
+                        );
+                        if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                            chosen = Some(i);
                         }
-                        ui.add_space(6.0);
-                        if items.is_empty() {
-                            ui.add_space(14.0);
-                            ui.vertical_centered(|ui| ui.label(RichText::new("Nothing matches.").color(theme::MUTED)));
-                            ui.add_space(14.0);
-                        }
-                        for (i, (label, hint, _)) in items.iter().enumerate() {
-                            let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 38.0), egui::Sense::click());
-                            if response.hovered() && ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
-                                self.palette_sel = i;
-                            }
-                            let selected = i == self.palette_sel;
-                            if selected {
-                                ui.painter().rect_filled(rect, egui::CornerRadius::same(9), theme::ACCENT.gamma_multiply(0.16));
-                                let bar = egui::Rect::from_center_size(rect.left_center() + egui::vec2(3.0, 0.0), egui::vec2(3.0, 18.0));
-                                ui.painter().rect_filled(bar, egui::CornerRadius::same(2), theme::ACCENT);
-                            }
-                            ui.painter().text(
-                                rect.left_center() + egui::vec2(16.0, 0.0),
-                                egui::Align2::LEFT_CENTER,
-                                label,
-                                if selected { theme::bold(14.5) } else { egui::FontId::proportional(14.5) },
-                                theme::TEXT,
-                            );
-                            ui.painter().text(
-                                rect.right_center() - egui::vec2(14.0, 0.0),
-                                egui::Align2::RIGHT_CENTER,
-                                hint,
-                                egui::FontId::proportional(12.0),
-                                theme::FAINT,
-                            );
-                            if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                                chosen = Some(i);
-                            }
-                        }
-                        ui.add_space(4.0);
-                        ui.label(RichText::new("↑ ↓ to move   Enter to open   Esc to close").size(11.5).color(theme::FAINT));
-                    });
+                    }
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new("↑ ↓ move   Enter open   Esc close   Alt+1–6 switch pillars")
+                            .size(11.5)
+                            .color(theme::FAINT),
+                    );
+                });
             });
 
         let clicked_outside = ctx.input(|i| i.pointer.any_click())
@@ -952,21 +1258,21 @@ impl App {
         if let Some(i) = chosen {
             self.palette_open = false;
             match items.swap_remove(i).2 {
-                Do::Go(page) => self.page = page,
+                Do::Go(route) => self.set_route(route),
                 Do::Car(id) => {
                     self.showroom_car = Some(id.clone());
                     self.selected_car = Some(id);
                     self.car_skin = None;
-                    self.page = Page::Showroom;
+                    self.set_route(Route::Garage(GarageTab::Showroom));
                 }
                 Do::Server(key) => {
                     self.servers.show(key);
-                    self.page = Page::Servers;
+                    self.set_route(Route::Online(OnlineTab::Browser));
                 }
                 Do::Track(id) => {
                     self.selected_track = Some(id);
                     self.track_layout = None;
-                    self.page = Page::Tracks;
+                    self.set_route(Route::Garage(GarageTab::Tracks(TrackSubView::Browser)));
                 }
                 Do::Launch => self.launch_game(),
                 Do::Rescan => self.refresh(),
@@ -974,8 +1280,6 @@ impl App {
         }
     }
 
-    /// Short-lived messages in the bottom-right corner. They fade out on their own.
-    #[allow(deprecated)]
     fn toasts(&mut self, ctx: &egui::Context) {
         const LIFE: f32 = 4.5;
         self.toasts.retain(|t| t.born.elapsed().as_secs_f32() < LIFE);
@@ -983,8 +1287,8 @@ impl App {
             return;
         }
         ctx.request_repaint_after(std::time::Duration::from_millis(60));
-        egui::Area::new(egui::Id::new("toasts"))
-            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-22.0, -46.0))
+        egui::Area::new(egui::Id::unique("toasts"))
+            .anchor(Align2::RIGHT_BOTTOM, vec2(-22.0, -76.0))
             .order(egui::Order::Tooltip)
             .interactable(false)
             .show(ctx, |ui| {
@@ -994,17 +1298,17 @@ impl App {
                         let alpha = ((LIFE - age) / 0.6).clamp(0.0, 1.0) * (age / 0.12).clamp(0.0, 1.0);
                         let color = if toast.ok { theme::OK } else { theme::DANGER };
                         egui::Frame::new()
-                            .fill(theme::CARD.gamma_multiply(alpha))
-                            .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.7 * alpha)))
-                            .corner_radius(egui::CornerRadius::same(12))
-                            .inner_margin(egui::Margin::symmetric(16, 12))
+                            .fill(theme::SURFACE_GLASS.gamma_multiply(alpha))
+                            .stroke(Stroke::new(1.0, color.gamma_multiply(0.7 * alpha)))
+                            .corner_radius(CornerRadius::same(12))
+                            .inner_margin(Margin::symmetric(16, 12))
                             .show(ui, |ui| {
                                 ui.set_max_width(380.0);
                                 ui.horizontal(|ui| {
-                                    let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                                    let (rect, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
                                     ui.painter().circle_filled(rect.center(), 4.0, color.gamma_multiply(alpha));
                                     ui.add(egui::Label::new(
-                                        RichText::new(&toast.text).size(13.5).color(theme::TEXT.gamma_multiply(alpha)),
+                                        RichText::new(&toast.text).size(13.0).color(theme::TEXT.gamma_multiply(alpha)),
                                     ));
                                 });
                             });
@@ -1013,47 +1317,66 @@ impl App {
             });
     }
 
-    /// Dropped `.zip` packages go to the installer; a hint shows while files hover over the window.
-    #[allow(deprecated)]
+    /// Universal drag-and-drop handler: `.zip`, `.7z`, `.tar.gz`, `.tgz`, `.rar`, folders, and `.ini` PP filters.
     fn handle_drops(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
         if !dropped.is_empty() {
             let taken = self.tools.iter_mut().position(|tool| tool.on_drop(ctx, &dropped));
             match taken {
-                Some(i) => {
-                    self.page = Page::Tool(i);
-                    self.push_notice("Package received. Checking it now…", true);
+                Some(_) => {
+                    self.set_route(Route::Garage(GarageTab::Library(LibraryView::Installer)));
+                    self.push_notice("Package received. Inspecting contents…", true);
                 }
-                None => self.push_notice("Drop a car or track .zip here to install it.", false),
+                None => {
+                    let supported = dropped.iter().any(|p| is_droppable_mod_path(p));
+                    if supported {
+                        self.set_route(Route::Garage(GarageTab::Library(LibraryView::Installer)));
+                        self.push_notice("Opened Installer for dropped content.", true);
+                    } else {
+                        self.push_notice(
+                            "Drop a .zip, .7z, .tar.gz, .rar, mod folder, or PP filter .ini to install.",
+                            false,
+                        );
+                    }
+                }
             }
         }
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
-            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("drop_overlay")));
+            let accent = theme::active_accent(ctx);
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("drop_overlay")));
             let screen = ctx.content_rect();
-            painter.rect_filled(screen, 0, egui::Color32::from_black_alpha(190));
+            painter.rect_filled(screen, 0, Color32::from_black_alpha(195));
             let frame = screen.shrink(36.0);
-            painter.rect_stroke(
-                frame,
-                egui::CornerRadius::same(22),
-                egui::Stroke::new(2.5, theme::ACCENT),
-                egui::StrokeKind::Inside,
+            painter.rect_stroke(frame, CornerRadius::same(22), Stroke::new(2.5, accent), StrokeKind::Inside);
+            painter.text(
+                frame.center() - vec2(0.0, 14.0),
+                Align2::CENTER_CENTER,
+                "DROP TO INSTALL",
+                theme::display(38.0),
+                Color32::WHITE,
             );
             painter.text(
-                frame.center() - egui::vec2(0.0, 14.0),
-                egui::Align2::CENTER_CENTER,
-                "Drop to install",
-                theme::bold(34.0),
-                egui::Color32::WHITE,
-            );
-            painter.text(
-                frame.center() + egui::vec2(0.0, 24.0),
-                egui::Align2::CENTER_CENTER,
-                "Car and track .zip packages are checked before anything is installed",
-                egui::FontId::proportional(15.0),
+                frame.center() + vec2(0.0, 24.0),
+                Align2::CENTER_CENTER,
+                "Supports .zip, .7z, .tar.gz, .rar, mod folders & PP filter .ini — verified before install",
+                egui::FontId::proportional(14.5),
                 theme::MUTED,
             );
         }
     }
+}
+
+fn is_droppable_mod_path(path: &Path) -> bool {
+    if path.is_dir() {
+        return true;
+    }
+    let lower = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+    lower.ends_with(".zip")
+        || lower.ends_with(".7z")
+        || lower.ends_with(".tar.gz")
+        || lower.ends_with(".tgz")
+        || lower.ends_with(".rar")
+        || lower.ends_with(".ini")
 }
 
 impl eframe::App for App {
@@ -1068,28 +1391,45 @@ impl eframe::App for App {
             self.palette_query.clear();
             self.palette_sel = 0;
         }
+        if !self.palette_open
+            && let Some(pillar) = self.focus.handle_global_keys(&ctx, self.route.pillar())
+        {
+            let next = self.nav_state.route_for(pillar);
+            self.set_route(next);
+        }
+
         self.handle_drops(&ctx);
         self.window.update(&ctx);
 
-        let edge = egui::Stroke::new(1.0, theme::BORDER);
-        egui::Panel::left("nav")
-            .exact_size(244.0)
-            .resizable(false)
-            .frame(egui::Frame::new().fill(theme::SIDEBAR).stroke(edge).inner_margin(egui::Margin::symmetric(12, 14)))
-            .show(ui, |ui| self.nav(ui));
+        let edge = Stroke::new(1.0, theme::BORDER_SUBTLE);
 
-        egui::Panel::top("header")
-            .exact_size(54.0)
-            .frame(egui::Frame::new().fill(theme::BG).stroke(edge).inner_margin(egui::Margin::symmetric(24, 0)))
-            .show(ui, |ui| self.header(ui));
+        // 1. 56 px Translucent AAA Top Bar.
+        egui::Panel::top("aaa_topbar")
+            .exact_size(56.0)
+            .frame(egui::Frame::new().fill(theme::SURFACE_GLASS).stroke(edge).inner_margin(Margin::symmetric(20, 0)))
+            .show(ui, |ui| self.top_bar(ui));
 
-        egui::Panel::bottom("status")
-            .exact_size(30.0)
-            .frame(egui::Frame::new().fill(theme::SIDEBAR).stroke(edge).inner_margin(egui::Margin::symmetric(24, 0)))
-            .show(ui, |ui| self.status_bar(ui));
+        // 2. 38 px Contextual Sub-Nav Strip (hidden on Paddock Hub for full-bleed hero impact).
+        if self.route.pillar() != Pillar::Paddock {
+            egui::Panel::top("aaa_subnav")
+                .exact_size(38.0)
+                .frame(egui::Frame::new().fill(theme::SURFACE_BASE).stroke(edge).inner_margin(Margin::symmetric(20, 0)))
+                .show(ui, |ui| self.sub_nav(ui));
+        }
 
+        // 3. 62 px Persistent Bottom Paddock Dock.
+        egui::Panel::bottom("paddock_dock")
+            .exact_size(62.0)
+            .frame(egui::Frame::new().fill(theme::SURFACE_GLASS).stroke(edge).inner_margin(Margin::symmetric(20, 0)))
+            .show(ui, |ui| self.paddock_dock(ui));
+
+        // 4. Full-width Central Canvas.
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin { left: 28, right: 28, top: 22, bottom: 14 }))
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::SURFACE_BASE)
+                    .inner_margin(Margin { left: 24, right: 24, top: 18, bottom: 14 }),
+            )
             .show(ui, |ui| match self.page {
                 Page::Home => pages::home(self, ui),
                 Page::Showroom => showroom::showroom(self, ui),
@@ -1101,28 +1441,82 @@ impl eframe::App for App {
                 Page::Tool(i) => self.tool_page(ui, i),
             });
 
+        // Sync if a legacy page (`pages.rs` / `showroom.rs`) mutated `self.page` directly.
+        self.sync_route_from_page();
+
         if let Some(action) = self.race_request.take() {
+            // Keep ArmedSession synchronized with user's car/track choice.
+            let armed = self.settings.armed_session.get_or_insert_with(ArmedSession::default);
+            if let Some(car) = &action.car {
+                armed.car_id = car.clone();
+                armed.skin_id = action.skin.clone().unwrap_or_default();
+            }
+            if let Some(track) = &action.track {
+                armed.track_id = track.clone();
+                armed.layout_id = action.layout.clone().unwrap_or_default();
+            }
+            armed.target = LaunchTarget::QuickRace;
+            self.save_settings_quiet();
+
             let index = self.tool_index("Quick Race");
             if let Some(tool) = self.tools.get_mut(index) {
                 tool.set_race(action.track.as_deref(), action.layout.as_deref(), action.car.as_deref(), action.skin.as_deref());
             }
             self.picker = None;
-            self.page = Page::Tool(index);
+            self.set_route(Route::Drive(DriveTab::QuickRace));
         }
 
+        self.quick_switches_popover(&ctx);
         self.palette(&ctx);
         self.toasts(&ctx);
     }
+
+    fn on_exit(&mut self) {
+        if let Some(renderer) = &self.gl_renderer
+            && let Ok(mut guard) = renderer.lock()
+        {
+            guard.cache.clear();
+        }
+    }
 }
 
-/// One entry of the sidebar: its name, icon and where it goes (a tool when `page` is `None`).
-struct NavEntry {
-    key: &'static str,
-    icon: widgets::Icon,
-    page: Option<Page>,
+#[cfg(test)]
+mod route_walk_tests {
+    use super::*;
+
+    #[test]
+    fn headless_route_walk_draws_all_pillars_and_tools() {
+        let ctx = egui::Context::default();
+        let creation = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = App::new(&creation);
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut time = 0.0;
+
+        // Every registered tool must resolve to a canonical Route (zero orphaned tools).
+        for tool in &app.tools {
+            assert!(
+                Route::from_tool_name(tool.name()).is_some(),
+                "tool {:?} missing Route mapping in nav.rs",
+                tool.name()
+            );
+        }
+
+        // Walk all 6 pillars and every route in Route::all_routes().
+        for route in Route::all_routes() {
+            app.set_route(route);
+            time += 0.05;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1320.0, 820.0))),
+                time: Some(time),
+                ..egui::RawInput::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| eframe::App::ui(&mut app, ui, &mut frame));
+            output.textures_delta.clear();
+        }
+    }
 }
 
-/// Draws the whole app, sidebar included, to PNG with no window:
+/// Draws the whole app to PNG with no window:
 /// `ACXS_RENDER_DIR=<dir> cargo test --bin acxs-manager render_app -- --ignored`.
 #[cfg(test)]
 mod app_render_tests {
@@ -1147,7 +1541,7 @@ mod app_render_tests {
             for i in 0..count {
                 time += 0.1;
                 let input = egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(WIDTH as f32, HEIGHT as f32))),
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(WIDTH as f32, HEIGHT as f32))),
                     time: Some(time),
                     ..egui::RawInput::default()
                 };
@@ -1160,7 +1554,6 @@ mod app_render_tests {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
         };
-        // The first scan fills the sidebar counts and the pages.
         step(&mut app, 200, None);
         let mut pages: Vec<(String, Page)> = [
             ("Home", Page::Home),
@@ -1181,6 +1574,7 @@ mod app_render_tests {
                 continue;
             }
             app.page = page;
+            app.sync_route_from_page();
             step(&mut app, 40, Some(&name));
         }
     }

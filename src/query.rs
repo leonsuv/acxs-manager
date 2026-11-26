@@ -687,6 +687,73 @@ fn first_number(text: &str) -> Option<f64> {
 // Tests
 // ---------------------------------------------------------------------------
 
+impl Record for crate::content::CarEntry {
+    fn text_fields(&self) -> Vec<String> {
+        let mut fields = vec![
+            self.id.clone(),
+            self.name.clone(),
+            self.brand.clone(),
+            self.car_class.clone(),
+            self.year.clone(),
+            self.country.clone(),
+            self.author.clone(),
+        ];
+        if let Some(parent) = &self.parent {
+            fields.push(parent.clone());
+        }
+        fields.extend(self.tags.iter().cloned());
+        fields
+    }
+
+    fn field(&self, name: &str) -> Option<String> {
+        let non_empty = |s: &str| (!s.is_empty()).then(|| s.to_string());
+        match name {
+            "id" => non_empty(&self.id),
+            "name" => non_empty(&self.name),
+            "brand" => non_empty(&self.brand),
+            "class" | "car_class" => non_empty(&self.car_class),
+            "year" => non_empty(&self.year),
+            "tag" | "tags" => (!self.tags.is_empty()).then(|| self.tags.join(" ")),
+            "parent" => self.parent.as_deref().and_then(non_empty),
+            "country" => non_empty(&self.country),
+            "author" => non_empty(&self.author),
+            "bhp" | "power" => self.bhp.map(|v| format!("{v}")),
+            "weight" | "mass" => self.weight_kg.map(|v| format!("{v}")),
+            "pwratio" | "pw" => self.pwratio.map(|v| format!("{v}")),
+            _ => None,
+        }
+    }
+}
+
+impl Record for crate::content::TrackEntry {
+    fn text_fields(&self) -> Vec<String> {
+        let mut fields = vec![
+            self.id.clone(),
+            self.name.clone(),
+            self.country.clone(),
+            self.city.clone(),
+        ];
+        fields.extend(self.layouts.iter().cloned());
+        fields.extend(self.tags.iter().cloned());
+        fields
+    }
+
+    fn field(&self, name: &str) -> Option<String> {
+        let non_empty = |s: &str| (!s.is_empty()).then(|| s.to_string());
+        match name {
+            "id" => non_empty(&self.id),
+            "name" => non_empty(&self.name),
+            "country" => non_empty(&self.country),
+            "city" => non_empty(&self.city),
+            "length" | "length_m" => self.length_m.map(|v| format!("{v}")),
+            "pitboxes" | "pits" => self.pitboxes.map(|v| v.to_string()),
+            "layouts" => (!self.layouts.is_empty()).then(|| self.layouts.join(" ")),
+            "tag" | "tags" => (!self.tags.is_empty()).then(|| self.tags.join(" ")),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1083,5 +1150,84 @@ mod tests {
                 let _ = filter(&cars, &query);
             }
         }
+    }
+
+    #[test]
+    fn car_and_track_records_support_numeric_tag_and_boolean_queries() {
+        use crate::content::{CarEntry, TrackEntry};
+        use std::path::PathBuf;
+
+        let cars = vec![
+            CarEntry {
+                id: "ks_ferrari_488_gt3".into(),
+                name: "Ferrari 488 GT3".into(),
+                brand: "Ferrari".into(),
+                car_class: "race".into(),
+                year: "2016".into(),
+                tags: vec!["gt3".into(), "#italian".into()],
+                parent: Some("ks_ferrari_488_gtb".into()),
+                country: "Italy".into(),
+                author: "Kunos".into(),
+                bhp: Some(550.0),
+                weight_kg: Some(1260.0),
+                pwratio: Some(2.29),
+                path: PathBuf::from("c1"),
+            },
+            CarEntry {
+                id: "ks_mazda_mx5_nd".into(),
+                name: "Mazda MX-5 ND".into(),
+                brand: "Mazda".into(),
+                car_class: "street".into(),
+                year: "2015".into(),
+                tags: vec!["street".into(), "jdm".into()],
+                parent: None,
+                country: "Japan".into(),
+                author: "Kunos".into(),
+                bhp: Some(160.0),
+                weight_kg: Some(1050.0),
+                pwratio: Some(6.56),
+                path: PathBuf::from("c2"),
+            },
+        ];
+
+        let q1 = parse("bhp>400 & tag:gt3 & country:italy").unwrap();
+        let hits1 = filter(&cars, &q1);
+        assert_eq!(hits1.len(), 1);
+        assert_eq!(hits1[0].id, "ks_ferrari_488_gt3");
+
+        let q2 = parse("!parent: & weight<1100").unwrap();
+        let hits2 = filter(&cars, &q2);
+        assert_eq!(hits2.len(), 1);
+        assert_eq!(hits2[0].id, "ks_mazda_mx5_nd");
+
+        let tracks = vec![
+            TrackEntry {
+                id: "spa".into(),
+                name: "Spa-Francorchamps".into(),
+                country: "Belgium".into(),
+                city: "Stavelot".into(),
+                length_m: Some(7004.0),
+                pitboxes: Some(24),
+                layouts: vec!["gp".into()],
+                tags: vec!["circuit".into(), "f1".into()],
+                path: PathBuf::from("t1"),
+            },
+            TrackEntry {
+                id: "drift".into(),
+                name: "Drift Playground".into(),
+                country: "Italy".into(),
+                city: "Vallelunga".into(),
+                length_m: Some(1200.0),
+                pitboxes: Some(8),
+                layouts: vec![],
+                tags: vec!["drift".into()],
+                path: PathBuf::from("t2"),
+            },
+        ];
+
+        let tq = parse("length>5000 & pitboxes>=20 & tag:f1").unwrap();
+        let thits = filter(&tracks, &tq);
+        assert_eq!(thits.len(), 1);
+        assert_eq!(thits[0].id, "spa");
     }
 }

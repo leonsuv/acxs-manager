@@ -109,16 +109,8 @@ pub fn parse_page(json: &str) -> Result<Page, String> {
 
 /// Address and HTTP port from `acmanager://race/online/join?ip=1.2.3.4&httpPort=8081`.
 pub fn parse_join_url(url: &str) -> Option<(String, u16)> {
-    let query = url.split_once('?')?.1;
-    let (mut ip, mut port) = (None, None);
-    for pair in query.split('&') {
-        match pair.split_once('=') {
-            Some(("ip", value)) if !value.is_empty() => ip = Some(value.to_string()),
-            Some(("httpPort", value)) => port = value.parse::<u16>().ok().filter(|p| *p != 0),
-            _ => {}
-        }
-    }
-    Some((ip?, port?))
+    let uri = crate::uri::parse_join_uri(url).ok()?;
+    Some((uri.host, uri.http_port))
 }
 
 fn parse_item(item: &Value) -> Option<LobbyServer> {
@@ -228,5 +220,150 @@ pub fn fetch_stream(
         }
         page += 1;
         std::thread::sleep(PAUSE);
+    }
+}
+
+/// Maximum number of recently joined servers retained in [`RecentServers`].
+pub const MAX_RECENT_SERVERS: usize = 100;
+
+/// One recently joined server record persisted in `recent-servers.json`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct RecentServer {
+    pub host: String,
+    pub port: u16,
+    pub name: String,
+    pub track: String,
+    pub last_car: String,
+    pub last_skin: String,
+    pub last_joined_unix: u64,
+    pub join_count: u32,
+}
+
+impl Default for RecentServer {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            port: 8081,
+            name: String::new(),
+            track: String::new(),
+            last_car: String::new(),
+            last_skin: String::new(),
+            last_joined_unix: 0,
+            join_count: 1,
+        }
+    }
+}
+
+impl RecentServer {
+    pub fn key(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+}
+
+/// Bounded store of recently joined servers, newest first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RecentServers {
+    pub items: Vec<RecentServer>,
+}
+
+impl RecentServers {
+    /// Loads `recent-servers.json` from `path`, returning an empty list if missing or invalid.
+    pub fn load(path: &std::path::Path) -> Self {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Self::default();
+        };
+        let mut store: Self = serde_json::from_str(&text).unwrap_or_default();
+        store.items.sort_by_key(|r| std::cmp::Reverse(r.last_joined_unix));
+        store.items.truncate(MAX_RECENT_SERVERS);
+        store
+    }
+
+    /// Saves atomically via a temporary file in the same directory.
+    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        let text = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, path)
+    }
+
+    /// Records a join to `entry`, deduplicating by `host:port`, incrementing `join_count`,
+    /// sorting newest-first, and capping at [`MAX_RECENT_SERVERS`].
+    pub fn record(&mut self, mut entry: RecentServer) {
+        if let Some(existing) = self
+            .items
+            .iter_mut()
+            .find(|r| r.host.eq_ignore_ascii_case(&entry.host) && r.port == entry.port)
+        {
+            existing.join_count = existing.join_count.saturating_add(1);
+            existing.last_joined_unix = entry.last_joined_unix;
+            if !entry.name.is_empty() {
+                existing.name = entry.name;
+            }
+            if !entry.track.is_empty() {
+                existing.track = entry.track;
+            }
+            if !entry.last_car.is_empty() {
+                existing.last_car = entry.last_car;
+            }
+            if !entry.last_skin.is_empty() {
+                existing.last_skin = entry.last_skin;
+            }
+        } else {
+            entry.join_count = entry.join_count.max(1);
+            self.items.push(entry);
+        }
+        self.items.sort_by_key(|r| std::cmp::Reverse(r.last_joined_unix));
+        self.items.truncate(MAX_RECENT_SERVERS);
+    }
+}
+
+#[cfg(test)]
+mod recent_tests {
+    use super::*;
+
+    #[test]
+    fn recent_servers_dedupes_increments_count_and_caps_at_100() {
+        let mut store = RecentServers::default();
+        for i in 0..105u64 {
+            store.record(RecentServer {
+                host: format!("10.0.0.{i}"),
+                port: 8081,
+                name: format!("Srv {i}"),
+                track: "monza".into(),
+                last_car: "bmw_m3_e30".into(),
+                last_skin: "white".into(),
+                last_joined_unix: 1000 + i,
+                join_count: 1,
+            });
+        }
+        assert_eq!(store.items.len(), MAX_RECENT_SERVERS);
+        assert_eq!(store.items[0].host, "10.0.0.104");
+
+        // Re-joining an existing server increments join_count and moves it to the top.
+        store.record(RecentServer {
+            host: "10.0.0.50".into(),
+            port: 8081,
+            name: "Srv 50 Updated".into(),
+            track: "spa".into(),
+            last_car: "ks_ferrari_488_gt3".into(),
+            last_skin: "red".into(),
+            last_joined_unix: 5000,
+            join_count: 1,
+        });
+        assert_eq!(store.items.len(), MAX_RECENT_SERVERS);
+        assert_eq!(store.items[0].host, "10.0.0.50");
+        assert_eq!(store.items[0].join_count, 2);
+        assert_eq!(store.items[0].track, "spa");
+
+        let tmp = std::env::temp_dir().join(format!("acxs-recent-{}.json", std::process::id()));
+        store.save(&tmp).unwrap();
+        let reloaded = RecentServers::load(&tmp);
+        assert_eq!(reloaded, store);
+        let _ = std::fs::remove_file(&tmp);
     }
 }

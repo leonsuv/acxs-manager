@@ -194,6 +194,65 @@ pub fn check_car(car_dir: &Path) -> Vec<Issue> {
         None => {}
     }
 
+    // Check lods.ini for missing KN5 targets if data/lods.ini exists.
+    let lods_ini = car_dir.join("data").join("lods.ini");
+    if lods_ini.is_file()
+        && let Ok(ini) = Ini::load(&lods_ini)
+    {
+        for i in 0usize.. {
+            let section = format!("LOD_{i}");
+            if !has_section(&ini, &section) {
+                break;
+            }
+            if let Some(file) = ini.get(&section, "FILE").map(str::trim).filter(|f| !f.is_empty()) {
+                let target = car_dir.join(file);
+                if probe(&target, false, &mut issues) == Some(false) {
+                    issues.push(Issue::new(
+                        Severity::Warning,
+                        &target,
+                        format!("data/lods.ini [{section}] references missing model {file}"),
+                    ));
+                }
+            }
+        }
+    }
+
+    // Check sfx/GUIDs.txt mismatch when sfx/GUIDs.txt exists.
+    let sfx_dir = car_dir.join("sfx");
+    if let Some(guids_path) = crate::sfx::find_guids_file(&sfx_dir) {
+        let info = crate::sfx::inspect_car_sfx(car_dir);
+        if !info.car_id.is_empty()
+            && !info.referenced_car_ids.is_empty()
+            && !info
+                .referenced_car_ids
+                .iter()
+                .any(|r| r.eq_ignore_ascii_case(&info.car_id))
+        {
+            issues.push(Issue::new(
+                Severity::Warning,
+                &guids_path,
+                format!(
+                    "sfx/GUIDs.txt references {} instead of {}",
+                    info.referenced_car_ids.join(", "),
+                    info.car_id
+                ),
+            ));
+        }
+    }
+
+    // Check unnormalized tags in ui_car.json if tags are present.
+    if ui_car.is_file()
+        && let Ok(meta) = crate::content_meta::CarMeta::read(car_dir)
+        && let Some(tags) = &meta.tags
+        && normalized_tags(tags) != *tags
+    {
+        issues.push(Issue::new(
+            Severity::Info,
+            &ui_car,
+            "ui/ui_car.json has duplicate or untrimmed tags",
+        ));
+    }
+
     issues
 }
 
@@ -454,11 +513,19 @@ pub fn summary(issues: &[Issue]) -> (usize, usize, usize) {
     })
 }
 
-/// What a repair does. Every action only creates a file that does not exist yet.
+/// What a repair does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepairAction {
     /// Creates a missing `ui/ui_car.json` or `ui/ui_track.json` holding only `{"name": "<folder>"}`.
     CreateMissingUiJson,
+    /// Creates a missing `skins/<skin>/ui_skin.json` holding `{"skinname": "<skin>"}`.
+    CreateMissingSkinJson,
+    /// Deduplicates, trims, and normalizes `tags` in `ui/ui_car.json` (creates backup).
+    NormalizeCarTags,
+    /// Recalculates `specs` (`bhp`, `torque`, `weight`, `pwratio`) in `ui/ui_car.json` from `data/` (creates backup).
+    RecalculateCarSpecs,
+    /// Rewrites `sfx/GUIDs.txt` when its car-id references do not match the car folder name (creates backup).
+    FixSfxGuidsMismatch,
 }
 
 /// A fix proposed by `plan_repairs`. Nothing is written until it is passed to `apply_repairs`.
@@ -481,10 +548,10 @@ pub struct RepairReport {
     pub failed: Vec<(PathBuf, String)>,
 }
 
-/// Repairs for the warnings `check_all` reports that have a safe fix. Nothing is written.
-///
-/// A missing `ui/ui_car.json` or `ui/ui_track.json` gets a repair. Other issues, such as a
-/// missing car data folder, are only left in the report.
+/// Repairs for the warnings `check_all` reports that have a safe non-modifying fix
+/// (creating missing `ui/ui_car.json` or `ui/ui_track.json`). Nothing is written until
+/// passed to [`apply_repairs`]. For all repair types (including skin JSON, tag
+/// normalization, and SFX GUIDs fixes), use [`plan_extended_repairs`].
 pub fn plan_repairs(ac_root: &Path) -> Vec<Repair> {
     let mut repairs = Vec::new();
     for issue in check_all(ac_root) {
@@ -494,8 +561,6 @@ pub fn plan_repairs(ac_root: &Path) -> Vec<Repair> {
         let Ok(folder) = ui_json_folder(ac_root, &issue.path) else {
             continue;
         };
-        // The checks also warn when a folder sits where the file would go. Only a truly
-        // missing file is repaired.
         let missing = matches!(
             fs::symlink_metadata(&issue.path),
             Err(e) if e.kind() == io::ErrorKind::NotFound
@@ -513,15 +578,74 @@ pub fn plan_repairs(ac_root: &Path) -> Vec<Repair> {
     repairs
 }
 
-/// Runs each repair. A file is only ever created, never replaced: if something already exists
-/// at a repair's path it is skipped. Existing files are not rewritten, so none are archived.
-/// Paths that are not a `ui_car.json` / `ui_track.json` inside an existing car or track folder
-/// are refused, whatever the caller passes in.
+/// Plans all available safe repairs for `ac_root`, including missing `ui_car.json`/`ui_track.json`,
+/// missing `ui_skin.json`, duplicate/untrimmed car tags, and `sfx/GUIDs.txt` car-id mismatches.
+/// Modification repairs always create `.acxs-backup-<stamp>` copies before writing.
+pub fn plan_extended_repairs(ac_root: &Path) -> Vec<Repair> {
+    let mut repairs = Vec::new();
+    for issue in check_all(ac_root) {
+        if issue.severity == Severity::Warning
+            && let Ok(folder) = ui_json_folder(ac_root, &issue.path)
+            && matches!(
+                fs::symlink_metadata(&issue.path),
+                Err(e) if e.kind() == io::ErrorKind::NotFound
+            )
+        {
+            let shown = issue.path.strip_prefix(ac_root).unwrap_or(&issue.path);
+            repairs.push(Repair {
+                description: format!("Create {} with name \"{}\"", shown.display(), name_of(&folder)),
+                path: issue.path.clone(),
+                action: RepairAction::CreateMissingUiJson,
+            });
+            continue;
+        }
+
+        if issue.severity == Severity::Info && issue.message.contains("has no ui_skin.json") {
+            let skin_json = issue.path.join("ui_skin.json");
+            if matches!(fs::symlink_metadata(&skin_json), Err(e) if e.kind() == io::ErrorKind::NotFound) {
+                let shown = skin_json.strip_prefix(ac_root).unwrap_or(&skin_json);
+                repairs.push(Repair {
+                    description: format!("Create {} for skin \"{}\"", shown.display(), name_of(&issue.path)),
+                    path: skin_json,
+                    action: RepairAction::CreateMissingSkinJson,
+                });
+            }
+            continue;
+        }
+
+        if issue.severity == Severity::Info && issue.message.contains("duplicate or untrimmed tags") {
+            let shown = issue.path.strip_prefix(ac_root).unwrap_or(&issue.path);
+            repairs.push(Repair {
+                description: format!("Normalize tags in {} (with backup)", shown.display()),
+                path: issue.path.clone(),
+                action: RepairAction::NormalizeCarTags,
+            });
+            continue;
+        }
+
+        if issue.severity == Severity::Warning && issue.message.starts_with("sfx/GUIDs.txt references ") {
+            let shown = issue.path.strip_prefix(ac_root).unwrap_or(&issue.path);
+            repairs.push(Repair {
+                description: format!("Fix car id mismatch in {} (with backup)", shown.display()),
+                path: issue.path.clone(),
+                action: RepairAction::FixSfxGuidsMismatch,
+            });
+        }
+    }
+    repairs
+}
+
+/// Runs each repair. Creation repairs never overwrite existing files; modification repairs
+/// always back up the original file first.
 pub fn apply_repairs(ac_root: &Path, repairs: &[Repair]) -> RepairReport {
     let mut report = RepairReport::default();
     for repair in repairs {
         let result = match repair.action {
             RepairAction::CreateMissingUiJson => create_ui_json(ac_root, &repair.path),
+            RepairAction::CreateMissingSkinJson => create_skin_json(ac_root, &repair.path),
+            RepairAction::NormalizeCarTags => normalize_car_tags_repair(ac_root, &repair.path),
+            RepairAction::RecalculateCarSpecs => recalculate_car_specs_repair(ac_root, &repair.path),
+            RepairAction::FixSfxGuidsMismatch => fix_sfx_guids_repair(ac_root, &repair.path),
         };
         match result {
             Ok(()) => report.created.push(repair.path.clone()),
@@ -530,6 +654,108 @@ pub fn apply_repairs(ac_root: &Path, repairs: &[Repair]) -> RepairReport {
         }
     }
     report
+}
+
+/// Trims, lowercases, and deduplicates tags while preserving first-seen order.
+pub fn normalized_tags(tags: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for raw in tags {
+        let cleaned = raw.trim().to_ascii_lowercase();
+        if !cleaned.is_empty() && seen.insert(cleaned.clone()) {
+            out.push(cleaned);
+        }
+    }
+    out
+}
+
+fn create_skin_json(ac_root: &Path, path: &Path) -> Result<(), CreateError> {
+    if !path.starts_with(ac_root) {
+        return Err(CreateError::Failed("path is outside the Assetto Corsa folder".into()));
+    }
+    let skin_dir = path
+        .parent()
+        .ok_or_else(|| CreateError::Failed("path has no skin folder".into()))?;
+    if !skin_dir.is_dir() {
+        return Err(CreateError::Failed("skin folder does not exist".into()));
+    }
+    let value = serde_json::json!({ "skinname": name_of(skin_dir) });
+    let text = serde_json::to_string_pretty(&value).map_err(|e| CreateError::Failed(e.to_string()))?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| match e.kind() {
+            io::ErrorKind::AlreadyExists => CreateError::Exists,
+            _ if path.symlink_metadata().is_ok() => CreateError::Exists,
+            _ => CreateError::Failed(format!("cannot create ui_skin.json: {e}")),
+        })?;
+    file.write_all(format!("{text}\n").as_bytes())
+        .map_err(|e| CreateError::Failed(format!("cannot write ui_skin.json: {e}")))
+}
+
+fn normalize_car_tags_repair(ac_root: &Path, path: &Path) -> Result<(), CreateError> {
+    let car_dir = ui_json_folder(ac_root, path).map_err(CreateError::Failed)?;
+    let meta = crate::content_meta::CarMeta::read(&car_dir)
+        .map_err(|e| CreateError::Failed(format!("cannot read ui_car.json: {e}")))?;
+    let Some(tags) = meta.tags else {
+        return Err(CreateError::Exists);
+    };
+    let clean = normalized_tags(&tags);
+    if clean == tags {
+        return Err(CreateError::Exists);
+    }
+    let patch = crate::content_meta::CarMeta {
+        tags: Some(clean),
+        ..Default::default()
+    };
+    crate::content_meta::patch_car_meta(&car_dir, &patch)
+        .map_err(|e| CreateError::Failed(format!("cannot save ui_car.json: {e}")))
+}
+
+fn recalculate_car_specs_repair(ac_root: &Path, path: &Path) -> Result<(), CreateError> {
+    let car_dir = ui_json_folder(ac_root, path).map_err(CreateError::Failed)?;
+    let specs = crate::cardata::read_specs(&car_dir);
+    let mut map = std::collections::BTreeMap::new();
+    let bhp = specs.max_power_w.map(|w| w / 745.7);
+    if let Some(hp) = bhp {
+        map.insert("bhp".into(), format!("{hp:.0} bhp"));
+    }
+    if let Some(nm) = specs.max_torque_nm {
+        map.insert("torque".into(), format!("{nm:.0} Nm"));
+    }
+    if let Some(kg) = specs.mass_kg {
+        map.insert("weight".into(), format!("{kg:.0} kg"));
+    }
+    if let (Some(kg), Some(hp)) = (specs.mass_kg, bhp)
+        && hp > 0.0
+    {
+        map.insert("pwratio".into(), format!("{:.2} kg/hp", kg / hp));
+    }
+    if map.is_empty() {
+        return Err(CreateError::Failed("no physics specs could be read from car data".into()));
+    }
+    let patch = crate::content_meta::CarMeta {
+        specs: Some(map),
+        ..Default::default()
+    };
+    crate::content_meta::patch_car_meta(&car_dir, &patch)
+        .map_err(|e| CreateError::Failed(format!("cannot save recalculated specs: {e}")))
+}
+
+fn fix_sfx_guids_repair(ac_root: &Path, path: &Path) -> Result<(), CreateError> {
+    if !path.starts_with(ac_root) {
+        return Err(CreateError::Failed("path is outside the Assetto Corsa folder".into()));
+    }
+    let car_dir = path
+        .parent()
+        .and_then(|sfx| sfx.parent())
+        .ok_or_else(|| CreateError::Failed("invalid sfx/GUIDs.txt path".into()))?;
+    match crate::sfx::fix_guids_mismatch(car_dir, false) {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(CreateError::Exists),
+        Err(e) => Err(CreateError::Failed(e.to_string())),
+    }
 }
 
 enum CreateError {
@@ -967,5 +1193,59 @@ mod real_install_tests {
         fs::remove_dir_all(&dir).ok();
         assert_eq!(issues.len(), 1);
         assert_eq!(summary(&issues), (0, 1, 0));
+    }
+
+    #[test]
+    fn repair_normalizes_tags_recalculates_specs_and_fixes_sfx_guids_with_backups() {
+        let root = std::env::temp_dir().join(format!("acxs-repair-ext-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let car = root.join("content/cars/my_gt3");
+        fs::create_dir_all(car.join("ui")).unwrap();
+        fs::create_dir_all(car.join("data")).unwrap();
+        fs::create_dir_all(car.join("sfx")).unwrap();
+        fs::create_dir_all(car.join("skins/01_red")).unwrap();
+        fs::write(car.join("my_gt3.kn5"), b"").unwrap();
+        fs::write(car.join("skins/01_red/preview.jpg"), b"").unwrap();
+        fs::write(
+            car.join("ui/ui_car.json"),
+            r#"{"name":"My GT3","tags":[" GT3 ","gt3","Race",""]}"#,
+        )
+        .unwrap();
+        fs::write(car.join("data/car.ini"), "[BASIC]\nTOTALMASS=1250\n").unwrap();
+        fs::write(car.join("data/engine.ini"), "[HEADER]\nPOWER_CURVE=power.lut\n").unwrap();
+        fs::write(car.join("data/power.lut"), "1000|200\n7000|500\n").unwrap();
+        fs::write(
+            car.join("sfx/GUIDs.txt"),
+            "{1} bank:/other_car\n{2} event:/cars/other_car/engine_ext\n",
+        )
+        .unwrap();
+
+        let mut planned = plan_extended_repairs(&root);
+        assert!(planned.iter().any(|r| r.action == RepairAction::CreateMissingSkinJson));
+        assert!(planned.iter().any(|r| r.action == RepairAction::NormalizeCarTags));
+        assert!(planned.iter().any(|r| r.action == RepairAction::FixSfxGuidsMismatch));
+
+        // Also request explicit spec recalculation.
+        planned.push(Repair {
+            description: "Recalculate specs".into(),
+            path: car.join("ui/ui_car.json"),
+            action: RepairAction::RecalculateCarSpecs,
+        });
+
+        let report = apply_repairs(&root, &planned);
+        assert!(report.failed.is_empty(), "failed: {:?}", report.failed);
+        assert!(car.join("skins/01_red/ui_skin.json").is_file());
+
+        let meta = crate::content_meta::CarMeta::read(&car).unwrap();
+        assert_eq!(meta.tags.as_deref(), Some(&["gt3".to_string(), "race".to_string()][..]));
+        let specs = meta.specs.unwrap();
+        assert!(specs.get("weight").is_some_and(|w| w.contains("1250")));
+        assert!(specs.get("torque").is_some_and(|t| t.contains("500")));
+
+        let guids = fs::read_to_string(car.join("sfx/GUIDs.txt")).unwrap();
+        assert!(guids.contains("bank:/my_gt3"));
+        assert!(guids.contains("event:/cars/my_gt3/engine_ext"));
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

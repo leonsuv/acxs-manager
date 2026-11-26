@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 pub const MAX_RAYS: u32 = 512;
 
 /// Largest number of triangles accepted by one bake call.
-pub const MAX_TRIANGLES: usize = 20_000;
+pub const MAX_TRIANGLES: usize = 2_000_000;
 
 /// Smallest ray parameter counted as a hit, so numerical noise at the start of
 /// a ray is not mistaken for occlusion.
@@ -146,9 +146,55 @@ pub fn bake_vertex_ao(
 
     let local_dirs = hemisphere_directions(settings.rays);
     let rays = settings.rays as f32;
-    let mut out = Vec::with_capacity(triangles.len() * 3);
+    let bvh = Bvh::build(triangles);
 
-    for (index, tri) in triangles.iter().enumerate() {
+    let thread_count = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(triangles.len().max(1));
+
+    if thread_count <= 1 || triangles.len() < 128 {
+        let mut out = Vec::with_capacity(triangles.len() * 3);
+        bake_range(triangles, &bvh, &local_dirs, rays, settings, 0..triangles.len(), &mut out);
+        return Ok(out);
+    }
+
+    let chunk_size = triangles.len().div_ceil(thread_count);
+    let mut chunks: Vec<Vec<f32>> = vec![Vec::new(); thread_count];
+    std::thread::scope(|s| {
+        for (t_idx, slot) in chunks.iter_mut().enumerate() {
+            let start = t_idx * chunk_size;
+            if start >= triangles.len() {
+                break;
+            }
+            let end = (start + chunk_size).min(triangles.len());
+            let bvh_ref = &bvh;
+            let dirs_ref = &local_dirs;
+            s.spawn(move || {
+                slot.reserve((end - start) * 3);
+                bake_range(triangles, bvh_ref, dirs_ref, rays, settings, start..end, slot);
+            });
+        }
+    });
+
+    let mut out = Vec::with_capacity(triangles.len() * 3);
+    for c in chunks {
+        out.extend(c);
+    }
+    Ok(out)
+}
+
+fn bake_range(
+    triangles: &[Triangle],
+    bvh: &Bvh,
+    local_dirs: &[[f32; 3]],
+    rays: f32,
+    settings: &AoSettings,
+    range: std::ops::Range<usize>,
+    out: &mut Vec<f32>,
+) {
+    for index in range {
+        let tri = &triangles[index];
         let Some(normal) = face_normal(tri) else {
             out.extend([1.0; 3]);
             continue;
@@ -157,20 +203,305 @@ pub fn bake_vertex_ao(
         for corner in [tri.a, tri.b, tri.c] {
             let origin = add(corner, scale(normal, settings.bias));
             let mut open = 0u32;
-            for local in &local_dirs {
+            for local in local_dirs {
                 let dir = add(
                     add(scale(tangent, local[0]), scale(bitangent, local[1])),
                     scale(normal, local[2]),
                 );
-                if !is_occluded(origin, dir, settings.max_distance, triangles, index) {
+                if !bvh.is_occluded(origin, dir, settings.max_distance, triangles, index) {
                     open += 1;
                 }
             }
             out.push(open as f32 / rays);
         }
     }
+}
 
-    Ok(out)
+/// UV-mapped triangle for baking an ambient occlusion texture map.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UvTriangle {
+    pub tri: Triangle,
+    pub uv_a: [f32; 2],
+    pub uv_b: [f32; 2],
+    pub uv_c: [f32; 2],
+}
+
+/// Bakes ambient occlusion into an RGBA texture (`width * height * 4` bytes) in UV space.
+///
+/// Uncovered texels stay white `(255, 255, 255, 255)`. Covered texels are rasterised
+/// barycentrically and raycast against the full mesh BVH.
+pub fn bake_uv_ao_rgba(
+    uv_tris: &[UvTriangle],
+    width: u32,
+    height: u32,
+    settings: &AoSettings,
+) -> Result<Vec<u8>, AoError> {
+    settings.validate()?;
+    if uv_tris.len() > MAX_TRIANGLES {
+        return Err(AoError::TooManyTriangles {
+            count: uv_tris.len(),
+            max: MAX_TRIANGLES,
+        });
+    }
+    let tris: Vec<Triangle> = uv_tris.iter().map(|u| u.tri).collect();
+    for (index, tri) in tris.iter().enumerate() {
+        let finite = [tri.a, tri.b, tri.c]
+            .iter()
+            .all(|p| p.iter().all(|v| v.is_finite()));
+        if !finite {
+            return Err(AoError::NonFiniteVertex { index });
+        }
+    }
+
+    let bvh = Bvh::build(&tris);
+    let local_dirs = hemisphere_directions(settings.rays);
+    let rays = settings.rays as f32;
+    let w = width.max(1) as usize;
+    let h = height.max(1) as usize;
+    let mut rgba = vec![255u8; w * h * 4];
+
+    for (tri_idx, uvt) in uv_tris.iter().enumerate() {
+        let Some(normal) = face_normal(&uvt.tri) else {
+            continue;
+        };
+        let (tangent, bitangent) = orthonormal_basis(normal);
+        let p0 = [uvt.uv_a[0].clamp(0.0, 1.0) * (w as f32), uvt.uv_a[1].clamp(0.0, 1.0) * (h as f32)];
+        let p1 = [uvt.uv_b[0].clamp(0.0, 1.0) * (w as f32), uvt.uv_b[1].clamp(0.0, 1.0) * (h as f32)];
+        let p2 = [uvt.uv_c[0].clamp(0.0, 1.0) * (w as f32), uvt.uv_c[1].clamp(0.0, 1.0) * (h as f32)];
+        let area = edge2d(p0, p1, p2);
+        if area.abs() < 1e-6 {
+            continue;
+        }
+        let x0 = p0[0].min(p1[0]).min(p2[0]).floor().max(0.0) as usize;
+        let x1 = (p0[0].max(p1[0]).max(p2[0]).ceil() as usize).min(w - 1);
+        let y0 = p0[1].min(p1[1]).min(p2[1]).floor().max(0.0) as usize;
+        let y1 = (p0[1].max(p1[1]).max(p2[1]).ceil() as usize).min(h - 1);
+
+        for py in y0..=y1 {
+            for px in x0..=x1 {
+                let pt = [px as f32 + 0.5, py as f32 + 0.5];
+                let w0 = edge2d(p1, p2, pt) / area;
+                let w1 = edge2d(p2, p0, pt) / area;
+                let w2 = edge2d(p0, p1, pt) / area;
+                if w0 < -1e-4 || w1 < -1e-4 || w2 < -1e-4 {
+                    continue;
+                }
+                let pos = [
+                    w0 * uvt.tri.a[0] + w1 * uvt.tri.b[0] + w2 * uvt.tri.c[0],
+                    w0 * uvt.tri.a[1] + w1 * uvt.tri.b[1] + w2 * uvt.tri.c[1],
+                    w0 * uvt.tri.a[2] + w1 * uvt.tri.b[2] + w2 * uvt.tri.c[2],
+                ];
+                let origin = add(pos, scale(normal, settings.bias));
+                let mut open = 0u32;
+                for local in &local_dirs {
+                    let dir = add(
+                        add(scale(tangent, local[0]), scale(bitangent, local[1])),
+                        scale(normal, local[2]),
+                    );
+                    if !bvh.is_occluded(origin, dir, settings.max_distance, &tris, tri_idx) {
+                        open += 1;
+                    }
+                }
+                let val = ((open as f32 / rays).clamp(0.0, 1.0) * 255.0).round() as u8;
+                let off = (py * w + px) * 4;
+                rgba[off..off + 4].copy_from_slice(&[val, val, val, 255]);
+            }
+        }
+    }
+    Ok(rgba)
+}
+
+fn edge2d(a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> f32 {
+    (c[0] - a[0]) * (b[1] - a[1]) - (c[1] - a[1]) * (b[0] - a[0])
+}
+
+// ---------------------------------------------------------------------------
+// Median-split Bounding Volume Hierarchy (BVH)
+// ---------------------------------------------------------------------------
+
+const BVH_LEAF_SIZE: usize = 8;
+
+#[derive(Clone, Copy)]
+struct Aabb {
+    min: [f32; 3],
+    max: [f32; 3],
+}
+
+impl Aabb {
+    fn empty() -> Self {
+        Self {
+            min: [f32::INFINITY; 3],
+            max: [f32::NEG_INFINITY; 3],
+        }
+    }
+
+    fn of_tri(t: &Triangle) -> Self {
+        let mut b = Self::empty();
+        for p in [t.a, t.b, t.c] {
+            for axis in 0..3 {
+                b.min[axis] = b.min[axis].min(p[axis]);
+                b.max[axis] = b.max[axis].max(p[axis]);
+            }
+        }
+        b
+    }
+
+    fn union(self, other: Self) -> Self {
+        Self {
+            min: [
+                self.min[0].min(other.min[0]),
+                self.min[1].min(other.min[1]),
+                self.min[2].min(other.min[2]),
+            ],
+            max: [
+                self.max[0].max(other.max[0]),
+                self.max[1].max(other.max[1]),
+                self.max[2].max(other.max[2]),
+            ],
+        }
+    }
+
+    fn hits_ray(&self, origin: [f32; 3], inv_dir: [f32; 3], max_t: f32) -> bool {
+        let mut tmin = HIT_EPSILON;
+        let mut tmax = max_t;
+        for axis in 0..3 {
+            let t0 = (self.min[axis] - origin[axis]) * inv_dir[axis];
+            let t1 = (self.max[axis] - origin[axis]) * inv_dir[axis];
+            let (near, far) = if t0 <= t1 { (t0, t1) } else { (t1, t0) };
+            tmin = tmin.max(near);
+            tmax = tmax.min(far);
+            if tmax < tmin {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+struct BvhNode {
+    bounds: Aabb,
+    /// When `count > 0`, leaf covering `indices[first..first + count]`.
+    /// When `count == 0`, internal node with children `first` and `first + 1`.
+    first: u32,
+    count: u32,
+}
+
+struct Bvh {
+    nodes: Vec<BvhNode>,
+    indices: Vec<usize>,
+}
+
+impl Bvh {
+    fn build(triangles: &[Triangle]) -> Self {
+        if triangles.is_empty() {
+            return Self {
+                nodes: Vec::new(),
+                indices: Vec::new(),
+            };
+        }
+        let tri_bounds: Vec<Aabb> = triangles.iter().map(Aabb::of_tri).collect();
+        let centroids: Vec<[f32; 3]> = triangles
+            .iter()
+            .map(|t| {
+                [
+                    (t.a[0] + t.b[0] + t.c[0]) / 3.0,
+                    (t.a[1] + t.b[1] + t.c[1]) / 3.0,
+                    (t.a[2] + t.b[2] + t.c[2]) / 3.0,
+                ]
+            })
+            .collect();
+        let mut indices: Vec<usize> = (0..triangles.len()).collect();
+        let mut nodes = Vec::with_capacity(triangles.len() / 2 + 1);
+        nodes.push(BvhNode {
+            bounds: Aabb::empty(),
+            first: 0,
+            count: triangles.len() as u32,
+        });
+        Self::subdivide(0, 0, triangles.len(), &tri_bounds, &centroids, &mut indices, &mut nodes);
+        Self { nodes, indices }
+    }
+
+    fn subdivide(
+        node_idx: usize,
+        start: usize,
+        count: usize,
+        tri_bounds: &[Aabb],
+        centroids: &[[f32; 3]],
+        indices: &mut [usize],
+        nodes: &mut Vec<BvhNode>,
+    ) {
+        let mut bounds = Aabb::empty();
+        for &idx in &indices[start..start + count] {
+            bounds = bounds.union(tri_bounds[idx]);
+        }
+        nodes[node_idx].bounds = bounds;
+        if count <= BVH_LEAF_SIZE {
+            nodes[node_idx].first = start as u32;
+            nodes[node_idx].count = count as u32;
+            return;
+        }
+        let extent = [
+            bounds.max[0] - bounds.min[0],
+            bounds.max[1] - bounds.min[1],
+            bounds.max[2] - bounds.min[2],
+        ];
+        let axis = if extent[1] > extent[0] && extent[1] >= extent[2] {
+            1
+        } else if extent[2] > extent[0] {
+            2
+        } else {
+            0
+        };
+        let mid = count / 2;
+        indices[start..start + count].select_nth_unstable_by(mid, |&a, &b| {
+            centroids[a][axis].total_cmp(&centroids[b][axis])
+        });
+        let left_idx = nodes.len();
+        nodes.push(BvhNode { bounds: Aabb::empty(), first: 0, count: 0 });
+        nodes.push(BvhNode { bounds: Aabb::empty(), first: 0, count: 0 });
+        nodes[node_idx].first = left_idx as u32;
+        nodes[node_idx].count = 0;
+        Self::subdivide(left_idx, start, mid, tri_bounds, centroids, indices, nodes);
+        Self::subdivide(left_idx + 1, start + mid, count - mid, tri_bounds, centroids, indices, nodes);
+    }
+
+    fn is_occluded(
+        &self,
+        origin: [f32; 3],
+        dir: [f32; 3],
+        max_t: f32,
+        triangles: &[Triangle],
+        skip: usize,
+    ) -> bool {
+        if self.nodes.is_empty() {
+            return false;
+        }
+        let inv_dir = [1.0 / dir[0], 1.0 / dir[1], 1.0 / dir[2]];
+        let mut stack = [0usize; 64];
+        let mut sp = 1usize;
+        while sp > 0 {
+            sp -= 1;
+            let node = &self.nodes[stack[sp]];
+            if !node.bounds.hits_ray(origin, inv_dir, max_t) {
+                continue;
+            }
+            if node.count > 0 {
+                let s = node.first as usize;
+                let e = s + node.count as usize;
+                for &tri_idx in &self.indices[s..e] {
+                    if tri_idx != skip && ray_hits(origin, dir, &triangles[tri_idx], max_t) {
+                        return true;
+                    }
+                }
+            } else if sp + 2 <= stack.len() {
+                let first = node.first as usize;
+                stack[sp] = first;
+                stack[sp + 1] = first + 1;
+                sp += 2;
+            }
+        }
+        false
+    }
 }
 
 /// Writes baked values to a new CSV file at `path`, one row per triangle corner.
@@ -488,5 +819,57 @@ mod tests {
             bake_vertex_ao(&tris, &settings(16, 1.0)),
             Err(AoError::NonFiniteVertex { index: 1 })
         );
+    }
+
+    #[test]
+    fn bvh_matches_brute_force_on_500_triangle_mesh() {
+        let mut tris = Vec::with_capacity(500);
+        for i in 0..250 {
+            let row = (i / 15) as f32;
+            let col = (i % 15) as f32;
+            let z = ((i * 7) % 11) as f32 * 0.05;
+            tris.push(tri([col, row, z], [col + 1.0, row, z], [col + 1.0, row + 1.0, z + 0.1]));
+            tris.push(tri([col, row, z], [col + 1.0, row + 1.0, z + 0.1], [col, row + 1.0, z]));
+        }
+        let cfg = settings(32, 2.0);
+        let bvh_ao = bake_vertex_ao(&tris, &cfg).unwrap();
+        let dirs = hemisphere_directions(cfg.rays);
+        // Spot-check first 30 triangles against brute-force `is_occluded`.
+        for (idx, t) in tris.iter().enumerate().take(30) {
+            let normal = face_normal(t).unwrap();
+            let (tan, bitan) = orthonormal_basis(normal);
+            for (ci, corner) in [t.a, t.b, t.c].iter().enumerate() {
+                let origin = add(*corner, scale(normal, cfg.bias));
+                let mut open = 0u32;
+                for local in &dirs {
+                    let dir = add(
+                        add(scale(tan, local[0]), scale(bitan, local[1])),
+                        scale(normal, local[2]),
+                    );
+                    if !is_occluded(origin, dir, cfg.max_distance, &tris, idx) {
+                        open += 1;
+                    }
+                }
+                let expected = open as f32 / cfg.rays as f32;
+                let actual = bvh_ao[idx * 3 + ci];
+                assert!(
+                    (actual - expected).abs() < 1e-4,
+                    "tri {idx} corner {ci}: bvh={actual}, brute={expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn uv_ao_baker_produces_rgba_texture() {
+        let uv_tris = vec![UvTriangle {
+            tri: flat_plane()[0],
+            uv_a: [0.0, 0.0],
+            uv_b: [1.0, 0.0],
+            uv_c: [1.0, 1.0],
+        }];
+        let rgba = bake_uv_ao_rgba(&uv_tris, 16, 16, &settings(16, 1.0)).unwrap();
+        assert_eq!(rgba.len(), 16 * 16 * 4);
+        assert!(rgba.chunks_exact(4).all(|px| px[3] == 255));
     }
 }

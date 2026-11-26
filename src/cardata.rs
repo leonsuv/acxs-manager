@@ -254,6 +254,330 @@ pub fn set_mass(car_dir: &Path, kg: f64) -> io::Result<()> {
     car.save_with_backup(&path)
 }
 
+// ---------------------------------------------------------------------------
+// Extended physics visualizers (dyno, drivetrain, aero, tyres)
+// ---------------------------------------------------------------------------
+
+/// Reads any `x|y` numeric LUT file from `data.acd` or `data/`.
+pub fn read_lut(car_dir: &Path, name: &str) -> Option<Vec<(f64, f64)>> {
+    read_curve(car_dir, name)
+}
+
+/// Linearly interpolates `x` on a sorted `(x, y)` LUT, clamping at the ends.
+pub fn eval_lut(points: &[(f64, f64)], x: f64) -> f64 {
+    if points.is_empty() {
+        return 0.0;
+    }
+    if x <= points[0].0 {
+        return points[0].1;
+    }
+    if x >= points[points.len() - 1].0 {
+        return points[points.len() - 1].1;
+    }
+    let hi = points.partition_point(|&(px, _)| px < x);
+    let (x0, y0) = points[hi - 1];
+    let (x1, y1) = points[hi];
+    if (x1 - x0).abs() < 1e-12 {
+        y0
+    } else {
+        y0 + (y1 - y0) * ((x - x0) / (x1 - x0))
+    }
+}
+
+/// One point on a car's dyno chart.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DynoPoint {
+    pub rpm: f64,
+    pub torque_nm: f64,
+    pub power_kw: f64,
+    pub power_hp: f64,
+}
+
+/// Full engine dyno curve (including turbo boost when `[TURBO_0..N]` is present).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DynoCurve {
+    pub limiter_rpm: Option<f64>,
+    pub points: Vec<DynoPoint>,
+    pub peak_power_kw: f64,
+    pub peak_torque_nm: f64,
+}
+
+/// Reads the engine dyno curve from `engine.ini` + `power.lut` (+ optional turbos).
+pub fn read_dyno(car_dir: &Path) -> Option<DynoCurve> {
+    let engine = load_data_ini(car_dir, "engine.ini").ok()?;
+    let limiter_rpm = number(&engine, "ENGINE_DATA", "LIMITER");
+    let curve_name = text(&engine, "HEADER", "POWER_CURVE").unwrap_or_else(|| "power.lut".into());
+    let base = read_curve(car_dir, &curve_name)?;
+
+    // Collect optional `[TURBO_0..N]` boost parameters.
+    let mut turbos = Vec::new();
+    for i in 0u32.. {
+        let sec = format!("TURBO_{i}");
+        let Some(max_boost) = number(&engine, &sec, "MAX_BOOST") else {
+            break;
+        };
+        let ref_rpm = number(&engine, &sec, "REFERENCE_RPM").unwrap_or(4000.0).max(1.0);
+        let gamma = number(&engine, &sec, "GAMMA").unwrap_or(1.0);
+        let wastegate = number(&engine, &sec, "WASTEGATE").unwrap_or(max_boost);
+        turbos.push((max_boost, ref_rpm, gamma, wastegate));
+    }
+
+    let mut points = Vec::with_capacity(base.len());
+    let mut peak_power_kw = 0.0f64;
+    let mut peak_torque_nm = 0.0f64;
+    for (rpm, base_torque) in base {
+        let boost: f64 = turbos
+            .iter()
+            .map(|&(max_b, ref_r, gamma, wg)| {
+                let raw = max_b * (rpm / ref_r).clamp(0.0, 2.0).powf(gamma);
+                if wg > 0.0 { raw.min(wg) } else { raw }
+            })
+            .sum();
+        let torque_nm = base_torque * (1.0 + boost);
+        let power_kw = torque_nm * rpm / RPM_NM_TO_WATTS_DIVISOR / 1000.0;
+        let power_hp = power_kw * 1.341_022_1;
+        peak_power_kw = peak_power_kw.max(power_kw);
+        peak_torque_nm = peak_torque_nm.max(torque_nm);
+        points.push(DynoPoint {
+            rpm,
+            torque_nm,
+            power_kw,
+            power_hp,
+        });
+    }
+
+    Some(DynoCurve {
+        limiter_rpm,
+        points,
+        peak_power_kw,
+        peak_torque_nm,
+    })
+}
+
+/// Drivetrain gearing and speed-per-gear calculations.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DrivetrainData {
+    pub traction: Option<String>,
+    pub gears: Vec<f64>,
+    pub final_ratio: f64,
+    pub reverse_ratio: Option<f64>,
+    pub limiter_rpm: f64,
+    pub rear_tyre_radius_m: f64,
+}
+
+impl DrivetrainData {
+    /// Theoretical wheel speed in km/h for 1-based forward `gear_index` at `rpm`.
+    pub fn speed_kmh_at(&self, gear_index: usize, rpm: f64) -> Option<f64> {
+        let ratio = *self.gears.get(gear_index.checked_sub(1)?)?;
+        let total = ratio * self.final_ratio;
+        if total <= 0.0 || !total.is_finite() {
+            return None;
+        }
+        let wheel_rps = (rpm / 60.0) / total;
+        let circum = std::f64::consts::TAU * self.rear_tyre_radius_m;
+        Some(wheel_rps * circum * 3.6)
+    }
+
+    /// Top speed in km/h at the rev limiter for each forward gear.
+    pub fn gear_top_speeds_kmh(&self) -> Vec<f64> {
+        (1..=self.gears.len())
+            .filter_map(|g| self.speed_kmh_at(g, self.limiter_rpm))
+            .collect()
+    }
+}
+
+/// Reads gearing from `drivetrain.ini`, rev limiter from `engine.ini`, and rear tyre
+/// radius from `tyres.ini`.
+pub fn read_drivetrain(car_dir: &Path) -> Option<DrivetrainData> {
+    let dt = load_data_ini(car_dir, "drivetrain.ini").ok()?;
+    let count = count(&dt, "GEARS", "COUNT")? as usize;
+    let mut gears = Vec::with_capacity(count);
+    for i in 1..=count {
+        gears.push(number(&dt, "GEARS", &format!("GEAR_{i}"))?);
+    }
+    let final_ratio = number(&dt, "GEARS", "FINAL")?;
+    let reverse_ratio = number(&dt, "GEARS", "GEAR_R");
+    let traction = text(&dt, "TRACTION", "TYPE");
+    let limiter_rpm = load_data_ini(car_dir, "engine.ini")
+        .ok()
+        .and_then(|e| number(&e, "ENGINE_DATA", "LIMITER"))
+        .unwrap_or(7500.0);
+    let rear_tyre_radius_m = load_data_ini(car_dir, "tyres.ini")
+        .ok()
+        .and_then(|t| number(&t, "REAR", "RADIUS"))
+        .filter(|&r| r > 0.1 && r < 1.5)
+        .unwrap_or(0.33);
+
+    Some(DrivetrainData {
+        traction,
+        gears,
+        final_ratio,
+        reverse_ratio,
+        limiter_rpm,
+        rear_tyre_radius_m,
+    })
+}
+
+/// One aerodynamic wing/body element from `aero.ini`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WingSpec {
+    pub name: String,
+    pub chord: f64,
+    pub span: f64,
+    pub position_z: f64,
+    pub angle_deg: f64,
+    pub cl_gain: f64,
+    pub cd_gain: f64,
+    pub lut_aoa_cl: Vec<(f64, f64)>,
+    pub lut_aoa_cd: Vec<(f64, f64)>,
+}
+
+/// Aerodynamic model parsed from `aero.ini` + wing LUTs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AeroData {
+    pub wings: Vec<WingSpec>,
+}
+
+/// Computed aerodynamic forces at a given airspeed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AeroForces {
+    pub speed_kmh: f64,
+    pub front_downforce_n: f64,
+    pub rear_downforce_n: f64,
+    pub total_downforce_n: f64,
+    pub total_drag_n: f64,
+    /// Front share of total downforce in `0.0..=100.0`%.
+    pub front_balance_pct: f64,
+}
+
+impl AeroData {
+    /// Computes downforce and drag at `speed_kmh` (air density `1.225 kg/m^3`).
+    pub fn forces_at_speed(&self, speed_kmh: f64) -> AeroForces {
+        let v = speed_kmh / 3.6;
+        let q = 0.5 * 1.225 * v * v;
+        let mut front_df = 0.0;
+        let mut rear_df = 0.0;
+        let mut drag = 0.0;
+        for w in &self.wings {
+            let area = (w.chord * w.span).max(0.0);
+            let cl = eval_lut(&w.lut_aoa_cl, w.angle_deg) * w.cl_gain;
+            let cd = eval_lut(&w.lut_aoa_cd, w.angle_deg) * w.cd_gain;
+            let df = q * area * cl;
+            let dr = q * area * cd;
+            if w.position_z >= 0.0 {
+                front_df += df;
+            } else {
+                rear_df += df;
+            }
+            drag += dr;
+        }
+        let total_df = front_df + rear_df;
+        let front_balance_pct = if total_df.abs() > 1e-6 {
+            (front_df / total_df * 100.0).clamp(0.0, 100.0)
+        } else {
+            50.0
+        };
+        AeroForces {
+            speed_kmh,
+            front_downforce_n: front_df,
+            rear_downforce_n: rear_df,
+            total_downforce_n: total_df,
+            total_drag_n: drag,
+            front_balance_pct,
+        }
+    }
+}
+
+/// Reads `aero.ini` and its referenced AoA CL/CD LUTs.
+pub fn read_aero(car_dir: &Path) -> Option<AeroData> {
+    let aero = load_data_ini(car_dir, "aero.ini").ok()?;
+    let mut wings = Vec::new();
+    for i in 0u32.. {
+        let sec = format!("WING_{i}");
+        let Some(chord) = number(&aero, &sec, "CHORD") else {
+            break;
+        };
+        let span = number(&aero, &sec, "SPAN").unwrap_or(1.0);
+        let name = text(&aero, &sec, "NAME").unwrap_or_else(|| sec.clone());
+        let position_z = text(&aero, &sec, "POSITION")
+            .and_then(|s| s.split(',').nth(2)?.trim().parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let angle_deg = number(&aero, &sec, "ANGLE").unwrap_or(0.0);
+        let cl_gain = number(&aero, &sec, "CL_GAIN").unwrap_or(1.0);
+        let cd_gain = number(&aero, &sec, "CD_GAIN").unwrap_or(1.0);
+        let lut_aoa_cl = text(&aero, &sec, "LUT_AOA_CL")
+            .and_then(|f| read_lut(car_dir, &f))
+            .unwrap_or_default();
+        let lut_aoa_cd = text(&aero, &sec, "LUT_AOA_CD")
+            .and_then(|f| read_lut(car_dir, &f))
+            .unwrap_or_default();
+        wings.push(WingSpec {
+            name,
+            chord,
+            span,
+            position_z,
+            angle_deg,
+            cl_gain,
+            cd_gain,
+            lut_aoa_cl,
+            lut_aoa_cd,
+        });
+    }
+    (!wings.is_empty()).then_some(AeroData { wings })
+}
+
+/// Tyre thermal & wear curves for one compound set.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TyreCompound {
+    pub index: u32,
+    pub front_name: String,
+    pub rear_name: String,
+    pub front_ideal_psi: Option<f64>,
+    pub rear_ideal_psi: Option<f64>,
+    pub front_thermal_lut: Vec<(f64, f64)>,
+    pub rear_thermal_lut: Vec<(f64, f64)>,
+    pub front_wear_lut: Vec<(f64, f64)>,
+    pub rear_wear_lut: Vec<(f64, f64)>,
+}
+
+/// Reads all tyre compounds and their thermal/wear LUTs from `tyres.ini`.
+pub fn read_tyre_curves(car_dir: &Path) -> Vec<TyreCompound> {
+    let Ok(ini) = load_data_ini(car_dir, "tyres.ini") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for idx in 0u32..16 {
+        let f_sec = if idx == 0 { "FRONT".to_string() } else { format!("FRONT_{idx}") };
+        let r_sec = if idx == 0 { "REAR".to_string() } else { format!("REAR_{idx}") };
+        let Some(front_name) = text(&ini, &f_sec, "NAME") else {
+            if idx == 0 { continue; } else { break; }
+        };
+        let rear_name = text(&ini, &r_sec, "NAME").unwrap_or_else(|| front_name.clone());
+        let tf_sec = if idx == 0 { "THERMAL_FRONT".to_string() } else { format!("THERMAL_FRONT_{idx}") };
+        let tr_sec = if idx == 0 { "THERMAL_REAR".to_string() } else { format!("THERMAL_REAR_{idx}") };
+        out.push(TyreCompound {
+            index: idx,
+            front_name,
+            rear_name,
+            front_ideal_psi: number(&ini, &f_sec, "PRESSURE_IDEAL"),
+            rear_ideal_psi: number(&ini, &r_sec, "PRESSURE_IDEAL"),
+            front_thermal_lut: text(&ini, &tf_sec, "PERFORMANCE_CURVE")
+                .and_then(|f| read_lut(car_dir, &f))
+                .unwrap_or_default(),
+            rear_thermal_lut: text(&ini, &tr_sec, "PERFORMANCE_CURVE")
+                .and_then(|f| read_lut(car_dir, &f))
+                .unwrap_or_default(),
+            front_wear_lut: text(&ini, &f_sec, "WEAR_CURVE")
+                .and_then(|f| read_lut(car_dir, &f))
+                .unwrap_or_default(),
+            rear_wear_lut: text(&ini, &r_sec, "WEAR_CURVE")
+                .and_then(|f| read_lut(car_dir, &f))
+                .unwrap_or_default(),
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,5 +710,49 @@ mod tests {
                 ("Gears".to_string(), "5".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn reads_dyno_drivetrain_aero_and_tyre_curves() {
+        let car = TempCar::new("physics_lab");
+        write_full_car(&car);
+        car.write(
+            "drivetrain.ini",
+            "[TRACTION]\r\nTYPE=RWD\r\n\r\n[GEARS]\r\nCOUNT=3\r\nGEAR_1=3.0\r\nGEAR_2=2.0\r\nGEAR_3=1.2\r\nFINAL=3.5\r\nGEAR_R=-3.2\r\n",
+        );
+        car.write(
+            "aero.ini",
+            "[WING_0]\r\nNAME=FRONT\r\nCHORD=1.0\r\nSPAN=1.5\r\nPOSITION=0,0.2,1.5\r\nLUT_AOA_CL=wing_f_cl.lut\r\nLUT_AOA_CD=wing_f_cd.lut\r\nCL_GAIN=1.0\r\nCD_GAIN=1.0\r\nANGLE=4\r\n\r\n\
+             [WING_1]\r\nNAME=REAR\r\nCHORD=1.0\r\nSPAN=1.5\r\nPOSITION=0,0.8,-1.8\r\nLUT_AOA_CL=wing_f_cl.lut\r\nLUT_AOA_CD=wing_f_cd.lut\r\nCL_GAIN=1.2\r\nCD_GAIN=1.0\r\nANGLE=4\r\n",
+        );
+        car.write("wing_f_cl.lut", "0|0.4\r\n8|1.2\r\n");
+        car.write("wing_f_cd.lut", "0|0.1\r\n8|0.3\r\n");
+        car.write(
+            "tyres.ini",
+            "[FRONT]\r\nNAME=Slick\r\nRADIUS=0.33\r\nPRESSURE_IDEAL=22\r\nWEAR_CURVE=wear.lut\r\n\r\n\
+             [REAR]\r\nNAME=Slick\r\nRADIUS=0.34\r\nPRESSURE_IDEAL=23\r\n\r\n\
+             [THERMAL_FRONT]\r\nPERFORMANCE_CURVE=thermal.lut\r\n",
+        );
+        car.write("wear.lut", "0|100\r\n100|80\r\n");
+        car.write("thermal.lut", "20|0.90\r\n80|1.00\r\n120|0.92\r\n");
+
+        let dyno = read_dyno(&car.0).unwrap();
+        assert_eq!(dyno.points.len(), 4);
+        assert!(dyno.peak_power_kw > 180.0);
+
+        let dt = read_drivetrain(&car.0).unwrap();
+        let tops = dt.gear_top_speeds_kmh();
+        assert_eq!(tops.len(), 3);
+        assert!(tops[0] < tops[1] && tops[1] < tops[2]);
+
+        let aero = read_aero(&car.0).unwrap();
+        let forces = aero.forces_at_speed(200.0);
+        assert!(forces.total_downforce_n > 1000.0);
+        assert!(forces.front_balance_pct > 40.0 && forces.front_balance_pct < 50.0);
+
+        let tyres = read_tyre_curves(&car.0);
+        assert_eq!(tyres.len(), 1);
+        assert_eq!(tyres[0].front_thermal_lut.len(), 3);
+        assert_eq!(tyres[0].front_wear_lut.len(), 2);
     }
 }

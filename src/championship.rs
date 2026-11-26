@@ -26,15 +26,38 @@ pub struct Championship {
     /// Points for positions 1, 2, 3 and so on.
     pub points_table: Vec<u32>,
     pub rounds: Vec<Round>,
+    #[serde(default)]
+    pub playable: bool,
+    #[serde(default)]
+    pub player_car: String,
+    #[serde(default)]
+    pub player_skin: String,
+    #[serde(default)]
+    pub opponents: Vec<crate::race::AiOpponent>,
+    #[serde(default)]
+    pub session_template: crate::race_options::RaceExtras,
+    #[serde(default)]
+    pub scoring: Scoring,
+    /// Success ballast in kg applied to top championship standings (e.g. `[30, 20, 10]`).
+    #[serde(default)]
+    pub success_ballast_kg: Vec<u32>,
 }
 
 /// One race weekend: the track it ran on and every driver's result.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Round {
     pub track: String,
     pub layout: Option<String>,
     pub results: Vec<RaceResult>,
+    #[serde(default)]
+    pub laps: u32,
+    #[serde(default)]
+    pub weather: String,
+    #[serde(default)]
+    pub time_of_day_hour: u8,
+    #[serde(default)]
+    pub completed: bool,
 }
 
 /// One driver's result in one round.
@@ -51,7 +74,8 @@ pub struct RaceResult {
 }
 
 /// Extra rules that change how a round is scored.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Scoring {
     /// Bonus points for the fastest lap, awarded only to a driver who did not retire.
     pub fastest_lap_bonus: u32,
@@ -159,7 +183,90 @@ pub fn preset_names() -> Vec<&'static str> {
 
 impl Championship {
     pub fn new(name: impl Into<String>, points_table: Vec<u32>) -> Self {
-        Self { name: name.into(), points_table, rounds: Vec::new() }
+        Self {
+            name: name.into(),
+            points_table,
+            rounds: Vec::new(),
+            playable: false,
+            player_car: String::new(),
+            player_skin: String::new(),
+            opponents: Vec::new(),
+            session_template: crate::race_options::RaceExtras::default(),
+            scoring: Scoring::default(),
+            success_ballast_kg: Vec::new(),
+        }
+    }
+
+    /// Builds a [`crate::race::QuickRace`] for `round_index`, applying `success_ballast_kg`
+    /// based on current championship standings before this round.
+    pub fn build_round_race(
+        &self,
+        round_index: usize,
+        player_name: &str,
+    ) -> Result<crate::race::QuickRace, ChampionshipError> {
+        let round = self
+            .rounds
+            .get(round_index)
+            .ok_or_else(|| invalid(format!("round {} does not exist", round_index + 1)))?;
+        if self.player_car.trim().is_empty() {
+            return Err(invalid("championship has no player_car configured"));
+        }
+        let table = standings_with(self, self.scoring);
+        let ballast_for = |driver: &str| -> u32 {
+            table
+                .iter()
+                .position(|s| s.driver.eq_ignore_ascii_case(driver))
+                .and_then(|rank| self.success_ballast_kg.get(rank).copied())
+                .unwrap_or(0)
+        };
+        let mut opponents = self.opponents.clone();
+        for (i, opp) in opponents.iter_mut().enumerate() {
+            let name = if opp.driver_name.trim().is_empty() {
+                format!("AI {}", i + 1)
+            } else {
+                opp.driver_name.clone()
+            };
+            opp.ballast = opp.ballast.saturating_add(ballast_for(&name)).min(500);
+        }
+        let weather = if round.weather.trim().is_empty() {
+            "3_clear".to_string()
+        } else {
+            round.weather.clone()
+        };
+        let laps = if round.laps == 0 { 5 } else { round.laps };
+        let hour = if round.time_of_day_hour == 0 { 13 } else { round.time_of_day_hour };
+        let ai_count = opponents.len() as u32;
+        Ok(crate::race::QuickRace {
+            track: round.track.clone(),
+            track_layout: round.layout.clone(),
+            car: self.player_car.clone(),
+            skin: self.player_skin.clone(),
+            ai_count,
+            laps,
+            weather,
+            time_of_day_hour: hour,
+            player_name: player_name.to_string(),
+            extras: self.session_template,
+            opponents,
+            player_ballast: ballast_for(player_name).min(500),
+            ..crate::race::QuickRace::default()
+        })
+    }
+
+    /// Records validated results into `round_index` and marks the round completed.
+    pub fn record_round_results(
+        &mut self,
+        round_index: usize,
+        results: Vec<RaceResult>,
+    ) -> Result<(), ChampionshipError> {
+        check_results(&results).map_err(invalid)?;
+        let round = self
+            .rounds
+            .get_mut(round_index)
+            .ok_or_else(|| invalid(format!("round {} does not exist", round_index + 1)))?;
+        round.results = results;
+        round.completed = true;
+        Ok(())
     }
 
     /// Checks every rule: a non-empty name, a non-empty track for each round, and
@@ -382,7 +489,7 @@ pub fn import_results_csv(text: &str) -> Result<Round, ChampionshipError> {
         return Err(ChampionshipError::Invalid("the CSV has no result rows".into()));
     }
     check_results(&results).map_err(ChampionshipError::Invalid)?;
-    Ok(Round { track: String::new(), layout: None, results })
+    Ok(Round { track: String::new(), layout: None, results, ..Round::default() })
 }
 
 /// Reads an optional yes/no column. A missing or empty cell is `false`.
@@ -430,7 +537,7 @@ mod tests {
     }
 
     fn round(track: &str, results: Vec<RaceResult>) -> Round {
-        Round { track: track.into(), layout: None, results }
+        Round { track: track.into(), layout: None, results, ..Round::default() }
     }
 
     fn table() -> Vec<u32> {
@@ -606,9 +713,36 @@ mod tests {
             track: "Monza".into(),
             layout: Some("GP".into()),
             results: vec![result("A", 1)],
+            ..Round::default()
         });
         let text = champ.to_json().expect("serialize");
         assert_eq!(Championship::from_json(&text).expect("parse"), champ);
+    }
+
+    #[test]
+    fn legacy_championship_json_loads_with_defaults_and_applies_success_ballast() {
+        let legacy = r#"{"name":"GT3","points_table":[25,18],"rounds":[{"track":"monza","layout":null,"results":[{"driver":"Leo","position":1}]}]}"#;
+        let mut champ = Championship::from_json(legacy).unwrap();
+        assert!(!champ.playable);
+        champ.playable = true;
+        champ.player_car = "ks_ferrari_488_gt3".into();
+        champ.success_ballast_kg = vec![30, 15];
+        champ.opponents.push(crate::race::AiOpponent {
+            car: "ks_porsche_911_gt3_r".into(),
+            driver_name: "AI 1".into(),
+            ai_level: 92,
+            ..Default::default()
+        });
+        champ.rounds.push(Round {
+            track: "spa".into(),
+            laps: 8,
+            ..Round::default()
+        });
+        let race = champ.build_round_race(1, "Leo").unwrap();
+        assert_eq!(race.track, "spa");
+        assert_eq!(race.laps, 8);
+        assert_eq!(race.player_ballast, 30);
+        assert_eq!(race.opponents.len(), 1);
     }
 
     #[test]

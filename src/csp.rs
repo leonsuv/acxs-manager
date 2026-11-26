@@ -31,6 +31,76 @@ pub const KNOWN_PATCHES: &[(&str, &str)] = &[
     ),
 ];
 
+/// sha256 of `dwrite.dll` -> CSP numeric build number (fallback when `data_manifest.ini` is absent).
+pub const KNOWN_PATCH_BUILDS: &[(&str, u32)] = &[
+    (
+        "6546fdf7854213dcc87a0b2bcb68155bebcc0d7892d3becb5795f310cbf24c6e",
+        3334,
+    ),
+    (
+        "178e3fef2cc08ade04ba37624f277da07edb0c633b2f4af3d7695202c2e4c645",
+        3675,
+    ),
+];
+
+fn known_build(sha256: &str) -> Option<u32> {
+    KNOWN_PATCH_BUILDS
+        .iter()
+        .find(|(hash, _)| *hash == sha256)
+        .map(|(_, build)| *build)
+}
+
+/// Reads the numeric CSP build from `<root>/extension/config/data_manifest.ini`
+/// (`[VERSION]` `SHADERS_PATCH_BUILD`, `BUILD`, or `VERSION_ID`).
+pub fn manifest_build(root: &Path) -> Option<u32> {
+    let text = fs::read_to_string(root.join(EXTENSION_NAME).join("config").join("data_manifest.ini")).ok()?;
+    let mut in_version = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(sec) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            in_version = sec.trim().eq_ignore_ascii_case("VERSION");
+            continue;
+        }
+        if !in_version {
+            continue;
+        }
+        if let Some((k, v)) = trimmed.split_once('=') {
+            let key = k.trim();
+            if (key.eq_ignore_ascii_case("SHADERS_PATCH_BUILD")
+                || key.eq_ignore_ascii_case("BUILD")
+                || key.eq_ignore_ascii_case("VERSION_ID"))
+                && let Ok(build) = v.trim().parse::<u32>()
+                && build > 0
+            {
+                return Some(build);
+            }
+        }
+    }
+    None
+}
+
+/// Returns the installed CSP build number in `ac_root`, or `None` when CSP is not installed
+/// or its build number cannot be determined.
+pub fn installed_build(ac_root: &Path) -> Option<u32> {
+    let dll = ac_root.join(DLL_NAME);
+    if !dll.is_file() {
+        return None;
+    }
+    if let Some(build) = manifest_build(ac_root) {
+        return Some(build);
+    }
+    let sha = sha256_file(&dll).ok()?;
+    known_build(&sha)
+}
+
+/// Returns the numeric CSP build number of a discovered patch folder, if available.
+pub fn patch_build(patch: &LightsPatch) -> Option<u32> {
+    manifest_build(&patch.folder).or_else(|| known_build(&patch.sha256))
+}
+
 #[derive(Debug)]
 pub enum CspError {
     GameRunning,
@@ -557,8 +627,10 @@ mod manifest_tests {
         let manifest = "; comment\n[\u{2139}]\nNAME=x\n\n[VERSION]\nSHADERS_PATCH=0.3.0-preview649\nSHADERS_PATCH_BUILD=4184\n";
         fs::write(root.join("extension").join("config").join("data_manifest.ini"), manifest).unwrap();
         assert_eq!(installed_version(&root).unwrap().as_deref(), Some("0.3.0-preview649"));
+        assert_eq!(installed_build(&root), Some(4184));
         fs::remove_file(root.join(DLL_NAME)).unwrap();
         assert_eq!(installed_version(&root).unwrap(), None);
+        assert_eq!(installed_build(&root), None);
         fs::remove_dir_all(&root).ok();
     }
 }

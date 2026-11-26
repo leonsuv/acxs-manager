@@ -15,21 +15,39 @@ pub enum RaceMode {
     /// Practice, qualifying and race, with opponents.
     #[default]
     Weekend,
+    /// Open practice session with AI traffic/opponents.
+    TrackDay,
     Hotlap,
     TimeAttack,
     Drift,
+    /// Drag strip head-to-head matches.
+    Drag,
 }
 
 impl RaceMode {
-    pub const ALL: [RaceMode; 4] = [RaceMode::Weekend, RaceMode::Hotlap, RaceMode::TimeAttack, RaceMode::Drift];
+    pub const ALL: [RaceMode; 6] = [
+        RaceMode::Weekend,
+        RaceMode::TrackDay,
+        RaceMode::Hotlap,
+        RaceMode::TimeAttack,
+        RaceMode::Drift,
+        RaceMode::Drag,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             RaceMode::Weekend => "Race weekend",
+            RaceMode::TrackDay => "Track day",
             RaceMode::Hotlap => "Hotlap",
             RaceMode::TimeAttack => "Time attack",
             RaceMode::Drift => "Drift",
+            RaceMode::Drag => "Drag",
         }
+    }
+
+    /// True when this mode supports AI opponents on track.
+    pub fn allows_opponents(self) -> bool {
+        matches!(self, RaceMode::Weekend | RaceMode::TrackDay | RaceMode::Drag)
     }
 
     /// Time attack runs on the track's line: every layout the game uses it on has one, and drift
@@ -42,10 +60,68 @@ impl RaceMode {
     pub fn session(self) -> Option<(&'static str, u8, &'static str)> {
         match self {
             RaceMode::Weekend => None,
+            RaceMode::TrackDay => Some(("Track Day", 1, "PIT")),
             RaceMode::Hotlap => Some(("Hotlap", 4, "HOTLAP_START")),
             RaceMode::TimeAttack => Some(("Time Attack", 5, "START")),
             RaceMode::Drift => Some(("Drift Session", 6, "PIT")),
+            RaceMode::Drag => Some(("Drag Race", 7, "START")),
         }
+    }
+}
+
+/// `[GHOST_CAR]` settings in `race.ini`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GhostCarConfig {
+    pub enabled: bool,
+    pub recording: bool,
+    pub playing: bool,
+    pub load: bool,
+    pub file: String,
+    /// Lead advantage in hundredths of a second (e.g. `50` = `0.50` s).
+    pub advantage_centis: i32,
+}
+
+/// `[DYNAMIC_TRACK]` settings in `race.ini`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DynamicTrackConfig {
+    /// 0=Dusty, 1=Old, 2=Slow, 3=Green, 4=Fast, 5=Optimum.
+    pub preset: u8,
+    pub session_start: u32,
+    pub randomness: u32,
+    pub lap_gain: u32,
+    pub session_transfer: u32,
+}
+
+impl Default for DynamicTrackConfig {
+    fn default() -> Self {
+        Self {
+            preset: 5,
+            session_start: 100,
+            randomness: 0,
+            lap_gain: 1,
+            session_transfer: 100,
+        }
+    }
+}
+
+impl DynamicTrackConfig {
+    pub fn validate(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        if self.preset > 5 {
+            problems.push("Dynamic track preset must be 0 to 5.".to_string());
+        }
+        if self.session_start > 100 || self.session_transfer > 100 {
+            problems.push("Dynamic track grip and transfer are at most 100 percent.".to_string());
+        }
+        if self.randomness > 10 {
+            problems.push("Dynamic track randomness is 0 to 10.".to_string());
+        }
+        if self.lap_gain == 0 || self.lap_gain > 100 {
+            problems.push("Dynamic track lap gain is 1 to 100.".to_string());
+        }
+        problems
     }
 }
 
@@ -92,6 +168,12 @@ pub struct RaceExtras {
     /// Also write the driver aids below to `assists.ini` when the race starts.
     pub write_assists: bool,
     pub assists: Assists,
+    /// Track Day duration in minutes (0 = unlimited).
+    pub track_day_minutes: u32,
+    /// Number of Drag matches (1..=99).
+    pub drag_matches: u32,
+    /// Enable CSP AI Flood traffic (`extension/config/new_behaviour.ini`).
+    pub ai_flood: bool,
 }
 
 impl Default for RaceExtras {
@@ -116,6 +198,9 @@ impl Default for RaceExtras {
             allowed_tyres_out: -1,
             write_assists: false,
             assists: Assists::default(),
+            track_day_minutes: 0,
+            drag_matches: 3,
+            ai_flood: false,
         }
     }
 }

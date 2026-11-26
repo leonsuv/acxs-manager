@@ -68,6 +68,28 @@ impl Lap {
         Ok(Lap { samples })
     }
 
+    /// Builds a [`Lap`] directly from a 200-bin [`crate::session_recorder::LapTrace`],
+    /// eliminating manual CSV export/paste.
+    pub fn from_trace(trace: &crate::session_recorder::LapTrace) -> Result<Lap, DeltaError> {
+        let len = if trace.track_length_m > 0.0 {
+            f64::from(trace.track_length_m)
+        } else {
+            1000.0
+        };
+        let bin_count = trace.bins.len().max(1) as f64;
+        let mut samples = Vec::new();
+        for (i, bin) in trace.bins.iter().enumerate() {
+            if let Some(b) = bin {
+                let distance_m = (i as f64 / bin_count) * len;
+                samples.push(Sample {
+                    distance_m,
+                    time_ms: f64::from(b.elapsed_ms),
+                });
+            }
+        }
+        Lap::new(samples)
+    }
+
     fn start_distance(&self) -> Option<f64> {
         self.samples.first().map(|s| s.distance_m)
     }
@@ -318,5 +340,34 @@ mod tests {
         assert_eq!(delta_ms(&r, &empty, 0.0), None);
         assert!(delta_trace(&r, &empty, 10.0).is_empty());
         assert_eq!(final_delta_ms(&r, &empty), None);
+    }
+
+    #[test]
+    fn lap_trace_200_bins_converts_to_delta_lap() {
+        use crate::session_recorder::{LapTrace, LapTraceBin, TRACE_BINS};
+        let mut bins = Vec::with_capacity(TRACE_BINS);
+        for i in 0..TRACE_BINS {
+            bins.push(Some(LapTraceBin {
+                elapsed_ms: i as f32 * 500.0,
+                speed_kmh: 180.0,
+                throttle: 1.0,
+                brake: 0.0,
+                steer: 0.0,
+                lat_g: 0.0,
+                x: i as f32 * 25.0,
+                z: 0.0,
+                gear: 4,
+            }));
+        }
+        let trace = LapTrace {
+            car_id: "car".into(),
+            track_id: "monza".into(),
+            lap_time_ms: 100_000,
+            track_length_m: 5000.0,
+            bins,
+        };
+        let lap = Lap::from_trace(&trace).unwrap();
+        assert_eq!(lap.samples.len(), TRACE_BINS);
+        assert!((time_at_distance(&lap, 2500.0).unwrap() - 50_000.0).abs() < 1.0);
     }
 }

@@ -8,12 +8,13 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-const DEFAULT_SIZE: [f32; 2] = [1180.0, 760.0];
+const DEFAULT_SIZE: [f32; 2] = [1320.0, 820.0];
 const MIN_SIZE: [f32; 2] = [920.0, 600.0];
 /// How often the window is looked at for changes.
 const CHECK_EVERY: Duration = Duration::from_millis(1500);
 
-#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WindowState {
     pub width: f32,
     pub height: f32,
@@ -33,12 +34,8 @@ fn path() -> PathBuf {
     settings_file.parent().unwrap_or(std::path::Path::new(".")).join("window.json")
 }
 
-/// The saved state, made safe to apply.
-pub fn load() -> WindowState {
-    let mut state: WindowState = std::fs::read_to_string(path())
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default();
+/// Sanitize a deserialized [`WindowState`] into safe screen bounds.
+fn sanitize(mut state: WindowState) -> WindowState {
     state.width = state.width.clamp(MIN_SIZE[0], 7680.0);
     state.height = state.height.clamp(MIN_SIZE[1], 4320.0);
     // A position far outside any sensible desktop, e.g. a monitor that is gone now.
@@ -48,6 +45,15 @@ pub fn load() -> WindowState {
         state.y = None;
     }
     state
+}
+
+/// The saved state, made safe to apply.
+pub fn load() -> WindowState {
+    let state: WindowState = std::fs::read_to_string(path())
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    sanitize(state)
 }
 
 /// Watches the window and writes the state when it changes.
@@ -88,5 +94,25 @@ impl Tracker {
                 let _ = std::fs::write(path(), text);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loads_legacy_and_partial_window_json() {
+        let partial: WindowState = serde_json::from_str(r#"{"width": 1440, "height": 900}"#).unwrap();
+        let clean = sanitize(partial);
+        assert_eq!(clean.width, 1440.0);
+        assert_eq!(clean.height, 900.0);
+        assert_eq!(clean.x, None);
+        assert!(!clean.maximized);
+
+        let offscreen = sanitize(WindowState { width: 400.0, height: 300.0, x: Some(99999.0), y: Some(10.0), maximized: false });
+        assert_eq!(offscreen.width, MIN_SIZE[0]);
+        assert_eq!(offscreen.height, MIN_SIZE[1]);
+        assert_eq!(offscreen.x, None);
     }
 }

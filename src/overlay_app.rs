@@ -48,6 +48,14 @@ ICON = icon.png
 FUNCTION_MAIN = windowSession
 MIN_SIZE = 200, 120
 SIZE = 260, 150
+
+[WINDOW_...]
+ID = coach
+NAME = ACXS Coach
+ICON = icon.png
+FUNCTION_MAIN = windowCoach
+MIN_SIZE = 240, 110
+SIZE = 340, 140
 ";
 
 /// The part of the script that does not depend on the layout.
@@ -190,7 +198,55 @@ function script.windowSession(dt)
   ui.text('Top last lap   ' .. speedText(topLast))
   ui.text('Top of session   ' .. speedText(topBest))
 end
+
+local coachTargetMs, coachStreak, coachStdDev, coachTip = 0, 0, 0, 'Complete a lap for live coaching.'
+local coachPoll = 0
+
+local function refreshCoach(dt)
+  coachPoll = coachPoll + dt
+  if coachPoll < 1.0 then return end
+  coachPoll = 0
+  local cfg = ac.INIConfig.load(ac.getFolder(ac.FolderID.ACDocuments) .. '/cfg/acxs_coach_state.ini')
+  if not cfg then return end
+  coachTargetMs = cfg:get('COACH', 'TARGET_LAP_MS', 0)
+  coachStreak = cfg:get('COACH', 'STREAK_CLEAN_LAPS', 0)
+  coachStdDev = cfg:get('COACH', 'STD_DEV_MS', 0)
+  coachTip = cfg:get('COACH', 'TIP_TEXT', coachTip)
+end
+
+function script.windowCoach(dt)
+  refreshCoach(dt)
+  ui.text('Target lap   ' .. lapText(coachTargetMs))
+  ui.text('Clean streak   ' .. tostring(coachStreak) .. ' laps')
+  ui.text(string.format('Consistency   +/-%.2fs', coachStdDev / 1000))
+  ui.textWrapped(coachTip)
+end
 "#;
+
+/// Live coaching metrics written atomically to `Documents/Assetto Corsa/cfg/acxs_coach_state.ini`
+/// so `ACXS Coach` displays real-time consistency and corner tips without HTTP polling.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CoachState {
+    pub target_lap_ms: u32,
+    pub streak_clean_laps: u32,
+    pub std_dev_ms: u32,
+    pub tip_corner: u32,
+    pub tip_text: String,
+}
+
+pub fn write_coach_state(cfg_dir: &Path, state: &CoachState) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(cfg_dir)?;
+    let path = cfg_dir.join("acxs_coach_state.ini");
+    let tmp = cfg_dir.join("acxs_coach_state.ini.tmp");
+    let clean_tip: String = state.tip_text.chars().filter(|c| !c.is_control()).collect();
+    let content = format!(
+        "[COACH]\r\nTARGET_LAP_MS={}\r\nSTREAK_CLEAN_LAPS={}\r\nSTD_DEV_MS={}\r\nTIP_CORNER={}\r\nTIP_TEXT={}\r\n",
+        state.target_lap_ms, state.streak_clean_laps, state.std_dev_ms, state.tip_corner, clean_tip
+    );
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(path)
+}
 
 /// A Lua string literal.
 fn lua_string(text: &str) -> String {
@@ -301,7 +357,7 @@ mod tests {
         let layout = Layout::default_layout();
         let text = script(&layout);
         assert_eq!(text.matches("kind = '").count(), layout.widgets.len());
-        for function in ["windowDash", "windowDelta", "windowSession"] {
+        for function in ["windowDash", "windowDelta", "windowSession", "windowCoach"] {
             assert!(MANIFEST.contains(&format!("FUNCTION_MAIN = {function}")));
             assert!(text.contains(&format!("function script.{function}(dt)")));
         }

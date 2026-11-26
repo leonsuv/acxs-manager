@@ -20,7 +20,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 const FILE_NAME: &str = "acxs-presets.json";
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const MAX_NAME_CHARS: usize = 64;
 
 /// A named quick-race setup.
@@ -273,6 +273,27 @@ struct RaceRecord {
     /// Added later; presets saved before it load with the defaults.
     #[serde(default)]
     extras: crate::race_options::RaceExtras,
+    /// Added in v2; empty in v1 presets (losslessly falls back to `ai_count`).
+    #[serde(default)]
+    opponents: Vec<crate::race::AiOpponent>,
+    #[serde(default)]
+    player_setup: String,
+    #[serde(default)]
+    player_ballast: u32,
+    #[serde(default)]
+    player_restrictor: u32,
+    #[serde(default)]
+    time_of_day_minute: u8,
+    #[serde(default)]
+    date_unix: Option<i64>,
+    #[serde(default)]
+    weather_type: Option<i32>,
+    #[serde(default)]
+    weather_controller: Option<String>,
+    #[serde(default)]
+    ghost_car: crate::race_options::GhostCarConfig,
+    #[serde(default)]
+    dynamic_track: crate::race_options::DynamicTrackConfig,
 }
 
 impl From<&Preset> for PresetRecord {
@@ -300,6 +321,16 @@ impl From<&QuickRace> for RaceRecord {
             player_name: race.player_name.clone(),
             grid_position: race.grid_position,
             extras: race.extras,
+            opponents: race.opponents.clone(),
+            player_setup: race.player_setup.clone(),
+            player_ballast: race.player_ballast,
+            player_restrictor: race.player_restrictor,
+            time_of_day_minute: race.time_of_day_minute,
+            date_unix: race.date_unix,
+            weather_type: race.weather_type,
+            weather_controller: race.weather_controller.clone(),
+            ghost_car: race.ghost_car.clone(),
+            dynamic_track: race.dynamic_track,
         }
     }
 }
@@ -320,6 +351,16 @@ impl From<RaceRecord> for QuickRace {
             player_name: record.player_name,
             grid_position: record.grid_position,
             extras: record.extras,
+            opponents: record.opponents,
+            player_setup: record.player_setup,
+            player_ballast: record.player_ballast,
+            player_restrictor: record.player_restrictor,
+            time_of_day_minute: record.time_of_day_minute,
+            date_unix: record.date_unix,
+            weather_type: record.weather_type,
+            weather_controller: record.weather_controller,
+            ghost_car: record.ghost_car,
+            dynamic_track: record.dynamic_track,
         }
     }
 }
@@ -493,6 +534,39 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert_eq!(fs::read_to_string(&path).expect("read back"), text);
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v1_preset_without_opponents_migrates_losslessly() {
+        let dir = scratch_dir("v1_migrate");
+        let path = default_path(&dir);
+        let v1_json = r#"{
+            "version": 1,
+            "presets": [{
+                "name": "Legacy Monza",
+                "race": {
+                    "track": "monza",
+                    "track_layout": null,
+                    "car": "ks_ferrari_488_gt3",
+                    "skin": "",
+                    "ai_count": 5,
+                    "laps": 6,
+                    "weather": "3_clear",
+                    "time_of_day_hour": 14,
+                    "ai_level": 92,
+                    "ai_aggression": 30,
+                    "player_name": "Leo",
+                    "grid_position": 2
+                }
+            }]
+        }"#;
+        fs::write(&path, v1_json).unwrap();
+        let store = PresetStore::load(&path).unwrap();
+        let loaded = store.get("Legacy Monza").unwrap();
+        assert_eq!(loaded.race.ai_count, 5);
+        assert!(loaded.race.opponents.is_empty());
+        assert_eq!(loaded.race.time_of_day_minute, 0);
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -34,6 +34,9 @@ pub const DEFAULT_BIND: &str = "127.0.0.1";
 
 const MAX_HEAD_BYTES: usize = 8 * 1024;
 const MAX_CONNECTIONS: usize = 16;
+/// Reserve at most 8 concurrent Server-Sent Events streams so polling routes never starve.
+const MAX_SSE_CONNECTIONS: usize = 8;
+const SSE_TICK: Duration = Duration::from_millis(250);
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const BUSY_WRITE_TIMEOUT: Duration = Duration::from_millis(200);
@@ -217,10 +220,97 @@ pub struct Snapshot {
     pub position: u32,
 }
 
+/// One car in the live multiplayer spectator feed.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct SpectatorCar {
+    pub car_id: u8,
+    pub driver: String,
+    pub model: String,
+    /// Normalized `[0, 1]` track map X coordinate.
+    pub x: f32,
+    /// Normalized `[0, 1]` track map Z coordinate.
+    pub z: f32,
+    pub spline_pos: f32,
+    pub speed_kmh: f32,
+    pub gear: i32,
+    pub lap: u32,
+    pub best_lap_ms: u32,
+    pub last_lap_ms: u32,
+    pub gap_ms: i32,
+    pub connected: bool,
+}
+
+/// Live multiplayer race state served by `GET /api/race` and `GET /api/events`.
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+pub struct RaceState {
+    pub track: String,
+    pub session: String,
+    pub elapsed_ms: i32,
+    /// Normalized `[0, 1]` polyline from [`crate::track_map::project_lap`].
+    pub track_outline: Vec<[f32; 2]>,
+    pub cars: Vec<SpectatorCar>,
+    pub recent_events: Vec<String>,
+}
+
+const SPECTATOR_HTML: &str = r##"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ACXS Live Spectator</title>
+<style>
+body { margin:0; background:#0d0f13; color:#e8eaed; font:14px/1.4 system-ui,sans-serif; }
+header { display:flex; justify-content:space-between; padding:12px 18px; border-bottom:1px solid #232730; }
+.layout { display:grid; grid-template-columns:1.2fr 1fr; gap:16px; padding:16px; }
+canvas { width:100%; height:480px; background:#14171e; border-radius:10px; }
+table { width:100%; border-collapse:collapse; background:#14171e; border-radius:10px; overflow:hidden; }
+th, td { padding:8px 10px; text-align:left; border-bottom:1px solid #232730; font-variant-numeric:tabular-nums; }
+th { color:#8b93a1; font-size:12px; text-transform:uppercase; }
+#events { margin-top:12px; font-size:12px; color:#9aa1ab; }
+</style>
+</head>
+<body>
+<header><strong id="title">ACXS Live Spectator</strong><span id="status">connecting...</span></header>
+<div class="layout">
+  <div><canvas id="map" width="640" height="480"></canvas><div id="events"></div></div>
+  <table><thead><tr><th>Pos</th><th>Driver</th><th>Car</th><th>Lap</th><th>Best</th><th>Speed</th></tr></thead><tbody id="tower"></tbody></table>
+</div>
+<script>
+(function(){
+  const cv=document.getElementById('map'), ctx=cv.getContext('2d');
+  const tower=document.getElementById('tower'), evEl=document.getElementById('events'), st=document.getElementById('status'), title=document.getElementById('title');
+  function fmt(ms){ if(!ms) return '-'; const m=Math.floor(ms/60000), s=Math.floor((ms%60000)/1000), r=ms%1000; return m+':'+String(s).padStart(2,'0')+'.'+String(r).padStart(3,'0'); }
+  function render(d){
+    title.textContent=(d.track||'Track')+' — '+(d.session||'Live');
+    ctx.clearRect(0,0,cv.width,cv.height);
+    if(d.track_outline && d.track_outline.length>1){
+      ctx.strokeStyle='#394150'; ctx.lineWidth=4; ctx.beginPath();
+      d.track_outline.forEach((p,i)=>{ const x=40+p[0]*(cv.width-80), y=40+p[1]*(cv.height-80); if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); });
+      ctx.stroke();
+    }
+    (d.cars||[]).forEach((c,i)=>{
+      if(!c.connected) return;
+      const x=40+c.x*(cv.width-80), y=40+c.z*(cv.height-80);
+      ctx.fillStyle=i===0?'#ff7a1a':'#38bdf8'; ctx.beginPath(); ctx.arc(x,y,6,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle='#fff'; ctx.font='11px sans-serif'; ctx.fillText(c.driver||String(c.car_id),x+8,y+4);
+    });
+    tower.innerHTML=(d.cars||[]).map((c,i)=>'<tr><td>'+(i+1)+'</td><td>'+c.driver+'</td><td>'+c.model+'</td><td>'+c.lap+'</td><td>'+fmt(c.best_lap_ms)+'</td><td>'+Math.round(c.speed_kmh)+'</td></tr>').join('');
+    evEl.textContent=(d.recent_events||[]).slice(-4).join(' | ');
+  }
+  const es=new EventSource('/api/events');
+  es.addEventListener('race', e=>{ st.textContent='live'; render(JSON.parse(e.data)); });
+  es.onerror=()=>{ st.textContent='reconnecting...'; };
+})();
+</script>
+</body>
+</html>
+"##;
+
 /// A running telemetry server. Dropping it or calling [`Dashboard::stop`]
 /// shuts the accept loop down and releases the port.
 pub struct Dashboard {
     latest: Arc<Mutex<Option<Snapshot>>>,
+    race: Arc<Mutex<Option<RaceState>>>,
     shutdown: Arc<AtomicBool>,
     local_addr: SocketAddr,
     accept_thread: Option<JoinHandle<()>>,
@@ -239,19 +329,23 @@ impl Dashboard {
         let local_addr = listener.local_addr()?;
 
         let latest = Arc::new(Mutex::new(None));
+        let race = Arc::new(Mutex::new(None));
         let shutdown = Arc::new(AtomicBool::new(false));
         let active = Arc::new(AtomicUsize::new(0));
+        let sse_active = Arc::new(AtomicUsize::new(0));
 
         let accept_thread = thread::Builder::new()
             .name("web-dashboard-accept".into())
             .spawn({
                 let latest = Arc::clone(&latest);
+                let race = Arc::clone(&race);
                 let shutdown = Arc::clone(&shutdown);
-                move || accept_loop(listener, latest, shutdown, active)
+                move || accept_loop(listener, latest, race, shutdown, active, sse_active)
             })?;
 
         Ok(Dashboard {
             latest,
+            race,
             shutdown,
             local_addr,
             accept_thread: Some(accept_thread),
@@ -266,6 +360,11 @@ impl Dashboard {
     /// Replaces the snapshot served by `/api/latest`.
     pub fn publish(&self, snapshot: Snapshot) {
         *self.latest.lock().unwrap_or_else(PoisonError::into_inner) = Some(snapshot);
+    }
+
+    /// Replaces the multiplayer race state served by `/api/race` and `/api/events`.
+    pub fn publish_race(&self, state: RaceState) {
+        *self.race.lock().unwrap_or_else(PoisonError::into_inner) = Some(state);
     }
 
     /// Stops the server. The accept loop exits and the listening port is
@@ -298,8 +397,10 @@ impl Drop for Slot {
 fn accept_loop(
     listener: TcpListener,
     latest: Arc<Mutex<Option<Snapshot>>>,
+    race: Arc<Mutex<Option<RaceState>>>,
     shutdown: Arc<AtomicBool>,
     active: Arc<AtomicUsize>,
+    sse_active: Arc<AtomicUsize>,
 ) {
     while !shutdown.load(Ordering::Acquire) {
         let stream = match listener.accept() {
@@ -318,11 +419,14 @@ fn accept_loop(
 
         let slot = Slot(Arc::clone(&active));
         let latest = Arc::clone(&latest);
+        let race = Arc::clone(&race);
+        let shutdown = Arc::clone(&shutdown);
+        let sse_active = Arc::clone(&sse_active);
         let _ = thread::Builder::new()
             .name("web-dashboard-conn".into())
             .spawn(move || {
                 let _slot = slot;
-                handle_connection(stream, &latest);
+                handle_connection(stream, &latest, &race, &shutdown, &sse_active);
             });
     }
 }
@@ -341,7 +445,13 @@ fn refuse_busy(mut stream: TcpStream) {
     let _ = stream.shutdown(Shutdown::Both);
 }
 
-fn handle_connection(stream: TcpStream, latest: &Mutex<Option<Snapshot>>) {
+fn handle_connection(
+    stream: TcpStream,
+    latest: &Mutex<Option<Snapshot>>,
+    race: &Mutex<Option<RaceState>>,
+    shutdown: &AtomicBool,
+    sse_active: &Arc<AtomicUsize>,
+) {
     if stream.set_nonblocking(false).is_err()
         || stream.set_read_timeout(Some(READ_TIMEOUT)).is_err()
         || stream.set_write_timeout(Some(WRITE_TIMEOUT)).is_err()
@@ -419,8 +529,79 @@ fn handle_connection(stream: TcpStream, latest: &Mutex<Option<Snapshot>>) {
                 },
             }
         }
+        "/spectator" => reply(
+            stream,
+            200,
+            "OK",
+            &[("Content-Type", "text/html; charset=utf-8")],
+            SPECTATOR_HTML.as_bytes(),
+        ),
+        "/api/race" => {
+            let state = race.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            match state {
+                None => reply(stream, 204, "No Content", &[], b""),
+                Some(state) => match serde_json::to_vec(&state) {
+                    Ok(body) => reply(
+                        stream,
+                        200,
+                        "OK",
+                        &[("Content-Type", "application/json")],
+                        &body,
+                    ),
+                    Err(_) => reply(
+                        stream,
+                        500,
+                        "Internal Server Error",
+                        TEXT,
+                        b"Failed to encode race state\n",
+                    ),
+                },
+            }
+        }
+        "/api/events" => {
+            if sse_active.fetch_add(1, Ordering::AcqRel) >= MAX_SSE_CONNECTIONS {
+                sse_active.fetch_sub(1, Ordering::AcqRel);
+                return reply(
+                    stream,
+                    503,
+                    "Service Unavailable",
+                    &[("Content-Type", "text/plain; charset=utf-8"), ("Retry-After", "1")],
+                    b"Too many SSE listeners\n",
+                );
+            }
+            let _sse_slot = Slot(Arc::clone(sse_active));
+            stream_sse(stream, race, shutdown);
+        }
         _ => reply(stream, 404, "Not Found", TEXT, b"Not found\n"),
     }
+}
+
+fn stream_sse(mut stream: TcpStream, race: &Mutex<Option<RaceState>>, shutdown: &AtomicBool) {
+    let head = concat!(
+        "HTTP/1.1 200 OK\r\n",
+        "Content-Type: text/event-stream; charset=utf-8\r\n",
+        "Cache-Control: no-cache\r\n",
+        "X-Content-Type-Options: nosniff\r\n",
+        "Connection: close\r\n\r\n",
+    );
+    if stream.write_all(head.as_bytes()).is_err() || stream.flush().is_err() {
+        return;
+    }
+    while !shutdown.load(Ordering::Acquire) {
+        let state = race.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let frame = match state {
+            Some(ref s) => match serde_json::to_string(s) {
+                Ok(json) => format!("event: race\ndata: {json}\n\n"),
+                Err(_) => ": encode error\n\n".to_string(),
+            },
+            None => ": waiting\n\n".to_string(),
+        };
+        if stream.write_all(frame.as_bytes()).is_err() || stream.flush().is_err() {
+            break;
+        }
+        thread::sleep(SSE_TICK);
+    }
+    let _ = stream.shutdown(Shutdown::Both);
 }
 
 enum HeadError {
@@ -674,5 +855,80 @@ mod tests {
         dash.stop();
 
         assert!(TcpStream::connect(addr).is_err(), "port should be closed after stop");
+    }
+
+    #[test]
+    fn api_race_returns_204_then_200_json_after_publish() {
+        let dash = loopback_server();
+        let (status, _, _) = exchange(&dash, &get("/api/race"));
+        assert_eq!(status, 204);
+
+        dash.publish_race(RaceState {
+            track: "monza".into(),
+            session: "Race".into(),
+            elapsed_ms: 42_000,
+            track_outline: vec![[0.0, 0.0], [1.0, 1.0]],
+            cars: vec![SpectatorCar {
+                car_id: 0,
+                driver: "Ada".into(),
+                model: "ks_ferrari_488_gt3".into(),
+                x: 0.5,
+                z: 0.5,
+                spline_pos: 0.5,
+                speed_kmh: 245.0,
+                gear: 5,
+                lap: 2,
+                best_lap_ms: 108_200,
+                last_lap_ms: 108_500,
+                gap_ms: 0,
+                connected: true,
+            }],
+            recent_events: vec!["Ada set fastest lap".into()],
+        });
+
+        let (status, head, body) = exchange(&dash, &get("/api/race"));
+        assert_eq!(status, 200);
+        assert_eq!(header(&head, "Content-Type"), Some("application/json"));
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["track"], "monza");
+        assert_eq!(json["cars"][0]["driver"], "Ada");
+        dash.stop();
+    }
+
+    #[test]
+    fn api_events_streams_valid_sse_frames_and_exits_on_shutdown() {
+        let dash = loopback_server();
+        dash.publish_race(RaceState {
+            track: "spa".into(),
+            session: "Qualify".into(),
+            ..RaceState::default()
+        });
+
+        let mut stream = TcpStream::connect(dash.local_addr()).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        stream.write_all(&get("/api/events")).unwrap();
+
+        let mut buf = [0u8; 2048];
+        let mut collected = String::new();
+        while !collected.contains("event: race\ndata: ") {
+            let n = stream.read(&mut buf).unwrap();
+            assert!(n > 0);
+            collected.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        assert!(collected.contains("text/event-stream"));
+        assert!(collected.contains("\"track\":\"spa\""));
+
+        dash.stop();
+    }
+
+    #[test]
+    fn spectator_html_route_returns_200_with_eventsource() {
+        let dash = loopback_server();
+        let (status, head, body) = exchange(&dash, &get("/spectator"));
+        assert_eq!(status, 200);
+        assert_eq!(header(&head, "Content-Type"), Some("text/html; charset=utf-8"));
+        let html = String::from_utf8(body).unwrap();
+        assert!(html.contains("EventSource('/api/events')"));
+        dash.stop();
     }
 }

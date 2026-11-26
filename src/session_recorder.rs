@@ -60,6 +60,105 @@ const COUNTED: [EventKind; 6] = [
 
 /// Number of equal slices of the lap used to place events.
 pub const SEGMENTS: usize = 100;
+/// Number of normalized-distance bins in a unified [`LapTrace`] (shared with `delta.rs`,
+/// `corner_coach.rs`, and `trajectory.rs`).
+pub const TRACE_BINS: usize = 200;
+
+/// One normalized-distance bin of a recorded lap trace.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LapTraceBin {
+    pub elapsed_ms: f32,
+    pub speed_kmh: f32,
+    pub throttle: f32,
+    pub brake: f32,
+    pub steer: f32,
+    pub lat_g: f32,
+    pub x: f32,
+    pub z: f32,
+    pub gear: u8,
+}
+
+/// Compact 200-bin telemetry trace for one completed lap (~6 KB JSON).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LapTrace {
+    pub car_id: String,
+    pub track_id: String,
+    pub lap_time_ms: u32,
+    pub track_length_m: f32,
+    pub bins: Vec<Option<LapTraceBin>>,
+}
+
+/// `%APPDATA%\ACXS\traces`.
+pub fn traces_dir() -> PathBuf {
+    crate::settings::settings_path()
+        .parent()
+        .map_or_else(|| PathBuf::from("traces"), |dir| dir.join("traces"))
+}
+
+fn trace_file(dir: &Path, car_id: &str, track_id: &str, suffix: &str) -> PathBuf {
+    let clean = |s: &str| -> String {
+        s.chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+            .collect()
+    };
+    dir.join(format!("{}__{}__{suffix}.json", clean(car_id), clean(track_id)))
+}
+
+/// Atomically persists a [`LapTrace`] (`suffix` e.g. `"pb"` or `"last"`).
+pub fn save_trace(dir: &Path, trace: &LapTrace, suffix: &str) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let path = trace_file(dir, &trace.car_id, &trace.track_id, suffix);
+    let tmp = path.with_extension("json.tmp");
+    let json = serde_json::to_string(trace).map_err(std::io::Error::other)?;
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(path)
+}
+
+/// Loads a saved [`LapTrace`] if present.
+pub fn load_trace(dir: &Path, car_id: &str, track_id: &str, suffix: &str) -> Option<LapTrace> {
+    let path = trace_file(dir, car_id, track_id, suffix);
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Appends a completed valid lap directly into [`crate::laptimes::LapStore`], avoiding
+/// duplicate insertion if the exact `(car, track, layout, lap_time_ms)` was just recorded.
+pub fn record_completed_lap_to_store(
+    store: &mut crate::laptimes::LapStore,
+    session: &RecordedSession,
+    driver: &str,
+    lap_time_ms: u32,
+    sectors_ms: Option<Vec<u32>>,
+) -> bool {
+    if (lap_time_ms as i32) < MIN_REAL_LAP_MS {
+        return false;
+    }
+    let layout = (!session.track_layout.is_empty()).then(|| session.track_layout.clone());
+    if let Some(last) = store.records().last()
+        && last.car.eq_ignore_ascii_case(&session.car_id)
+        && last.track.eq_ignore_ascii_case(&session.track_id)
+        && last.layout == layout
+        && last.lap_time_ms == lap_time_ms
+    {
+        return false;
+    }
+    store
+        .add(crate::laptimes::LapRecord {
+            track: session.track_id.clone(),
+            layout,
+            car: session.car_id.clone(),
+            driver: if driver.trim().is_empty() {
+                "Driver".to_string()
+            } else {
+                driver.trim().to_string()
+            },
+            lap_time_ms,
+            sectors_ms,
+            recorded_at: crate::laptimes::now_recorded_at(),
+        })
+        .is_ok()
+}
 
 /// What happened at a spot on the track.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -182,6 +281,12 @@ pub struct RecordedSession {
     pub max_yaw: f32,
     #[serde(default)]
     pub max_lateral_g: f32,
+    /// Active car setup name (for Setup A/B testing).
+    #[serde(default)]
+    pub setup_name: Option<String>,
+    /// SHA-256 hash of active car setup INI (for Setup A/B testing).
+    #[serde(default)]
+    pub setup_hash: Option<String>,
 }
 
 impl RecordedSession {
@@ -332,12 +437,24 @@ pub struct SessionAggregator {
     points: std::collections::BTreeMap<(EventKind, i32, i32), (f32, f32, f64)>,
     started: bool,
     kind: Option<sharedmem::SessionType>,
+    track_length_m: f32,
+    active_lap_bins: Vec<Option<LapTraceBin>>,
+    best_lap_trace: Option<LapTrace>,
+    last_lap_trace: Option<LapTrace>,
 }
 
 impl SessionAggregator {
     pub fn new(started_at: String) -> Self {
         let started_unix = chrono::Utc::now().timestamp();
         Self { session: RecordedSession { started_at, started_unix, ..RecordedSession::default() }, ..Self::default() }
+    }
+
+    pub fn best_lap_trace(&self) -> Option<&LapTrace> {
+        self.best_lap_trace.as_ref()
+    }
+
+    pub fn last_lap_trace(&self) -> Option<&LapTrace> {
+        self.last_lap_trace.as_ref()
     }
 
     /// True when `snap` belongs to another session than the one being recorded.
@@ -367,6 +484,7 @@ impl SessionAggregator {
             self.session.track_layout = s.track_configuration.clone();
             self.session.session_type = session_label(g.session);
             self.kind = Some(g.session);
+            self.track_length_m = s.track_spline_length;
         }
         self.clock += dt;
         let speed = f64::from(p.speed_kmh.max(0.0));
@@ -376,6 +494,22 @@ impl SessionAggregator {
 
         let before = self.event_counts();
         self.track_laps(g.completed_laps, g.last_lap_ms, g.best_lap_ms);
+        if self.active_lap_bins.len() != TRACE_BINS {
+            self.active_lap_bins = vec![None; TRACE_BINS];
+        }
+        let bin_idx = ((g.normalized_car_position.clamp(0.0, 0.9999) * TRACE_BINS as f32) as usize)
+            .min(TRACE_BINS - 1);
+        self.active_lap_bins[bin_idx] = Some(LapTraceBin {
+            elapsed_ms: g.current_lap_ms.max(0) as f32,
+            speed_kmh: p.speed_kmh.max(0.0),
+            throttle: p.throttle.clamp(0.0, 1.0),
+            brake: p.brake.clamp(0.0, 1.0),
+            steer: p.steer_angle,
+            lat_g: p.g_forces[0],
+            x: g.car_coordinates[0],
+            z: g.car_coordinates[2],
+            gear: p.gear.clamp(0, 255) as u8,
+        });
         self.track_tyres_out(p.number_of_tyres_out);
         self.track_airborne(&p.wheel_load, dt);
         self.track_crash(p.speed_kmh, &p.g_forces, p.brake);
@@ -459,6 +593,23 @@ impl SessionAggregator {
     fn track_laps(&mut self, completed: i32, last_ms: i32, best_ms: i32) {
         if self.last_completed.is_some_and(|prev| completed > prev) && last_ms >= MIN_REAL_LAP_MS {
             self.session.laps.push(RecordedLap { number: completed, time_ms: last_ms });
+            if self.active_lap_bins.iter().any(Option::is_some) {
+                let trace = LapTrace {
+                    car_id: self.session.car_id.clone(),
+                    track_id: self.session.full_track_id(),
+                    lap_time_ms: last_ms as u32,
+                    track_length_m: self.track_length_m,
+                    bins: std::mem::replace(&mut self.active_lap_bins, vec![None; TRACE_BINS]),
+                };
+                let is_pb = self
+                    .best_lap_trace
+                    .as_ref()
+                    .is_none_or(|b| trace.lap_time_ms < b.lap_time_ms);
+                if is_pb {
+                    self.best_lap_trace = Some(trace.clone());
+                }
+                self.last_lap_trace = Some(trace);
+            }
         }
         self.last_completed = Some(completed);
         if best_ms >= MIN_REAL_LAP_MS {
@@ -1427,5 +1578,34 @@ mod map_point_tests {
         assert_eq!(shown[0].count, 30);
         assert_eq!(shown[1].kind, EventKind::Crash);
         assert_eq!(s.map_points(1).len(), 1);
+    }
+
+    #[test]
+    fn valid_lap_auto_inserts_into_lap_store_once_and_saves_trace() {
+        let mut store = crate::laptimes::LapStore::new();
+        let session = RecordedSession {
+            car_id: "ks_ferrari_488_gt3".into(),
+            track_id: "monza".into(),
+            ..RecordedSession::default()
+        };
+        assert!(record_completed_lap_to_store(&mut store, &session, "Leo", 108_500, None));
+        // Duplicate immediate lap is deduplicated.
+        assert!(!record_completed_lap_to_store(&mut store, &session, "Leo", 108_500, None));
+        // Unrealistically short placeholder lap is ignored.
+        assert!(!record_completed_lap_to_store(&mut store, &session, "Leo", 3_000, None));
+        assert_eq!(store.records().len(), 1);
+
+        let dir = std::env::temp_dir().join(format!("acxs-trace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let trace = LapTrace {
+            car_id: "ks_ferrari_488_gt3".into(),
+            track_id: "monza".into(),
+            lap_time_ms: 108_500,
+            track_length_m: 5793.0,
+            bins: vec![None; TRACE_BINS],
+        };
+        save_trace(&dir, &trace, "pb").unwrap();
+        assert_eq!(load_trace(&dir, "ks_ferrari_488_gt3", "monza", "pb").unwrap(), trace);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

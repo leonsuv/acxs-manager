@@ -7,11 +7,105 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use chrono::Local;
+use serde_json::{Map, Value};
 
 use crate::util::matches;
+
+/// Editable fields of a skin's `ui_skin.json`. `None` means "leave unchanged" when saving.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkinMeta {
+    pub skinname: Option<String>,
+    pub drivername: Option<String>,
+    pub team: Option<String>,
+    pub number: Option<String>,
+    pub country: Option<String>,
+    pub priority: Option<i64>,
+}
+
+/// Reads `<skin_dir>/ui_skin.json` into typed [`SkinMeta`]. Missing file gives default empty fields.
+pub fn read_skin_meta(skin_dir: &Path) -> SkinMeta {
+    let manifest = read_manifest(&skin_dir.join("ui_skin.json"));
+    let priority = manifest
+        .as_ref()
+        .and_then(|v| v.get("priority"))
+        .and_then(|v| match v {
+            Value::Number(n) => n.as_i64(),
+            Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        });
+    SkinMeta {
+        skinname: manifest_str(manifest.as_ref(), "skinname"),
+        drivername: manifest_str(manifest.as_ref(), "drivername"),
+        team: manifest_str(manifest.as_ref(), "team"),
+        number: manifest_str(manifest.as_ref(), "number"),
+        country: manifest_str(manifest.as_ref(), "country"),
+        priority,
+    }
+}
+
+/// Patches `<skin_dir>/ui_skin.json` with `meta`, preserving unknown keys and backing up
+/// any existing file to `ui_skin.json.acxs-backup-<stamp>`. Nothing is deleted.
+pub fn save_skin_meta(skin_dir: &Path, meta: &SkinMeta) -> io::Result<Option<PathBuf>> {
+    if !skin_dir.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("skin folder not found: {}", skin_dir.display()),
+        ));
+    }
+    let path = skin_dir.join("ui_skin.json");
+    let mut map: Map<String, Value> = match read_manifest(&path) {
+        Some(Value::Object(m)) => m,
+        _ => Map::new(),
+    };
+    if let Some(v) = &meta.skinname {
+        map.insert("skinname".into(), Value::String(v.clone()));
+    }
+    if let Some(v) = &meta.drivername {
+        map.insert("drivername".into(), Value::String(v.clone()));
+    }
+    if let Some(v) = &meta.team {
+        map.insert("team".into(), Value::String(v.clone()));
+    }
+    if let Some(v) = &meta.number {
+        map.insert("number".into(), Value::String(v.clone()));
+    }
+    if let Some(v) = &meta.country {
+        map.insert("country".into(), Value::String(v.clone()));
+    }
+    if let Some(v) = meta.priority {
+        map.insert("priority".into(), Value::Number(v.into()));
+    }
+
+    let text = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&Value::Object(map)).map_err(io::Error::other)?
+    );
+    let backup = if path.exists() {
+        let stamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
+        let mut candidate = skin_dir.join(format!("ui_skin.json.acxs-backup-{stamp}"));
+        let mut n = 1u32;
+        while candidate.exists() {
+            candidate = skin_dir.join(format!("ui_skin.json.acxs-backup-{stamp}-{n}"));
+            n += 1;
+        }
+        fs::rename(&path, &candidate)?;
+        Some(candidate)
+    } else {
+        None
+    };
+
+    if let Err(e) = fs::write(&path, text.as_bytes()) {
+        if let Some(b) = &backup {
+            let _ = fs::rename(b, &path);
+        }
+        return Err(e);
+    }
+    Ok(backup)
+}
 
 /// One car skin folder.
 #[derive(Debug, Clone)]
@@ -468,5 +562,40 @@ mod tests {
         let skins = scan_skins(&root.0, "ks_audi");
         let bare = skins.iter().find(|s| s.skin_id == "05_none").unwrap();
         assert_eq!(skin_summary(bare), "None · 0 textures");
+    }
+
+    #[test]
+    fn save_skin_meta_preserves_unknown_keys_and_creates_backup() {
+        let root = TempRoot::new("meta_save");
+        let dir = root.skin_dir("ks_audi", "01_red");
+        fs::write(
+            dir.join("ui_skin.json"),
+            r#"{"skinname": "Old Name", "custom_flag": true, "number": "12"}"#,
+        )
+        .unwrap();
+
+        let patch = SkinMeta {
+            skinname: Some("New Name".into()),
+            drivername: Some("A. Driver".into()),
+            team: Some("Works".into()),
+            country: Some("DE".into()),
+            priority: Some(5),
+            number: None,
+        };
+        let backup = save_skin_meta(&dir, &patch).unwrap().expect("backup created");
+        assert!(backup.is_file());
+
+        let raw: Value = serde_json::from_str(&fs::read_to_string(dir.join("ui_skin.json")).unwrap()).unwrap();
+        assert_eq!(raw["skinname"], "New Name");
+        assert_eq!(raw["drivername"], "A. Driver");
+        assert_eq!(raw["team"], "Works");
+        assert_eq!(raw["country"], "DE");
+        assert_eq!(raw["priority"], 5);
+        assert_eq!(raw["number"], "12");
+        assert_eq!(raw["custom_flag"], true);
+
+        let loaded = read_skin_meta(&dir);
+        assert_eq!(loaded.skinname.as_deref(), Some("New Name"));
+        assert_eq!(loaded.priority, Some(5));
     }
 }

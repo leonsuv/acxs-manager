@@ -844,3 +844,268 @@ fn parse_features(json: &str) -> Vec<String> {
         _ => Vec::new(),
     }
 }
+
+/// Parsed server track identifier, including any CSP minimum build prefix (`csp/<build>/../`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedTrack {
+    pub track_id: String,
+    pub layout: Option<String>,
+    pub min_csp_build: Option<u32>,
+}
+
+/// Splits a raw server track string such as `csp/2651/../la_canyons-freeroam` into
+/// its track folder id, optional layout, and optional required CSP build number.
+///
+/// Pass `installed_track_ids` (or `&[]`) so a track whose folder name itself contains a dash
+/// (e.g. `my-track`) is kept intact when installed.
+pub fn resolve_track_id(raw: &str, installed_track_ids: &[&str]) -> ResolvedTrack {
+    let mut name = raw.trim();
+    let mut min_csp_build: Option<u32> = None;
+
+    while let Some(rest) = name.strip_prefix("csp/") {
+        match rest.split_once("/../") {
+            Some((version, tail))
+                if !version.is_empty() && version.chars().all(|c| c.is_ascii_digit()) =>
+            {
+                if let Ok(build) = version.parse::<u32>()
+                    && build > 0
+                {
+                    min_csp_build = Some(min_csp_build.map_or(build, |prev| prev.max(build)));
+                }
+                name = tail;
+            }
+            _ => break,
+        }
+    }
+
+    let name = name.rsplit('/').next().unwrap_or(name);
+    if installed_track_ids.contains(&name) {
+        return ResolvedTrack {
+            track_id: name.to_string(),
+            layout: None,
+            min_csp_build,
+        };
+    }
+    match name.split_once('-') {
+        Some((id, layout)) => ResolvedTrack {
+            track_id: id.to_string(),
+            layout: Some(layout.to_string()),
+            min_csp_build,
+        },
+        None => ResolvedTrack {
+            track_id: name.to_string(),
+            layout: None,
+            min_csp_build,
+        },
+    }
+}
+
+/// Parameters for an Assetto Corsa HTTP `/SUB` booking registration request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BookingRequest {
+    pub driver_name: String,
+    pub steam_guid: String,
+    pub car_model: String,
+    pub car_skin: String,
+    pub password: String,
+}
+
+/// Outcome of a successful `/SUB` booking request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BookingReply {
+    pub accepted: bool,
+    pub message: String,
+    pub booking_time_sec: Option<u32>,
+}
+
+/// Booking-specific rejection or transport error.
+#[derive(Debug)]
+pub enum BookingError {
+    Closed,
+    CarUnavailable,
+    WrongPassword,
+    AlreadyBooked,
+    Rejected(String),
+    Transport(StatusError),
+}
+
+impl fmt::Display for BookingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BookingError::Closed => write!(f, "booking session is closed"),
+            BookingError::CarUnavailable => write!(f, "requested car slot is unavailable"),
+            BookingError::WrongPassword => write!(f, "wrong server password"),
+            BookingError::AlreadyBooked => write!(f, "already booked on this server"),
+            BookingError::Rejected(msg) => write!(f, "booking rejected: {msg}"),
+            BookingError::Transport(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for BookingError {}
+
+/// Sends an HTTP `/SUB` booking registration request to `host:port`.
+pub fn book(
+    host: &str,
+    port: u16,
+    req: &BookingRequest,
+    timeout: Duration,
+) -> Result<BookingReply, BookingError> {
+    validate_host(host).map_err(BookingError::Transport)?;
+    let budget = Budget {
+        started: Instant::now(),
+        total: timeout,
+    };
+    let path = format!(
+        "/SUB?name={}&guid={}&car={}&skin={}&pass={}",
+        crate::uri::percent_encode(&req.driver_name),
+        crate::uri::percent_encode(&req.steam_guid),
+        crate::uri::percent_encode(&req.car_model),
+        crate::uri::percent_encode(&req.car_skin),
+        crate::uri::percent_encode(&req.password),
+    );
+    let raw = get(host, port, &path, &budget).map_err(BookingError::Transport)?;
+    let text = utf8_body(raw).map_err(BookingError::Transport)?;
+    parse_booking_reply(&text)
+}
+
+/// Parses a `/SUB` reply (either plain text such as `OK` / `BOOKING_CLOSED` or JSON).
+pub fn parse_booking_reply(body: &str) -> Result<BookingReply, BookingError> {
+    let trimmed = body.trim();
+    if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(trimmed) {
+        let status = obj
+            .get("status")
+            .or_else(|| obj.get("result"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let msg = obj
+            .get("message")
+            .or_else(|| obj.get("error"))
+            .and_then(Value::as_str)
+            .unwrap_or(status)
+            .to_string();
+        let time = obj
+            .get("time")
+            .or_else(|| obj.get("timeleft"))
+            .and_then(Value::as_u64)
+            .and_then(|t| u32::try_from(t).ok());
+        if status.eq_ignore_ascii_case("OK") || obj.get("ok").and_then(Value::as_bool) == Some(true)
+        {
+            return Ok(BookingReply {
+                accepted: true,
+                message: if msg.is_empty() { "OK".into() } else { msg },
+                booking_time_sec: time,
+            });
+        }
+        return Err(classify_booking_error(&msg));
+    }
+
+    let upper = trimmed.to_ascii_uppercase();
+    if upper == "OK" || upper.starts_with("OK|") || upper.starts_with("BOOKED") {
+        let time = trimmed
+            .split('|')
+            .nth(1)
+            .and_then(|s| s.trim().parse::<u32>().ok());
+        return Ok(BookingReply {
+            accepted: true,
+            message: trimmed.to_string(),
+            booking_time_sec: time,
+        });
+    }
+    Err(classify_booking_error(trimmed))
+}
+
+fn classify_booking_error(msg: &str) -> BookingError {
+    let upper = msg.to_ascii_uppercase();
+    if upper.contains("CLOSED") || upper.contains("NOT_BOOKING") {
+        BookingError::Closed
+    } else if upper.contains("FULL") || upper.contains("UNAVAILABLE") || upper.contains("NO_SLOT") {
+        BookingError::CarUnavailable
+    } else if upper.contains("PASS") || upper.contains("DENIED") {
+        BookingError::WrongPassword
+    } else if upper.contains("ALREADY") {
+        BookingError::AlreadyBooked
+    } else {
+        BookingError::Rejected(msg.to_string())
+    }
+}
+
+#[cfg(test)]
+mod booking_and_track_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader};
+    use std::net::TcpListener;
+
+    fn serve_once(body: &'static str) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                let _ = reader.read_line(&mut line);
+                loop {
+                    let mut h = String::new();
+                    match reader.read_line(&mut h) {
+                        Ok(n) if n > 2 => continue,
+                        _ => break,
+                    }
+                }
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn resolve_track_id_extracts_min_csp_build_and_layout() {
+        let r = resolve_track_id("csp/2651/../la_canyons-freeroam", &["la_canyons"]);
+        assert_eq!(r.track_id, "la_canyons");
+        assert_eq!(r.layout.as_deref(), Some("freeroam"));
+        assert_eq!(r.min_csp_build, Some(2651));
+
+        let dashed = resolve_track_id("my-track", &["my-track"]);
+        assert_eq!(dashed.track_id, "my-track");
+        assert_eq!(dashed.layout, None);
+        assert_eq!(dashed.min_csp_build, None);
+    }
+
+    #[test]
+    fn mock_http_booking_sub_handles_ok_closed_full_and_wrong_password() {
+        let req = BookingRequest {
+            driver_name: "Ada Lovelace".into(),
+            steam_guid: "76561198000000001".into(),
+            car_model: "ks_ferrari_488_gt3".into(),
+            car_skin: "red".into(),
+            password: "secret".into(),
+        };
+
+        let p_ok = serve_once(r#"{"status":"OK","time":180}"#);
+        let reply = book("127.0.0.1", p_ok, &req, Duration::from_secs(3)).unwrap();
+        assert!(reply.accepted);
+        assert_eq!(reply.booking_time_sec, Some(180));
+
+        let p_closed = serve_once("BOOKING_CLOSED");
+        assert!(matches!(
+            book("127.0.0.1", p_closed, &req, Duration::from_secs(3)),
+            Err(BookingError::Closed)
+        ));
+
+        let p_full = serve_once(r#"{"status":"ERROR","error":"CAR_UNAVAILABLE"}"#);
+        assert!(matches!(
+            book("127.0.0.1", p_full, &req, Duration::from_secs(3)),
+            Err(BookingError::CarUnavailable)
+        ));
+
+        let p_pw = serve_once("WRONG_PASSWORD");
+        assert!(matches!(
+            book("127.0.0.1", p_pw, &req, Duration::from_secs(3)),
+            Err(BookingError::WrongPassword)
+        ));
+    }
+}

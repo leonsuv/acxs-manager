@@ -6,9 +6,11 @@
 //! must never block the UI thread on long work: run it on a thread and report
 //! back through the notices vector.
 
+use crate::ui::viewport3d::GlRenderer;
 use crate::ui::Notice;
 use eframe::egui;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 /// What a tool page can read from the app on each frame.
 pub struct ToolContext {
@@ -17,6 +19,8 @@ pub struct ToolContext {
     pub game_running: bool,
     /// Sessions the recorder has saved since the app started.
     pub sessions_saved: usize,
+    /// Shared OpenGL 3.3 renderer for 3D viewports (`None` in headless tests / software contexts).
+    pub gl: Option<Arc<Mutex<GlRenderer>>>,
 }
 
 mod content_editor;
@@ -29,6 +33,7 @@ mod mods_manager;
 mod setups;
 mod server;
 mod replay;
+mod trajectory;
 mod laptimes;
 mod sessions;
 mod live_telemetry;
@@ -108,6 +113,7 @@ pub fn registry() -> Vec<Box<dyn Tool>> {
         setups::tool(),
         server::tool(),
         replay::tool(),
+        trajectory::tool(),
         laptimes::tool(),
         sessions::tool(),
         live_telemetry::tool(),
@@ -151,6 +157,7 @@ mod headless_tests {
                 ac_root: root.clone(),
                 game_running,
                 sessions_saved: 0,
+                gl: None,
             };
             let mut notices = Vec::new();
             for frame in 0..4 {
@@ -165,7 +172,6 @@ mod headless_tests {
                     tool.tick();
                 });
                 output.textures_delta.clear();
-                // Background scans finish between frames in the app too.
                 std::thread::sleep(std::time::Duration::from_millis(15));
             }
         }
@@ -312,10 +318,15 @@ pub(crate) mod render_tests {
             }
             let ctx = egui::Context::default();
             crate::ui::theme::apply(&ctx);
-            let tool_ctx = ToolContext { ac_valid: root.is_some(), ac_root: root.clone(), game_running: false, sessions_saved: 0 };
+            let tool_ctx = ToolContext {
+                ac_valid: root.is_some(),
+                ac_root: root.clone(),
+                game_running: false,
+                sessions_saved: 0,
+                gl: None,
+            };
             let mut canvas = Canvas::default();
             let mut notices = Vec::new();
-            // Enough frames for background loads to land.
             for frame in 0..40 {
                 let input = egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(WIDTH as f32, HEIGHT as f32))),

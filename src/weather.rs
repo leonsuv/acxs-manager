@@ -381,6 +381,91 @@ fn push_one_sided(out: &mut Vec<String>, kind: &str, v02: &[String], v03: &[Stri
     }
 }
 
+/// One stage in a multi-stage WeatherFX / Sol / Pure weather plan.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WeatherPlanSlot {
+    pub weather_type: i32,
+    pub duration_minutes: u32,
+    pub transition_minutes: u32,
+}
+
+/// Multi-stage weather plan persisted under the user's `cfg/extension/weather_fx/` folder.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WeatherPlan {
+    pub controller: String,
+    pub implementation: String,
+    pub slots: Vec<WeatherPlanSlot>,
+}
+
+/// Selects the active WeatherFX controller and implementation in the user's `weather_fx.ini`
+/// override file (never modifying `<ac_root>`).
+pub fn select_controller_user(
+    ac_root: &Path,
+    user_weather_fx: &Path,
+    implementation: &str,
+    controller: &str,
+) -> io::Result<()> {
+    if crate::game::is_game_running() {
+        return Err(io::Error::new(io::ErrorKind::ResourceBusy, "Assetto Corsa is running"));
+    }
+    set_weather_value_user(ac_root, Some(user_weather_fx), "BASIC", "ENABLED", "1", true)?;
+    if !implementation.trim().is_empty() {
+        set_weather_value_user(ac_root, Some(user_weather_fx), "BASIC", "IMPLEMENTATION", implementation.trim(), true)?;
+    }
+    if !controller.trim().is_empty() {
+        set_weather_value_user(ac_root, Some(user_weather_fx), "BASIC", "CONTROLLER", controller.trim(), true)?;
+    }
+    Ok(())
+}
+
+/// Writes a multi-stage weather plan to `<user_cfg_dir>/extension/weather_fx/acxs_plan.ini`
+/// with rolling backup (never mutating `<ac_root>`).
+pub fn write_weather_plan(user_cfg_dir: &Path, plan: &WeatherPlan) -> io::Result<PathBuf> {
+    if crate::game::is_game_running() {
+        return Err(io::Error::new(io::ErrorKind::ResourceBusy, "Assetto Corsa is running"));
+    }
+    let dir = user_cfg_dir.join("extension").join("weather_fx");
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("acxs_plan.ini");
+    let mut ini = Ini::default();
+    ini.set("PLAN", "CONTROLLER", &plan.controller);
+    ini.set("PLAN", "IMPLEMENTATION", &plan.implementation);
+    ini.set("PLAN", "COUNT", plan.slots.len());
+    for (i, slot) in plan.slots.iter().enumerate() {
+        let sec = format!("SLOT_{i}");
+        ini.set(&sec, "WEATHER_TYPE", slot.weather_type);
+        ini.set(&sec, "DURATION_MINUTES", slot.duration_minutes);
+        ini.set(&sec, "TRANSITION_MINUTES", slot.transition_minutes);
+    }
+    ini.save_with_backup(&path)?;
+    Ok(path)
+}
+
+/// Reads back the user's weather plan from `<user_cfg_dir>/extension/weather_fx/acxs_plan.ini`.
+pub fn read_weather_plan(user_cfg_dir: &Path) -> io::Result<WeatherPlan> {
+    let path = user_cfg_dir.join("extension").join("weather_fx").join("acxs_plan.ini");
+    let ini = match Ini::load(&path) {
+        Ok(i) => i,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(WeatherPlan::default()),
+        Err(e) => return Err(e),
+    };
+    let count = ini.get_i64("PLAN", "COUNT").unwrap_or(0).max(0) as usize;
+    let mut slots = Vec::with_capacity(count);
+    for i in 0..count {
+        let sec = format!("SLOT_{i}");
+        slots.push(WeatherPlanSlot {
+            weather_type: ini.get_i64(&sec, "WEATHER_TYPE").unwrap_or(15) as i32,
+            duration_minutes: ini.get_i64(&sec, "DURATION_MINUTES").unwrap_or(15).max(0) as u32,
+            transition_minutes: ini.get_i64(&sec, "TRANSITION_MINUTES").unwrap_or(5).max(0) as u32,
+        });
+    }
+    Ok(WeatherPlan {
+        controller: ini.get("PLAN", "CONTROLLER").unwrap_or_default().trim().to_string(),
+        implementation: ini.get("PLAN", "IMPLEMENTATION").unwrap_or_default().trim().to_string(),
+        slots,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -673,5 +758,30 @@ mod tests {
         assert!(set_preset_value(&root, "../base", "PARAMETERS", "HUMIDITY", "1", false).is_err());
         assert!(read_preset_values(&root, "").is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn weather_plan_round_trip_never_mutates_ac_root() {
+        let root = temp_root("plan-root");
+        let user_cfg = temp_root("plan-user");
+        write(&root.join("extension/config/weather_fx.ini"), "[BASIC]\r\nENABLED=0\r\nCONTROLLER=base\r\nIMPLEMENTATION=base\r\n");
+        let user_fx = user_cfg.join("extension/weather_fx.ini");
+        select_controller_user(&root, &user_fx, "Pure", "pure").unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("extension/config/weather_fx.ini")).unwrap(),
+            "[BASIC]\r\nENABLED=0\r\nCONTROLLER=base\r\nIMPLEMENTATION=base\r\n"
+        );
+        let plan = WeatherPlan {
+            controller: "pure".into(),
+            implementation: "Pure".into(),
+            slots: vec![
+                WeatherPlanSlot { weather_type: 15, duration_minutes: 20, transition_minutes: 5 },
+                WeatherPlanSlot { weather_type: 6, duration_minutes: 15, transition_minutes: 3 },
+            ],
+        };
+        write_weather_plan(&user_cfg, &plan).unwrap();
+        assert_eq!(read_weather_plan(&user_cfg).unwrap(), plan);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(user_cfg).unwrap();
     }
 }

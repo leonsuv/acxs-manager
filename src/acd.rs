@@ -59,6 +59,10 @@ pub enum AcdError {
     Unsupported(String),
     /// No entry with the requested name.
     NotFound(String),
+    /// The game is running, so data archives must not change.
+    GameRunning,
+    /// An entry name could escape the target folder.
+    UnsafeEntry(String),
 }
 
 impl fmt::Display for AcdError {
@@ -69,6 +73,10 @@ impl fmt::Display for AcdError {
             AcdError::Truncated => write!(f, "ACD archive is truncated"),
             AcdError::Unsupported(what) => write!(f, "unsupported ACD data: {what}"),
             AcdError::NotFound(name) => write!(f, "ACD entry not found: {name}"),
+            AcdError::GameRunning => {
+                write!(f, "Close Assetto Corsa before unpacking or packing data.acd.")
+            }
+            AcdError::UnsafeEntry(name) => write!(f, "refusing unsafe ACD entry {name:?}"),
         }
     }
 }
@@ -342,6 +350,207 @@ fn derive_key(folder_name: &str) -> Result<Vec<u8>, AcdError> {
     Ok(key.into_bytes())
 }
 
+/// Encodes plaintext bytes into the 4-byte-per-plaintext-byte ACD representation.
+fn encode_bytes(plain: &[u8], key: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(plain.len() * 4);
+    for (i, &p) in plain.iter().enumerate() {
+        out.push(p.wrapping_add(key[i % key.len()]));
+        out.extend_from_slice(&[0, 0, 0]);
+    }
+    out
+}
+
+fn is_safe_entry_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\\', ':', '\0'])
+        && !name.chars().any(|c| c.is_control())
+}
+
+fn backup_path_for(path: &Path) -> std::path::PathBuf {
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "data".to_string());
+    let mut candidate = dir.join(format!("{name}.acxs-backup-{stamp}"));
+    let mut n = 1u32;
+    while candidate.exists() {
+        candidate = dir.join(format!("{name}.acxs-backup-{stamp}-{n}"));
+        n += 1;
+    }
+    candidate
+}
+
+/// Unpacks `acd_path` into `dest_dir` using `folder_name` to derive the key.
+///
+/// - Refuses with [`AcdError::GameRunning`] when `game_running` is true.
+/// - Rejects any entry name containing path separators, drive colons, `..`, or control chars.
+/// - Extracts into a staging folder first and renames into `dest_dir`; if `dest_dir` already
+///   exists, it is archived to `<dest_dir>.acxs-backup-<stamp>` (never deleted).
+/// - Also archives `acd_path`? No: `acd_path` itself is left untouched so callers (e.g.
+///   `car_tuning`) decide whether to archive `data.acd` aside; use [`unpack_car_data`] to
+///   unpack and archive `data.acd` in one step.
+pub fn unpack_acd(
+    acd_path: &Path,
+    folder_name: &str,
+    dest_dir: &Path,
+    game_running: bool,
+) -> Result<usize, AcdError> {
+    if game_running {
+        return Err(AcdError::GameRunning);
+    }
+    let bytes = std::fs::read(acd_path)?;
+    let raw = walk(&bytes)?;
+    let key = derive_key(folder_name)?;
+    for entry in &raw {
+        if !is_safe_entry_name(&entry.name) {
+            return Err(AcdError::UnsafeEntry(entry.name.clone()));
+        }
+    }
+
+    let parent = dest_dir.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let staging = parent.join(format!(
+        ".acxs-acd-unpack-{}-{}",
+        std::process::id(),
+        chrono::Local::now().format("%Y%m%d%H%M%S%3f")
+    ));
+    std::fs::create_dir_all(&staging)?;
+
+    for entry in &raw {
+        let plain = decode(entry.encoded, &key);
+        if let Err(e) = std::fs::write(staging.join(&entry.name), &plain) {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e.into());
+        }
+    }
+
+    let backup = if std::fs::symlink_metadata(dest_dir).is_ok() {
+        let b = backup_path_for(dest_dir);
+        if let Err(e) = std::fs::rename(dest_dir, &b) {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e.into());
+        }
+        Some(b)
+    } else {
+        None
+    };
+
+    if let Err(e) = std::fs::rename(&staging, dest_dir) {
+        let _ = std::fs::remove_dir_all(&staging);
+        if let Some(b) = backup {
+            let _ = std::fs::rename(b, dest_dir);
+        }
+        return Err(e.into());
+    }
+    Ok(raw.len())
+}
+
+/// Packs every regular file in `data_dir` (sorted by name, skipping `.acxs-backup-*` files)
+/// into `out_acd` using `folder_name` to derive the key.
+///
+/// - Refuses with [`AcdError::GameRunning`] when `game_running` is true.
+/// - If `out_acd` already exists, it is archived to `<out_acd>.acxs-backup-<stamp>` before rename.
+pub fn pack_acd(
+    data_dir: &Path,
+    folder_name: &str,
+    out_acd: &Path,
+    game_running: bool,
+) -> Result<usize, AcdError> {
+    if game_running {
+        return Err(AcdError::GameRunning);
+    }
+    let key = derive_key(folder_name)?;
+    let mut files: Vec<(String, std::path::PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(data_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.contains(".acxs-backup-") || name.starts_with('.') {
+            continue;
+        }
+        if !is_safe_entry_name(&name) || name.len() > MAX_NAME_LEN {
+            return Err(AcdError::UnsafeEntry(name));
+        }
+        files.push((name, path));
+    }
+    if files.len() > MAX_ENTRIES {
+        return Err(AcdError::Unsupported(format!(
+            "more than {MAX_ENTRIES} entries"
+        )));
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&HEADER_MARKER.to_le_bytes());
+    out.extend_from_slice(&0i32.to_le_bytes());
+    for (name, path) in &files {
+        let plain = std::fs::read(path)?;
+        let name_bytes = name.as_bytes();
+        let name_len = i32::try_from(name_bytes.len())
+            .map_err(|_| AcdError::Unsupported("entry name too long".into()))?;
+        let plain_len = i32::try_from(plain.len())
+            .map_err(|_| AcdError::Unsupported("entry file too large".into()))?;
+        out.extend_from_slice(&name_len.to_le_bytes());
+        out.extend_from_slice(name_bytes);
+        out.extend_from_slice(&plain_len.to_le_bytes());
+        out.extend_from_slice(&encode_bytes(&plain, &key));
+    }
+
+    let parent = out_acd.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let tmp = parent.join(format!(
+        ".data.acd.tmp-{}-{}",
+        std::process::id(),
+        chrono::Local::now().format("%Y%m%d%H%M%S%3f")
+    ));
+    std::fs::write(&tmp, &out)?;
+
+    let backup = if std::fs::symlink_metadata(out_acd).is_ok() {
+        let b = backup_path_for(out_acd);
+        if let Err(e) = std::fs::rename(out_acd, &b) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+        Some(b)
+    } else {
+        None
+    };
+
+    if let Err(e) = std::fs::rename(&tmp, out_acd) {
+        let _ = std::fs::remove_file(&tmp);
+        if let Some(b) = backup {
+            let _ = std::fs::rename(b, out_acd);
+        }
+        return Err(e.into());
+    }
+    Ok(files.len())
+}
+
+/// Unpacks `<car_dir>/data.acd` into `<car_dir>/data/` and archives `data.acd` to
+/// `data.acd.acxs-backup-<stamp>` so Assetto Corsa (and `car_tuning`) read `data/`.
+pub fn unpack_car_data(car_dir: &Path, game_running: bool) -> Result<(usize, std::path::PathBuf), AcdError> {
+    if game_running {
+        return Err(AcdError::GameRunning);
+    }
+    let folder = car_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let acd_path = car_dir.join("data.acd");
+    let data_dir = car_dir.join("data");
+    let count = unpack_acd(&acd_path, &folder, &data_dir, game_running)?;
+    let archived_acd = backup_path_for(&acd_path);
+    std::fs::rename(&acd_path, &archived_acd)?;
+    Ok((count, archived_acd))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,5 +757,108 @@ mod tests {
     fn read_file_missing_path_is_io_error() {
         let path = std::env::temp_dir().join("acxs_acd_test_definitely_missing.acd");
         assert!(matches!(read_file(&path), Err(AcdError::Io(_))));
+    }
+
+    #[test]
+    fn pack_and_unpack_round_trip_preserves_exact_bytes_for_all_files() {
+        let root = std::env::temp_dir().join(format!("acxs_acd_rt_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let src = root.join("src_data");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("car.ini"), b"[BASIC]\r\nTOTALMASS=1250\r\n").unwrap();
+        fs::write(src.join("power.lut"), b"1000|120\r\n6000|350\r\n").unwrap();
+        fs::write(src.join("car.ini.acxs-backup-20260101-000000"), b"ignored").unwrap();
+
+        let acd_path = root.join("data.acd");
+        let packed = pack_acd(&src, FOLDER, &acd_path, false).unwrap();
+        assert_eq!(packed, 2);
+
+        // Repacking over an existing data.acd archives the previous archive.
+        let packed2 = pack_acd(&src, FOLDER, &acd_path, false).unwrap();
+        assert_eq!(packed2, 2);
+        let backups: Vec<_> = fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("data.acd.acxs-backup-"))
+            .collect();
+        assert_eq!(backups.len(), 1);
+
+        let unpacked_dir = root.join("unpacked");
+        let count = unpack_acd(&acd_path, FOLDER, &unpacked_dir, false).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(fs::read(unpacked_dir.join("car.ini")).unwrap(), b"[BASIC]\r\nTOTALMASS=1250\r\n");
+        assert_eq!(fs::read(unpacked_dir.join("power.lut")).unwrap(), b"1000|120\r\n6000|350\r\n");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unpack_rejects_traversal_and_game_running_and_preserves_existing_dir() {
+        let root = std::env::temp_dir().join(format!("acxs_acd_safe_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let (evil_buf, _) = build(&[("../escape.ini", b"nope")], FOLDER, true);
+        let evil_acd = root.join("evil.acd");
+        fs::write(&evil_acd, &evil_buf).unwrap();
+        assert!(matches!(
+            unpack_acd(&evil_acd, FOLDER, &root.join("out"), false),
+            Err(AcdError::UnsafeEntry(_))
+        ));
+        assert!(matches!(
+            unpack_acd(&evil_acd, FOLDER, &root.join("out"), true),
+            Err(AcdError::GameRunning)
+        ));
+        assert!(matches!(
+            pack_acd(&root, FOLDER, &root.join("out.acd"), true),
+            Err(AcdError::GameRunning)
+        ));
+
+        let (good_buf, _) = build(&[("aero.ini", INI)], FOLDER, true);
+        let good_acd = root.join("good.acd");
+        fs::write(&good_acd, &good_buf).unwrap();
+        let existing = root.join("data");
+        fs::create_dir_all(&existing).unwrap();
+        fs::write(existing.join("old.txt"), b"keep").unwrap();
+
+        unpack_acd(&good_acd, FOLDER, &existing, false).unwrap();
+        assert!(existing.join("aero.ini").is_file());
+        let backups: Vec<_> = fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("data.acxs-backup-"))
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(fs::read(backups[0].path().join("old.txt")).unwrap(), b"keep");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn car_tuning_succeeds_after_acd_unpack_and_repack_preserves_edits() {
+        let root = std::env::temp_dir().join(format!("acxs_acd_tune_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let car_dir = root.join("content/cars").join(FOLDER);
+        let tmp_data = root.join("tmp_data");
+        fs::create_dir_all(&car_dir).unwrap();
+        fs::create_dir_all(&tmp_data).unwrap();
+        fs::write(tmp_data.join("car.ini"), "[BASIC]\r\nTOTALMASS=1400\r\n").unwrap();
+        pack_acd(&tmp_data, FOLDER, &car_dir.join("data.acd"), false).unwrap();
+
+        // Tuning refuses packed car.
+        assert!(matches!(
+            crate::car_tuning::apply(&car_dir, crate::car_tuning::Tuning::TotalMass(1200.0)),
+            Err(crate::car_tuning::TuneError::PackedData)
+        ));
+
+        // Unpack + archive data.acd -> tuning succeeds -> repack preserves edited value.
+        let (n, archived) = unpack_car_data(&car_dir, false).unwrap();
+        assert_eq!(n, 1);
+        assert!(archived.is_file());
+        crate::car_tuning::apply(&car_dir, crate::car_tuning::Tuning::TotalMass(1200.0)).unwrap();
+
+        pack_acd(&car_dir.join("data"), FOLDER, &car_dir.join("data.acd"), false).unwrap();
+        let bytes = fs::read(car_dir.join("data.acd")).unwrap();
+        let car_ini = String::from_utf8(read_entry_in_folder(&bytes, FOLDER, "car.ini").unwrap()).unwrap();
+        assert!(car_ini.contains("TOTALMASS=1200"));
+        let _ = fs::remove_dir_all(&root);
     }
 }

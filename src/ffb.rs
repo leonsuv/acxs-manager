@@ -410,10 +410,208 @@ fn values_equal(a: &str, b: &str) -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ff_post_process.ini (LUT / Gamma) & user_ff.ini (per-car FFB gain)
+// ---------------------------------------------------------------------------
+
+pub const FF_POST_PROCESS_FILE: &str = "ff_post_process.ini";
+pub const USER_FF_FILE: &str = "user_ff.ini";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum FfbPostProcessMode {
+    #[default]
+    Gamma,
+    Lut,
+}
+
+impl FfbPostProcessMode {
+    pub fn as_ini_str(self) -> &'static str {
+        match self {
+            FfbPostProcessMode::Gamma => "GAMMA",
+            FfbPostProcessMode::Lut => "LUT",
+        }
+    }
+
+    pub fn from_ini_str(s: &str) -> Self {
+        if s.trim().eq_ignore_ascii_case("LUT") {
+            FfbPostProcessMode::Lut
+        } else {
+            FfbPostProcessMode::Gamma
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct FfbPostProcess {
+    pub enabled: bool,
+    pub mode: FfbPostProcessMode,
+    /// `[GAMMA] VALUE`, 0.1 to 2.0.
+    pub gamma: f64,
+    /// `[LUT] CURVE`, filename under `Documents/Assetto Corsa/cfg/` (e.g. `mywheel.lut`).
+    pub lut_curve: String,
+}
+
+impl Default for FfbPostProcess {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: FfbPostProcessMode::Gamma,
+            gamma: 0.5,
+            lut_curve: String::new(),
+        }
+    }
+}
+
+/// Parses and validates an Assetto Corsa `.lut` file (`in|out` pairs, monotonic input in `0.0..=1.0`).
+pub fn parse_lut_points(text: &str) -> Result<Vec<(f64, f64)>, String> {
+    let mut pts = Vec::new();
+    for (idx, raw) in text.lines().enumerate() {
+        let line = raw.split(';').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((lhs, rhs)) = line.split_once('|') else {
+            return Err(format!("line {}: expected 'in|out' pair", idx + 1));
+        };
+        let x: f64 = lhs.trim().parse().map_err(|_| format!("line {}: bad input number", idx + 1))?;
+        let y: f64 = rhs.trim().parse().map_err(|_| format!("line {}: bad output number", idx + 1))?;
+        if !x.is_finite() || !y.is_finite() || !(0.0..=1.0).contains(&x) || !(0.0..=2.0).contains(&y) {
+            return Err(format!("line {}: values out of range ({x}|{y})", idx + 1));
+        }
+        if let Some(&(prev_x, _)) = pts.last() && x < prev_x {
+            return Err(format!("line {}: LUT input {x} is not monotonic (previous {prev_x})", idx + 1));
+        }
+        pts.push((x, y));
+    }
+    if pts.len() < 2 {
+        return Err("LUT must contain at least 2 points".into());
+    }
+    Ok(pts)
+}
+
+pub fn read_post_process(cfg_dir: &Path) -> io::Result<FfbPostProcess> {
+    let path = cfg_dir.join(FF_POST_PROCESS_FILE);
+    let ini = match Ini::load(&path) {
+        Ok(i) => i,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(FfbPostProcess::default()),
+        Err(e) => return Err(e),
+    };
+    let d = FfbPostProcess::default();
+    Ok(FfbPostProcess {
+        enabled: ini.get_i64("HEADER", "ENABLED") == Some(1),
+        mode: ini.get("HEADER", "TYPE").map(FfbPostProcessMode::from_ini_str).unwrap_or(d.mode),
+        gamma: ini.get_f64("GAMMA", "VALUE").unwrap_or(d.gamma),
+        lut_curve: ini.get("LUT", "CURVE").map(|s| s.trim().to_string()).unwrap_or_default(),
+    })
+}
+
+pub fn write_post_process(cfg_dir: &Path, pp: &FfbPostProcess) -> io::Result<()> {
+    if crate::game::is_game_running() {
+        return Err(io::Error::new(io::ErrorKind::ResourceBusy, "Assetto Corsa is running"));
+    }
+    if !pp.gamma.is_finite() || !(0.1..=2.0).contains(&pp.gamma) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "FFB gamma must be 0.1 to 2.0"));
+    }
+    if pp.enabled && pp.mode == FfbPostProcessMode::Lut {
+        let curve = pp.lut_curve.trim();
+        if curve.is_empty() || curve.contains(['/', '\\']) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "LUT curve filename is invalid"));
+        }
+        let lut_path = cfg_dir.join(curve);
+        let text = std::fs::read_to_string(&lut_path).map_err(|_| {
+            io::Error::new(io::ErrorKind::NotFound, format!("LUT file not found: {}", lut_path.display()))
+        })?;
+        parse_lut_points(&text).map_err(|msg| io::Error::new(io::ErrorKind::InvalidData, msg))?;
+    }
+    let path = cfg_dir.join(FF_POST_PROCESS_FILE);
+    let mut ini = match Ini::load(&path) {
+        Ok(i) => i,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ini::default(),
+        Err(e) => return Err(e),
+    };
+    ini.set("HEADER", "VERSION", 1);
+    ini.set("HEADER", "TYPE", pp.mode.as_ini_str());
+    ini.set("HEADER", "ENABLED", i32::from(pp.enabled));
+    ini.set("GAMMA", "VALUE", pp.gamma);
+    ini.set("LUT", "CURVE", pp.lut_curve.trim());
+    ini.save_with_backup(&path)
+}
+
+/// Reads native AC per-car FFB gains from `Documents/Assetto Corsa/cfg/user_ff.ini`.
+pub fn read_per_car_ffb(cfg_dir: &Path) -> io::Result<BTreeMap<String, f64>> {
+    let path = cfg_dir.join(USER_FF_FILE);
+    let ini = match Ini::load(&path) {
+        Ok(i) => i,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) => return Err(e),
+    };
+    let mut map = BTreeMap::new();
+    for sec in ini.section_names() {
+        if let Some(gain) = ini.get_f64(sec, "FF") && gain.is_finite() {
+            map.insert(sec.to_string(), gain);
+        }
+    }
+    Ok(map)
+}
+
+/// Sets one car's FFB gain (`0.10..=3.00`) in `Documents/Assetto Corsa/cfg/user_ff.ini` with backup.
+pub fn write_car_ffb(cfg_dir: &Path, car_id: &str, gain: f64) -> io::Result<()> {
+    if crate::game::is_game_running() {
+        return Err(io::Error::new(io::ErrorKind::ResourceBusy, "Assetto Corsa is running"));
+    }
+    let car = car_id.trim();
+    if car.is_empty() || !gain.is_finite() || !(0.10..=3.00).contains(&gain) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Car id or FFB gain (0.10..=3.00) is invalid"));
+    }
+    let path = cfg_dir.join(USER_FF_FILE);
+    let mut ini = match Ini::load(&path) {
+        Ok(i) => i,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ini::default(),
+        Err(e) => return Err(e),
+    };
+    ini.set(car, "FF", format!("{gain:.2}"));
+    ini.save_with_backup(&path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn ff_post_process_lut_validation_and_user_ff_round_trip() {
+        let dir = std::env::temp_dir().join(format!("acxs-ffb-lut-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // Non-monotonic LUT rejected.
+        assert!(parse_lut_points("0.0|0.0\n0.5|0.5\n0.4|0.6\n").is_err());
+        assert_eq!(parse_lut_points("0.0|0.0\n0.5|0.55\n1.0|1.0\n").unwrap().len(), 3);
+
+        // Missing LUT file rejected when LUT mode enabled.
+        let mut pp = FfbPostProcess {
+            enabled: true,
+            mode: FfbPostProcessMode::Lut,
+            gamma: 0.5,
+            lut_curve: "wheel.lut".into(),
+        };
+        assert_eq!(write_post_process(&dir, &pp).unwrap_err().kind(), io::ErrorKind::NotFound);
+
+        fs::write(dir.join("wheel.lut"), "0.0|0.0\n0.5|0.6\n1.0|1.0\n").unwrap();
+        write_post_process(&dir, &pp).unwrap();
+        assert_eq!(read_post_process(&dir).unwrap(), pp);
+
+        pp.mode = FfbPostProcessMode::Gamma;
+        pp.gamma = 0.75;
+        write_post_process(&dir, &pp).unwrap();
+        assert_eq!(read_post_process(&dir).unwrap().gamma, 0.75);
+
+        write_car_ffb(&dir, "ks_ferrari_488_gt3", 0.85).unwrap();
+        let map = read_per_car_ffb(&dir).unwrap();
+        assert!((map["ks_ferrari_488_gt3"] - 0.85).abs() < 1e-6);
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     /// Active keys of the v0.3.0-preview675 file, with short comments.
     const SAMPLE_V03: &str = "[ℹ]\nFULLNAME=Input: Wheel (FFB Tweaks)\nORDER=-1.91\n\n\

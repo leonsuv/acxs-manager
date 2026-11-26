@@ -11,6 +11,7 @@
 //! file is renamed to a backup (never deleted) by [`Ini::save_with_backup`].
 //! Fields that are `None` are not written, so the existing value in the file stays.
 
+use serde::{Deserialize, Serialize};
 use std::io;
 use std::ops::RangeInclusive;
 use std::path::Path;
@@ -19,6 +20,65 @@ use crate::ini::Ini;
 
 pub const VIDEO_FILE: &str = "video.ini";
 pub const ASSETTO_CORSA_FILE: &str = "assetto_corsa.ini";
+pub const TRIPLE_SCREEN_FILE: &str = "triple_screen.ini";
+pub const OCULUS_FILE: &str = "oculus.ini";
+pub const OPENVR_FILE: &str = "openvr.ini";
+pub const CAMERA_ONBOARD_FREE_FILE: &str = "camera_onboard_free.ini";
+pub const REPLAY_FILE: &str = "replay.ini";
+
+/// `[CAMERA] MODE` in `video.ini`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum CameraMode {
+    #[default]
+    Default,
+    Triple,
+    Oculus,
+    OpenVr,
+}
+
+impl CameraMode {
+    pub const ALL: [CameraMode; 4] = [
+        CameraMode::Default,
+        CameraMode::Triple,
+        CameraMode::Oculus,
+        CameraMode::OpenVr,
+    ];
+
+    pub fn as_ini_str(self) -> &'static str {
+        match self {
+            CameraMode::Default => "DEFAULT",
+            CameraMode::Triple => "TRIPLE",
+            CameraMode::Oculus => "OCULUS",
+            CameraMode::OpenVr => "OPENVR",
+        }
+    }
+
+    pub fn from_ini_str(s: &str) -> Self {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "TRIPLE" => CameraMode::Triple,
+            "OCULUS" => CameraMode::Oculus,
+            "OPENVR" => CameraMode::OpenVr,
+            _ => CameraMode::Default,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CameraMode::Default => "Single Screen",
+            CameraMode::Triple => "Triple Screen",
+            CameraMode::Oculus => "Oculus Rift / Meta",
+            CameraMode::OpenVr => "OpenVR / OpenXR",
+        }
+    }
+
+    pub fn is_vr(self) -> bool {
+        matches!(self, CameraMode::Oculus | CameraMode::OpenVr)
+    }
+}
+
+const CUBEMAP_SIZES: &[u32] = &[0, 256, 512, 1024, 2048];
+const MIRROR_SIZES: &[u32] = &[256, 512, 1024, 2048];
+const REPLAY_FPS_VALUES: &[u32] = &[10, 15, 20, 30, 60];
 
 /// `[VIDEO] AASAMPLES`. 1 means off.
 const AA_SAMPLES: &[u32] = &[1, 2, 4, 8];
@@ -38,12 +98,17 @@ const MIRRORS_FAR_PLANE_RANGE: RangeInclusive<u32> = 10..=2000;
 // video.ini
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct VideoSettings {
     /// `[VIDEO] WIDTH`. `None` when the file has no usable resolution.
     pub width: Option<u32>,
     /// `[VIDEO] HEIGHT`. `None` when the file has no usable resolution.
     pub height: Option<u32>,
+    /// `[VIDEO] REFRESH` in Hz. `None` leaves the existing key untouched.
+    pub refresh_hz: Option<u32>,
+    /// `[VIDEO] INDEX` (display index). `None` leaves the existing key untouched.
+    pub display_index: Option<u32>,
     /// `[VIDEO] FULLSCREEN`. Default `true`.
     pub fullscreen: bool,
     /// `[VIDEO] VSYNC`. Default `false`.
@@ -61,6 +126,36 @@ pub struct VideoSettings {
     pub world_detail: u32,
     /// `[POST_PROCESS] ENABLED`. Default `true`.
     pub post_processing: bool,
+    /// `[CAMERA] MODE` (Single / Triple / Oculus / OpenVR). Default `Default`.
+    pub camera_mode: CameraMode,
+    /// `[EFFECTS] FXAA`. Default `false`.
+    pub fxaa: bool,
+    /// `[EFFECTS] MOTION_BLUR`, 0 to 12. Default `0`.
+    pub motion_blur: u32,
+    /// `[EFFECTS] SMOKE`, 0 to 5. Default `3`.
+    pub smoke: u32,
+    /// `[EFFECTS] RENDER_SMOKE_IN_MIRROR`. Default `false`.
+    pub render_smoke_in_mirror: bool,
+    /// `[CUBEMAP] SIZE`, one of 0, 256, 512, 1024, 2048. Default `512`.
+    pub cubemap_size: u32,
+    /// `[CUBEMAP] FACES_PER_FRAME`, 0 to 6. Default `2`.
+    pub cubemap_faces_per_frame: u32,
+    /// `[CUBEMAP] FARPLANE`, 100 to 1500. Default `500`.
+    pub cubemap_farplane: u32,
+    /// `[MIRROR] SIZE`, one of 256, 512, 1024, 2048. Default `512`.
+    pub mirror_size: u32,
+    /// `[MIRROR] HQ`. Default `false`.
+    pub mirror_hq: bool,
+    /// `[POST_PROCESS] GLARE`, 0 to 5. Default `2`.
+    pub glare: u32,
+    /// `[POST_PROCESS] DOF`, 0 to 5. Default `2`.
+    pub dof: u32,
+    /// `[POST_PROCESS] RAYS_OF_GOD`. Default `true`.
+    pub rays_of_god: bool,
+    /// `[POST_PROCESS] HEAT_SHIMMER`. Default `true`.
+    pub heat_shimmer: bool,
+    /// `[POST_PROCESS] SATURATION`, 0 to 200. Default `100`.
+    pub saturation: u32,
 }
 
 impl Default for VideoSettings {
@@ -68,6 +163,8 @@ impl Default for VideoSettings {
         VideoSettings {
             width: None,
             height: None,
+            refresh_hz: None,
+            display_index: None,
             fullscreen: true,
             vsync: false,
             fps_cap: None,
@@ -76,6 +173,21 @@ impl Default for VideoSettings {
             shadow_map_size: 2048,
             world_detail: 4,
             post_processing: true,
+            camera_mode: CameraMode::Default,
+            fxaa: false,
+            motion_blur: 0,
+            smoke: 3,
+            render_smoke_in_mirror: false,
+            cubemap_size: 512,
+            cubemap_faces_per_frame: 2,
+            cubemap_farplane: 500,
+            mirror_size: 512,
+            mirror_hq: false,
+            glare: 2,
+            dof: 2,
+            rays_of_god: true,
+            heat_shimmer: true,
+            saturation: 100,
         }
     }
 }
@@ -154,6 +266,8 @@ fn video_from_ini(ini: &Ini) -> VideoSettings {
     VideoSettings {
         width,
         height,
+        refresh_hz: read_u32(ini, "VIDEO", "REFRESH").filter(|&v| v > 0),
+        display_index: read_u32(ini, "VIDEO", "INDEX"),
         fullscreen: read_flag(ini, "VIDEO", "FULLSCREEN", d.fullscreen),
         vsync: read_flag(ini, "VIDEO", "VSYNC", d.vsync),
         fps_cap,
@@ -162,6 +276,24 @@ fn video_from_ini(ini: &Ini) -> VideoSettings {
         shadow_map_size: pick(read_i32(ini, "VIDEO", shadow_key), SHADOW_MAP_SIZES, d.shadow_map_size),
         world_detail: pick(read_u32(ini, "ASSETTOCORSA", "WORLD_DETAIL"), WORLD_DETAILS, d.world_detail),
         post_processing: read_flag(ini, "POST_PROCESS", "ENABLED", d.post_processing),
+        camera_mode: ini
+            .get("CAMERA", "MODE")
+            .map(CameraMode::from_ini_str)
+            .unwrap_or(d.camera_mode),
+        fxaa: read_flag(ini, "EFFECTS", "FXAA", d.fxaa),
+        motion_blur: in_range(read_u32(ini, "EFFECTS", "MOTION_BLUR"), 0..=12, d.motion_blur),
+        smoke: in_range(read_u32(ini, "EFFECTS", "SMOKE"), 0..=5, d.smoke),
+        render_smoke_in_mirror: read_flag(ini, "EFFECTS", "RENDER_SMOKE_IN_MIRROR", d.render_smoke_in_mirror),
+        cubemap_size: pick(read_u32(ini, "CUBEMAP", "SIZE"), CUBEMAP_SIZES, d.cubemap_size),
+        cubemap_faces_per_frame: in_range(read_u32(ini, "CUBEMAP", "FACES_PER_FRAME"), 0..=6, d.cubemap_faces_per_frame),
+        cubemap_farplane: in_range(read_u32(ini, "CUBEMAP", "FARPLANE"), 100..=1500, d.cubemap_farplane),
+        mirror_size: pick(read_u32(ini, "MIRROR", "SIZE"), MIRROR_SIZES, d.mirror_size),
+        mirror_hq: read_flag(ini, "MIRROR", "HQ", d.mirror_hq),
+        glare: in_range(read_u32(ini, "POST_PROCESS", "GLARE"), 0..=5, d.glare),
+        dof: in_range(read_u32(ini, "POST_PROCESS", "DOF"), 0..=5, d.dof),
+        rays_of_god: read_flag(ini, "POST_PROCESS", "RAYS_OF_GOD", d.rays_of_god),
+        heat_shimmer: read_flag(ini, "POST_PROCESS", "HEAT_SHIMMER", d.heat_shimmer),
+        saturation: in_range(read_u32(ini, "POST_PROCESS", "SATURATION"), 0..=200, d.saturation),
     }
 }
 
@@ -169,6 +301,12 @@ fn apply_video(ini: &mut Ini, s: &VideoSettings) {
     if let (Some(width), Some(height)) = (s.width, s.height) {
         ini.set("VIDEO", "WIDTH", width);
         ini.set("VIDEO", "HEIGHT", height);
+    }
+    if let Some(hz) = s.refresh_hz {
+        ini.set("VIDEO", "REFRESH", hz);
+    }
+    if let Some(idx) = s.display_index {
+        ini.set("VIDEO", "INDEX", idx);
     }
     ini.set("VIDEO", "FULLSCREEN", flag_str(s.fullscreen));
     ini.set("VIDEO", "VSYNC", flag_str(s.vsync));
@@ -180,7 +318,262 @@ fn apply_video(ini: &mut Ini, s: &VideoSettings) {
         ini.set("VIDEO", "__CM_ORIGINAL_SHADOW_MAP_SIZE", s.shadow_map_size);
     }
     ini.set("ASSETTOCORSA", "WORLD_DETAIL", s.world_detail);
+    ini.set("CAMERA", "MODE", s.camera_mode.as_ini_str());
+    ini.set("EFFECTS", "FXAA", flag_str(s.fxaa));
+    ini.set("EFFECTS", "MOTION_BLUR", s.motion_blur);
+    ini.set("EFFECTS", "SMOKE", s.smoke);
+    ini.set("EFFECTS", "RENDER_SMOKE_IN_MIRROR", flag_str(s.render_smoke_in_mirror));
+    ini.set("CUBEMAP", "SIZE", s.cubemap_size);
+    ini.set("CUBEMAP", "FACES_PER_FRAME", s.cubemap_faces_per_frame);
+    ini.set("CUBEMAP", "FARPLANE", s.cubemap_farplane);
+    ini.set("MIRROR", "SIZE", s.mirror_size);
+    ini.set("MIRROR", "HQ", flag_str(s.mirror_hq));
     ini.set("POST_PROCESS", "ENABLED", flag_str(s.post_processing));
+    ini.set("POST_PROCESS", "GLARE", s.glare);
+    ini.set("POST_PROCESS", "DOF", s.dof);
+    ini.set("POST_PROCESS", "RAYS_OF_GOD", flag_str(s.rays_of_god));
+    ini.set("POST_PROCESS", "HEAT_SHIMMER", flag_str(s.heat_shimmer));
+    ini.set("POST_PROCESS", "SATURATION", s.saturation);
+}
+
+// ---------------------------------------------------------------------------
+// triple_screen.ini, oculus.ini / openvr.ini, camera_onboard_free.ini, replay.ini
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TripleScreenSettings {
+    pub width_mm: f64,
+    pub height_mm: f64,
+    pub distance_mm: f64,
+    pub angle_deg: f64,
+    pub bezel_mm: f64,
+    pub margin_l_mm: f64,
+    pub margin_r_mm: f64,
+    pub rotation_deg: f64,
+    pub sp_width_px: u32,
+}
+
+impl Default for TripleScreenSettings {
+    fn default() -> Self {
+        Self {
+            width_mm: 597.0,
+            height_mm: 336.0,
+            distance_mm: 650.0,
+            angle_deg: 45.0,
+            bezel_mm: 10.0,
+            margin_l_mm: 0.0,
+            margin_r_mm: 0.0,
+            rotation_deg: 0.0,
+            sp_width_px: 1920,
+        }
+    }
+}
+
+pub fn read_triple_screen(cfg_dir: &Path) -> io::Result<TripleScreenSettings> {
+    let ini = load_or_empty(&cfg_dir.join(TRIPLE_SCREEN_FILE))?;
+    let d = TripleScreenSettings::default();
+    Ok(TripleScreenSettings {
+        width_mm: ini.get_f64("TRIPLE_SCREEN", "WIDTH").unwrap_or(d.width_mm),
+        height_mm: ini.get_f64("TRIPLE_SCREEN", "HEIGHT").unwrap_or(d.height_mm),
+        distance_mm: ini.get_f64("TRIPLE_SCREEN", "DISTANCE").unwrap_or(d.distance_mm),
+        angle_deg: ini.get_f64("TRIPLE_SCREEN", "ANGLE").unwrap_or(d.angle_deg),
+        bezel_mm: ini.get_f64("TRIPLE_SCREEN", "BEZEL").unwrap_or(d.bezel_mm),
+        margin_l_mm: ini.get_f64("TRIPLE_SCREEN", "MARGIN_L").unwrap_or(d.margin_l_mm),
+        margin_r_mm: ini.get_f64("TRIPLE_SCREEN", "MARGIN_R").unwrap_or(d.margin_r_mm),
+        rotation_deg: ini.get_f64("TRIPLE_SCREEN", "ROTATION").unwrap_or(d.rotation_deg),
+        sp_width_px: read_u32(&ini, "TRIPLE_SCREEN", "SP_WIDTH").unwrap_or(d.sp_width_px),
+    })
+}
+
+pub fn write_triple_screen(cfg_dir: &Path, s: &TripleScreenSettings) -> io::Result<()> {
+    if crate::game::is_game_running() {
+        return Err(io::Error::new(io::ErrorKind::ResourceBusy, "Assetto Corsa is running"));
+    }
+    if !(100.0..=3000.0).contains(&s.width_mm)
+        || !(100.0..=3000.0).contains(&s.distance_mm)
+        || !(0.0..=89.0).contains(&s.angle_deg)
+    {
+        return Err(invalid_input(vec!["Triple screen geometry values are out of range".into()]));
+    }
+    let path = cfg_dir.join(TRIPLE_SCREEN_FILE);
+    let mut ini = load_or_empty(&path)?;
+    ini.set("TRIPLE_SCREEN", "WIDTH", s.width_mm);
+    ini.set("TRIPLE_SCREEN", "HEIGHT", s.height_mm);
+    ini.set("TRIPLE_SCREEN", "DISTANCE", s.distance_mm);
+    ini.set("TRIPLE_SCREEN", "ANGLE", s.angle_deg);
+    ini.set("TRIPLE_SCREEN", "BEZEL", s.bezel_mm);
+    ini.set("TRIPLE_SCREEN", "MARGIN_L", s.margin_l_mm);
+    ini.set("TRIPLE_SCREEN", "MARGIN_R", s.margin_r_mm);
+    ini.set("TRIPLE_SCREEN", "ROTATION", s.rotation_deg);
+    ini.set("TRIPLE_SCREEN", "SP_WIDTH", s.sp_width_px);
+    ini.save_with_backup(&path)
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VrSettings {
+    /// `[SETTINGS] PIXEL_PER_DISPLAY`, 0.5 to 2.5.
+    pub pixel_per_display: f64,
+    /// `[SETTINGS] MIRROR_TEXTURE`.
+    pub mirror_texture: bool,
+    /// `[SETTINGS] AUTOSELECT_RIFT_AUDIO_DEVICE`.
+    pub autoselect_audio: bool,
+    /// `[MIRROR] ENABLE`.
+    pub mirror_enable: bool,
+}
+
+impl Default for VrSettings {
+    fn default() -> Self {
+        Self {
+            pixel_per_display: 1.0,
+            mirror_texture: true,
+            autoselect_audio: true,
+            mirror_enable: true,
+        }
+    }
+}
+
+pub fn validate_vr(s: &VrSettings) -> Vec<String> {
+    let mut errors = Vec::new();
+    if !s.pixel_per_display.is_finite() || !(0.5..=2.5).contains(&s.pixel_per_display) {
+        errors.push(format!("pixel_per_display must be 0.5 to 2.5, got {}", s.pixel_per_display));
+    }
+    errors
+}
+
+pub fn read_vr(cfg_dir: &Path, openvr: bool) -> io::Result<VrSettings> {
+    let file = if openvr { OPENVR_FILE } else { OCULUS_FILE };
+    let ini = load_or_empty(&cfg_dir.join(file))?;
+    let d = VrSettings::default();
+    Ok(VrSettings {
+        pixel_per_display: ini
+            .get_f64("SETTINGS", "PIXEL_PER_DISPLAY")
+            .filter(|v| (0.5..=2.5).contains(v))
+            .unwrap_or(d.pixel_per_display),
+        mirror_texture: read_flag(&ini, "SETTINGS", "MIRROR_TEXTURE", d.mirror_texture),
+        autoselect_audio: read_flag(&ini, "SETTINGS", "AUTOSELECT_RIFT_AUDIO_DEVICE", d.autoselect_audio),
+        mirror_enable: read_flag(&ini, "MIRROR", "ENABLE", d.mirror_enable),
+    })
+}
+
+pub fn write_vr(cfg_dir: &Path, openvr: bool, s: &VrSettings) -> io::Result<()> {
+    if crate::game::is_game_running() {
+        return Err(io::Error::new(io::ErrorKind::ResourceBusy, "Assetto Corsa is running"));
+    }
+    let errors = validate_vr(s);
+    if !errors.is_empty() {
+        return Err(invalid_input(errors));
+    }
+    let file = if openvr { OPENVR_FILE } else { OCULUS_FILE };
+    let path = cfg_dir.join(file);
+    let mut ini = load_or_empty(&path)?;
+    ini.set("SETTINGS", "PIXEL_PER_DISPLAY", format!("{:.2}", s.pixel_per_display));
+    ini.set("SETTINGS", "MIRROR_TEXTURE", flag_str(s.mirror_texture));
+    ini.set("SETTINGS", "AUTOSELECT_RIFT_AUDIO_DEVICE", flag_str(s.autoselect_audio));
+    ini.set("MIRROR", "ENABLE", flag_str(s.mirror_enable));
+    ini.save_with_backup(&path)
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CameraOnboardSettings {
+    pub fov: f64,
+    pub lock_to_horizon: bool,
+    pub gforce_x: f64,
+    pub gforce_y: f64,
+    pub gforce_z: f64,
+    pub look_ahead: f64,
+}
+
+impl Default for CameraOnboardSettings {
+    fn default() -> Self {
+        Self {
+            fov: 54.0,
+            lock_to_horizon: false,
+            gforce_x: 0.25,
+            gforce_y: 0.15,
+            gforce_z: 0.50,
+            look_ahead: 0.0,
+        }
+    }
+}
+
+pub fn read_camera_onboard(cfg_dir: &Path) -> io::Result<CameraOnboardSettings> {
+    let ini = load_or_empty(&cfg_dir.join(CAMERA_ONBOARD_FREE_FILE))?;
+    let d = CameraOnboardSettings::default();
+    Ok(CameraOnboardSettings {
+        fov: ini.get_f64("CAMERA_SETTINGS", "FOV").filter(|v| (10.0..=120.0).contains(v)).unwrap_or(d.fov),
+        lock_to_horizon: read_flag(&ini, "CAMERA_SETTINGS", "LOCK_TO_HORIZON", d.lock_to_horizon),
+        gforce_x: ini.get_f64("GFORCE", "GFORCE_X").unwrap_or(d.gforce_x),
+        gforce_y: ini.get_f64("GFORCE", "GFORCE_Y").unwrap_or(d.gforce_y),
+        gforce_z: ini.get_f64("GFORCE", "GFORCE_Z").unwrap_or(d.gforce_z),
+        look_ahead: ini.get_f64("CAMERA_SETTINGS", "LOOK_AHEAD").unwrap_or(d.look_ahead),
+    })
+}
+
+pub fn write_camera_onboard(cfg_dir: &Path, s: &CameraOnboardSettings) -> io::Result<()> {
+    if crate::game::is_game_running() {
+        return Err(io::Error::new(io::ErrorKind::ResourceBusy, "Assetto Corsa is running"));
+    }
+    if !(10.0..=120.0).contains(&s.fov) {
+        return Err(invalid_input(vec![format!("FOV must be 10 to 120, got {}", s.fov)]));
+    }
+    let path = cfg_dir.join(CAMERA_ONBOARD_FREE_FILE);
+    let mut ini = load_or_empty(&path)?;
+    ini.set("CAMERA_SETTINGS", "FOV", s.fov);
+    ini.set("CAMERA_SETTINGS", "LOCK_TO_HORIZON", flag_str(s.lock_to_horizon));
+    ini.set("CAMERA_SETTINGS", "LOOK_AHEAD", s.look_ahead);
+    ini.set("GFORCE", "GFORCE_X", s.gforce_x);
+    ini.set("GFORCE", "GFORCE_Y", s.gforce_y);
+    ini.set("GFORCE", "GFORCE_Z", s.gforce_z);
+    ini.save_with_backup(&path)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReplaySettings {
+    /// `[QUALITY] FPS`, one of 10, 15, 20, 30, 60.
+    pub fps: u32,
+    /// `[REPLAY] MAX_SIZE_MB`, 50 to 2048.
+    pub max_size_mb: u32,
+    /// `[REPLAY] AUTOSAVE`.
+    pub autosave: bool,
+}
+
+impl Default for ReplaySettings {
+    fn default() -> Self {
+        Self {
+            fps: 30,
+            max_size_mb: 500,
+            autosave: true,
+        }
+    }
+}
+
+pub fn read_replay_settings(cfg_dir: &Path) -> io::Result<ReplaySettings> {
+    let ini = load_or_empty(&cfg_dir.join(REPLAY_FILE))?;
+    let d = ReplaySettings::default();
+    Ok(ReplaySettings {
+        fps: pick(read_u32(&ini, "QUALITY", "FPS"), REPLAY_FPS_VALUES, d.fps),
+        max_size_mb: in_range(read_u32(&ini, "REPLAY", "MAX_SIZE_MB"), 50..=2048, d.max_size_mb),
+        autosave: read_flag(&ini, "REPLAY", "AUTOSAVE", d.autosave),
+    })
+}
+
+pub fn write_replay_settings(cfg_dir: &Path, s: &ReplaySettings) -> io::Result<()> {
+    if crate::game::is_game_running() {
+        return Err(io::Error::new(io::ErrorKind::ResourceBusy, "Assetto Corsa is running"));
+    }
+    if !REPLAY_FPS_VALUES.contains(&s.fps) || !(50..=2048).contains(&s.max_size_mb) {
+        return Err(invalid_input(vec!["Replay FPS or max_size_mb out of range".into()]));
+    }
+    let path = cfg_dir.join(REPLAY_FILE);
+    let mut ini = load_or_empty(&path)?;
+    ini.set("QUALITY", "FPS", s.fps);
+    ini.set("REPLAY", "MAX_SIZE_MB", s.max_size_mb);
+    ini.set("REPLAY", "AUTOSAVE", flag_str(s.autosave));
+    ini.save_with_backup(&path)
 }
 
 // ---------------------------------------------------------------------------
@@ -441,9 +834,61 @@ mod tests {
             shadow_map_size: -1,
             world_detail: 5,
             post_processing: false,
+            ..VideoSettings::default()
         };
         write_video(dir.path(), &settings).unwrap();
         assert_eq!(read_video(dir.path()).unwrap(), settings);
+    }
+
+    #[test]
+    fn vr_triple_camera_and_replay_round_trip() {
+        let dir = TempCfg::new("vr-triple-replay");
+        let vid = VideoSettings {
+            camera_mode: CameraMode::OpenVr,
+            fxaa: true,
+            cubemap_size: 1024,
+            mirror_hq: true,
+            ..VideoSettings::default()
+        };
+        write_video(dir.path(), &vid).unwrap();
+        let got_vid = read_video(dir.path()).unwrap();
+        assert_eq!(got_vid.camera_mode, CameraMode::OpenVr);
+        assert!(got_vid.fxaa);
+        assert_eq!(got_vid.cubemap_size, 1024);
+        assert!(got_vid.mirror_hq);
+
+        let ts = TripleScreenSettings {
+            angle_deg: 55.0,
+            bezel_mm: 12.0,
+            ..TripleScreenSettings::default()
+        };
+        write_triple_screen(dir.path(), &ts).unwrap();
+        assert_eq!(read_triple_screen(dir.path()).unwrap(), ts);
+
+        let vr = VrSettings {
+            pixel_per_display: 1.35,
+            mirror_texture: false,
+            ..VrSettings::default()
+        };
+        write_vr(dir.path(), true, &vr).unwrap();
+        assert!((read_vr(dir.path(), true).unwrap().pixel_per_display - 1.35).abs() < 1e-6);
+        assert!(write_vr(dir.path(), true, &VrSettings { pixel_per_display: 4.0, ..VrSettings::default() }).is_err());
+
+        let cam = CameraOnboardSettings {
+            fov: 48.0,
+            lock_to_horizon: true,
+            ..CameraOnboardSettings::default()
+        };
+        write_camera_onboard(dir.path(), &cam).unwrap();
+        assert_eq!(read_camera_onboard(dir.path()).unwrap(), cam);
+
+        let rep = ReplaySettings {
+            fps: 60,
+            max_size_mb: 1024,
+            autosave: false,
+        };
+        write_replay_settings(dir.path(), &rep).unwrap();
+        assert_eq!(read_replay_settings(dir.path()).unwrap(), rep);
     }
 
     #[test]

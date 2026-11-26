@@ -13,7 +13,8 @@
 //! `[GROOVE]`, `[GHOST_CAR]`, `[WIND]` and inactive `[REPLAY]`/`[RESTART]`/`[BENCHMARK]`
 //! sections.
 
-use crate::race_options::{Assists, RaceExtras};
+use crate::race_options::{Assists, DynamicTrackConfig, GhostCarConfig, RaceExtras, RaceMode};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -23,6 +24,40 @@ const MAX_AI_CARS: u32 = 39;
 const MAX_AI_LEVEL: u8 = 100;
 const MAX_AI_AGGRESSION: u8 = 100;
 const MAX_HOUR: u8 = 23;
+const MAX_MINUTE: u8 = 59;
+const MAX_BALLAST_KG: u32 = 500;
+const MAX_RESTRICTOR: u32 = 100;
+
+/// One AI opponent entry for multi-car / multi-class grids (`[CAR_1..N]`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AiOpponent {
+    pub car: String,
+    pub skin: String,
+    pub setup: String,
+    pub driver_name: String,
+    pub nationality: String,
+    pub ballast: u32,
+    pub restrictor: u32,
+    pub ai_level: u8,
+    pub ai_aggression: Option<u8>,
+}
+
+impl Default for AiOpponent {
+    fn default() -> Self {
+        Self {
+            car: String::new(),
+            skin: String::new(),
+            setup: String::new(),
+            driver_name: String::new(),
+            nationality: String::new(),
+            ballast: 0,
+            restrictor: 0,
+            ai_level: 90,
+            ai_aggression: None,
+        }
+    }
+}
 
 /// Session type value for a race in AC's race.ini (`TYPE=3`).
 const SESSION_TYPE_RACE: u8 = 3;
@@ -60,6 +95,27 @@ pub struct QuickRace {
     pub grid_position: u32,
     /// Sessions, conditions, rules and driver aids beyond the basics above.
     pub extras: RaceExtras,
+    /// Explicit multi-car / multi-class AI grid. When empty, `ai_count` homogeneous
+    /// opponents are generated from `self.car` / `self.ai_level` / `self.ai_aggression`.
+    pub opponents: Vec<AiOpponent>,
+    /// Optional player setup path for `[CAR_0] SETUP`.
+    pub player_setup: String,
+    /// Player ballast in kg (0..=500) for `[CAR_0] BALLAST`.
+    pub player_ballast: u32,
+    /// Player restrictor percentage (0..=100) for `[CAR_0] RESTRICTOR`.
+    pub player_restrictor: u32,
+    /// Minute of the hour (0..=59) for precise sun angle.
+    pub time_of_day_minute: u8,
+    /// Optional Unix timestamp written as `[LIGHTING] __CM_DATE` for CSP/Sol/Pure seasons.
+    pub date_unix: Option<i64>,
+    /// Optional CSP WeatherFX weather type enum (`[WEATHER] __CM_WEATHER_TYPE`).
+    pub weather_type: Option<i32>,
+    /// Optional WeatherFX controller id (e.g. `"sol2"`, `"pure"`).
+    pub weather_controller: Option<String>,
+    /// `[GHOST_CAR]` configuration.
+    pub ghost_car: GhostCarConfig,
+    /// `[DYNAMIC_TRACK]` configuration (falls back to `extras.track_grip` when default).
+    pub dynamic_track: DynamicTrackConfig,
 }
 
 impl Default for QuickRace {
@@ -78,6 +134,16 @@ impl Default for QuickRace {
             player_name: "Driver".to_string(),
             grid_position: 0,
             extras: RaceExtras::default(),
+            opponents: Vec::new(),
+            player_setup: String::new(),
+            player_ballast: 0,
+            player_restrictor: 0,
+            time_of_day_minute: 0,
+            date_unix: None,
+            weather_type: None,
+            weather_controller: None,
+            ghost_car: GhostCarConfig::default(),
+            dynamic_track: DynamicTrackConfig::default(),
         }
     }
 }
@@ -100,10 +166,14 @@ impl QuickRace {
         if self.player_name.trim().is_empty() {
             problems.push("Player name is empty.".to_string());
         }
-        if self.ai_count > MAX_AI_CARS {
+        let effective_ai = if self.opponents.is_empty() {
+            self.ai_count
+        } else {
+            self.opponents.len() as u32
+        };
+        if effective_ai > MAX_AI_CARS {
             problems.push(format!(
-                "AI car count is {}, but the maximum is {MAX_AI_CARS}.",
-                self.ai_count
+                "AI car count is {effective_ai}, but the maximum is {MAX_AI_CARS}."
             ));
         }
         if self.ai_level > MAX_AI_LEVEL {
@@ -119,8 +189,41 @@ impl QuickRace {
                 "AI aggression is {aggression}, but the maximum is {MAX_AI_AGGRESSION}."
             ));
         }
-        if self.laps == 0 && self.extras.race_enabled && self.extras.race_minutes == 0 {
+        if self.player_ballast > MAX_BALLAST_KG {
+            problems.push(format!(
+                "Player ballast is {} kg, maximum is {MAX_BALLAST_KG} kg.",
+                self.player_ballast
+            ));
+        }
+        if self.player_restrictor > MAX_RESTRICTOR {
+            problems.push(format!(
+                "Player restrictor is {}%, maximum is {MAX_RESTRICTOR}%.",
+                self.player_restrictor
+            ));
+        }
+        for (i, opp) in self.opponents.iter().enumerate() {
+            let slot = i + 1;
+            if opp.car.trim().is_empty() {
+                problems.push(format!("Opponent {slot} has no car model."));
+            }
+            if opp.ai_level > MAX_AI_LEVEL {
+                problems.push(format!("Opponent {slot} AI level {} exceeds {MAX_AI_LEVEL}.", opp.ai_level));
+            }
+            if let Some(agg) = opp.ai_aggression && agg > MAX_AI_AGGRESSION {
+                problems.push(format!("Opponent {slot} AI aggression {agg} exceeds {MAX_AI_AGGRESSION}."));
+            }
+            if opp.ballast > MAX_BALLAST_KG {
+                problems.push(format!("Opponent {slot} ballast {} kg exceeds {MAX_BALLAST_KG} kg.", opp.ballast));
+            }
+            if opp.restrictor > MAX_RESTRICTOR {
+                problems.push(format!("Opponent {slot} restrictor {}% exceeds {MAX_RESTRICTOR}%.", opp.restrictor));
+            }
+        }
+        if self.extras.mode == RaceMode::Weekend && self.laps == 0 && self.extras.race_enabled && self.extras.race_minutes == 0 {
             problems.push("Race must have at least one lap.".to_string());
+        }
+        if self.extras.mode == RaceMode::Drag && (self.extras.drag_matches == 0 || self.extras.drag_matches > 99) {
+            problems.push("Drag matches must be 1 to 99.".to_string());
         }
         if self.time_of_day_hour > MAX_HOUR {
             problems.push(format!(
@@ -128,14 +231,21 @@ impl QuickRace {
                 self.time_of_day_hour
             ));
         }
-        if self.grid_position > self.ai_count {
+        if self.time_of_day_minute > MAX_MINUTE {
+            problems.push(format!(
+                "Time of day minute is {}, must be 0 to {MAX_MINUTE}.",
+                self.time_of_day_minute
+            ));
+        }
+        if self.grid_position > effective_ai {
             problems.push(format!(
                 "Grid position {} is past the last grid slot {} (there are {} AI cars).",
-                self.grid_position, self.ai_count, self.ai_count
+                self.grid_position, effective_ai, effective_ai
             ));
         }
 
         problems.extend(self.extras.validate());
+        problems.extend(self.dynamic_track.validate());
 
         // Values are written one per line, so a line break would corrupt the file.
         let text_fields = [
@@ -195,11 +305,28 @@ impl QuickRace {
     ///   "Optimum" preset), `[GROOVE]`, `[GHOST_CAR]`, `[LAP_INVALIDATOR]` and
     ///   `[OPTIONS]` use the values Content Manager writes by default.
     pub fn to_race_ini(&self) -> String {
-        // Hotlap, time attack and drift are driven alone.
-        if self.extras.mode.session().is_some() && self.ai_count > 0 {
-            return QuickRace { ai_count: 0, grid_position: 0, ..self.clone() }.to_race_ini();
+        // Hotlap, time attack and drift are driven alone; TrackDay and Drag allow opponents.
+        if !self.extras.mode.allows_opponents() && (self.ai_count > 0 || !self.opponents.is_empty()) {
+            return QuickRace {
+                ai_count: 0,
+                opponents: Vec::new(),
+                grid_position: 0,
+                ..self.clone()
+            }
+            .to_race_ini();
         }
         let mut out = String::new();
+        let effective_ai = if !self.opponents.is_empty() {
+            self.opponents.len() as u32
+        } else {
+            self.ai_count
+        };
+        let mean_ai_level: u8 = if !self.opponents.is_empty() {
+            let sum: u32 = self.opponents.iter().map(|o| u32::from(o.ai_level)).sum();
+            (sum / self.opponents.len() as u32) as u8
+        } else {
+            self.ai_level
+        };
 
         section(&mut out, "RACE");
         kv(&mut out, "TRACK", &self.track);
@@ -211,14 +338,14 @@ impl QuickRace {
         kv(
             &mut out,
             "CARS",
-            &self.ai_count.saturating_add(1).to_string(),
+            &effective_ai.saturating_add(1).to_string(),
         );
         kv(&mut out, "MODEL", &self.car);
         kv(&mut out, "MODEL_CONFIG", "");
         kv(&mut out, "SKIN", &self.skin);
-        kv(&mut out, "DRIFT_MODE", "0");
+        kv(&mut out, "DRIFT_MODE", if self.extras.mode == RaceMode::Drift { "1" } else { "0" });
         kv(&mut out, "RACE_LAPS", &self.laps.to_string());
-        kv(&mut out, "AI_LEVEL", &self.ai_level.to_string());
+        kv(&mut out, "AI_LEVEL", &mean_ai_level.to_string());
         kv(&mut out, "FIXED_SETUP", if self.extras.fixed_setup { "1" } else { "0" });
         kv(&mut out, "PENALTIES", if self.extras.penalties { "1" } else { "0" });
         kv(&mut out, "JUMP_START_PENALTY", &self.extras.jump_start_penalty.to_string());
@@ -229,27 +356,53 @@ impl QuickRace {
         // The player's car is named in [RACE] MODEL; CAR_0 MODEL is "-", as the
         // game's own launcher writes it.
         section(&mut out, "CAR_0");
-        kv(&mut out, "SETUP", "");
+        kv(&mut out, "SETUP", &one_line(&self.player_setup));
         kv(&mut out, "SKIN", &self.skin);
         kv(&mut out, "MODEL", "-");
         kv(&mut out, "MODEL_CONFIG", "");
-        kv(&mut out, "BALLAST", "0");
-        kv(&mut out, "RESTRICTOR", "0");
+        kv(&mut out, "BALLAST", &self.player_ballast.to_string());
+        kv(&mut out, "RESTRICTOR", &self.player_restrictor.to_string());
         kv(&mut out, "DRIVER_NAME", &self.player_name);
         kv(&mut out, "GRID_POSITION", &self.grid_position.to_string());
 
-        for index in 1..=self.ai_count {
-            section(&mut out, &format!("CAR_{index}"));
-            kv(&mut out, "MODEL", &self.car);
-            kv(&mut out, "SKIN", "");
-            kv(&mut out, "SETUP", "");
-            kv(&mut out, "MODEL_CONFIG", "");
-            kv(&mut out, "DRIVER_NAME", &format!("AI {index}"));
-            kv(&mut out, "BALLAST", "0");
-            kv(&mut out, "RESTRICTOR", "0");
-            kv(&mut out, "AI_LEVEL", &self.ai_level.to_string());
-            if let Some(aggression) = self.ai_aggression {
-                kv(&mut out, "AI_AGGRESSION", &aggression.to_string());
+        if !self.opponents.is_empty() {
+            for (i, opp) in self.opponents.iter().enumerate() {
+                let index = i + 1;
+                section(&mut out, &format!("CAR_{index}"));
+                kv(&mut out, "MODEL", &one_line(&opp.car));
+                kv(&mut out, "SKIN", &one_line(&opp.skin));
+                kv(&mut out, "SETUP", &one_line(&opp.setup));
+                kv(&mut out, "MODEL_CONFIG", "");
+                let name = if opp.driver_name.trim().is_empty() {
+                    format!("AI {index}")
+                } else {
+                    one_line(&opp.driver_name)
+                };
+                kv(&mut out, "DRIVER_NAME", &name);
+                if !opp.nationality.trim().is_empty() {
+                    kv(&mut out, "NATIONALITY", &one_line(&opp.nationality));
+                }
+                kv(&mut out, "BALLAST", &opp.ballast.to_string());
+                kv(&mut out, "RESTRICTOR", &opp.restrictor.to_string());
+                kv(&mut out, "AI_LEVEL", &opp.ai_level.to_string());
+                if let Some(aggression) = opp.ai_aggression {
+                    kv(&mut out, "AI_AGGRESSION", &aggression.to_string());
+                }
+            }
+        } else {
+            for index in 1..=self.ai_count {
+                section(&mut out, &format!("CAR_{index}"));
+                kv(&mut out, "MODEL", &self.car);
+                kv(&mut out, "SKIN", "");
+                kv(&mut out, "SETUP", "");
+                kv(&mut out, "MODEL_CONFIG", "");
+                kv(&mut out, "DRIVER_NAME", &format!("AI {index}"));
+                kv(&mut out, "BALLAST", "0");
+                kv(&mut out, "RESTRICTOR", "0");
+                kv(&mut out, "AI_LEVEL", &self.ai_level.to_string());
+                if let Some(aggression) = self.ai_aggression {
+                    kv(&mut out, "AI_AGGRESSION", &aggression.to_string());
+                }
             }
         }
 
@@ -257,9 +410,16 @@ impl QuickRace {
 
         section(&mut out, "WEATHER");
         kv(&mut out, "NAME", &self.weather);
+        if let Some(wt) = self.weather_type {
+            kv(&mut out, "__CM_WEATHER_TYPE", &wt.to_string());
+        }
 
+        let (clamped_sun, unclamped_sun) = sun_angle_precise(self.time_of_day_hour, self.time_of_day_minute);
         section(&mut out, "LIGHTING");
-        kv(&mut out, "SUN_ANGLE", &format!("{:.2}", f64::from(sun_angle(self.time_of_day_hour))));
+        kv(&mut out, "SUN_ANGLE", &format!("{clamped_sun:.2}"));
+        if (unclamped_sun - clamped_sun).abs() > 1e-4 || self.time_of_day_minute > 0 {
+            kv(&mut out, "__CM_UNCLAMPED_SUN_ANGLE", &format!("{unclamped_sun:.2}"));
+        }
         kv(
             &mut out,
             "TIME_OF_DAY_HOUR",
@@ -267,6 +427,9 @@ impl QuickRace {
         );
         kv(&mut out, "TIME_MULT", &format!("{}.0", self.extras.time_multiplier));
         kv(&mut out, "CLOUD_SPEED", "0.200");
+        if let Some(date) = self.date_unix {
+            kv(&mut out, "__CM_DATE", &date.to_string());
+        }
 
         section(&mut out, "TEMPERATURE");
         kv(&mut out, "AMBIENT", &self.extras.ambient_temp.to_string());
@@ -277,25 +440,39 @@ impl QuickRace {
         kv(&mut out, "SPEED_KMH_MAX", &self.extras.wind_max_kmh.to_string());
         kv(&mut out, "DIRECTION_DEG", &self.extras.wind_direction.to_string());
 
-        // The "Optimum" grip preset of the game's launcher.
+        let dt = self.dynamic_track;
+        let start_grip = if dt == DynamicTrackConfig::default() {
+            self.extras.track_grip
+        } else {
+            dt.session_start
+        };
+        let transfer_grip = if dt == DynamicTrackConfig::default() {
+            self.extras.track_grip
+        } else {
+            dt.session_transfer
+        };
         section(&mut out, "DYNAMIC_TRACK");
-        kv(&mut out, "PRESET", "5");
-        kv(&mut out, "SESSION_START", &self.extras.track_grip.to_string());
-        kv(&mut out, "RANDOMNESS", "0");
-        kv(&mut out, "LAP_GAIN", "1");
-        kv(&mut out, "SESSION_TRANSFER", &self.extras.track_grip.to_string());
+        kv(&mut out, "PRESET", &dt.preset.to_string());
+        kv(&mut out, "SESSION_START", &start_grip.to_string());
+        kv(&mut out, "RANDOMNESS", &dt.randomness.to_string());
+        kv(&mut out, "LAP_GAIN", &dt.lap_gain.to_string());
+        kv(&mut out, "SESSION_TRANSFER", &transfer_grip.to_string());
 
         section(&mut out, "GROOVE");
         kv(&mut out, "VIRTUAL_LAPS", "10");
         kv(&mut out, "MAX_LAPS", "30");
         kv(&mut out, "STARTING_LAPS", "0");
 
+        let g = &self.ghost_car;
         section(&mut out, "GHOST_CAR");
-        kv(&mut out, "RECORDING", "0");
-        kv(&mut out, "PLAYING", "0");
-        kv(&mut out, "LOAD", "0");
-        kv(&mut out, "FILE", "");
-        kv(&mut out, "ENABLED", "0");
+        kv(&mut out, "RECORDING", if g.recording { "1" } else { "0" });
+        kv(&mut out, "PLAYING", if g.playing { "1" } else { "0" });
+        kv(&mut out, "LOAD", if g.load { "1" } else { "0" });
+        kv(&mut out, "FILE", &one_line(&g.file));
+        kv(&mut out, "ENABLED", if g.enabled { "1" } else { "0" });
+        if g.advantage_centis != 0 {
+            kv(&mut out, "ADVANTAGE", &format!("{:.2}", f64::from(g.advantage_centis) / 100.0));
+        }
 
         section(&mut out, "LAP_INVALIDATOR");
         kv(&mut out, "ALLOWED_TYRES_OUT", &self.extras.allowed_tyres_out.to_string());
@@ -325,8 +502,22 @@ impl QuickRace {
             section(out, "SESSION_0");
             kv(out, "NAME", name);
             kv(out, "TYPE", &kind.to_string());
-            kv(out, "DURATION_MINUTES", "0");
-            kv(out, "SPAWN_SET", spawn);
+            match x.mode {
+                RaceMode::TrackDay => {
+                    kv(out, "DURATION_MINUTES", &x.track_day_minutes.to_string());
+                    kv(out, "SPAWN_SET", spawn);
+                }
+                RaceMode::Drag => {
+                    kv(out, "MATCHES", &x.drag_matches.to_string());
+                    kv(out, "DURATION_MINUTES", "0");
+                    kv(out, "SPAWN_SET", spawn);
+                    kv(out, "MAX_BALLAST_KG", "0");
+                }
+                _ => {
+                    kv(out, "DURATION_MINUTES", "0");
+                    kv(out, "SPAWN_SET", spawn);
+                }
+            }
             return;
         }
         let mut index = 0;
@@ -485,6 +676,59 @@ pub fn write_online_ini(cfg_dir: &Path, join: &OnlineJoin) -> io::Result<PathBuf
 /// clamped to -80..=80 (08:00 to 18:00, the range the game accepts).
 pub fn sun_angle(hour: u8) -> i32 {
     ((i32::from(hour) - 13) * 16).clamp(-80, 80)
+}
+
+/// Minute-precision sun angle: returns `(clamped_for_stock_ac, unclamped_for_csp)`.
+pub fn sun_angle_precise(hour: u8, minute: u8) -> (f64, f64) {
+    let mins = f64::from(hour) * 60.0 + f64::from(minute.min(59));
+    let unclamped = (mins - 780.0) * (16.0 / 60.0);
+    (unclamped.clamp(-80.0, 80.0), unclamped)
+}
+
+/// Builds a `race.ini` that launches `acs.exe` directly into replay playback.
+pub fn replay_race_ini(filename: &str) -> String {
+    let mut out = String::new();
+    section(&mut out, "REPLAY");
+    kv(&mut out, "ACTIVE", "1");
+    kv(&mut out, "FILENAME", &one_line(filename));
+    section(&mut out, "REMOTE");
+    kv(&mut out, "ACTIVE", "0");
+    section(&mut out, "RESTART");
+    kv(&mut out, "ACTIVE", "0");
+    section(&mut out, "BENCHMARK");
+    kv(&mut out, "ACTIVE", "0");
+    section(&mut out, "HEADER");
+    kv(&mut out, "VERSION", "2");
+    out
+}
+
+/// Writes a replay-playback `race.ini` to `cfg_dir`, backing up any existing file.
+pub fn write_replay_ini(cfg_dir: &Path, filename: &str) -> io::Result<PathBuf> {
+    if filename.trim().is_empty() || filename.contains(['/', '\\', '\r', '\n']) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Replay filename must be a plain file name without path separators.",
+        ));
+    }
+    write_ini_text(cfg_dir, &replay_race_ini(filename.trim()))
+}
+
+/// Toggles CSP AI Flood traffic in `Documents/Assetto Corsa/cfg/extension/new_behaviour.ini`.
+pub fn write_ai_flood_override(user_ext_dir: &Path, enabled: bool) -> io::Result<()> {
+    if crate::game::is_game_running() {
+        return Err(io::Error::new(
+            io::ErrorKind::ResourceBusy,
+            "Assetto Corsa is running; close it before changing AI Flood settings.",
+        ));
+    }
+    let path = user_ext_dir.join("new_behaviour.ini");
+    let mut ini = match crate::ini::Ini::load(&path) {
+        Ok(ini) => ini,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => crate::ini::Ini::default(),
+        Err(e) => return Err(e),
+    };
+    ini.set("AI_FLOOD", "ENABLED", if enabled { "1" } else { "0" });
+    ini.save_with_backup(&path)
 }
 
 /// Starts a section header, with a blank line before it unless it is the first.
@@ -1002,6 +1246,69 @@ mod mode_tests {
         assert!(!race.extras.validate().is_empty());
         race.extras.mode = RaceMode::Drift;
         assert!(race.extras.validate().is_empty());
+    }
+
+    #[test]
+    fn multi_car_grid_track_day_drag_ghost_and_replay_ini() {
+        let mut race = QuickRace {
+            track: "spa".into(),
+            car: "ks_ferrari_488_gt3".into(),
+            player_setup: "race_spa.ini".into(),
+            player_ballast: 20,
+            player_restrictor: 5,
+            time_of_day_hour: 20,
+            time_of_day_minute: 30,
+            date_unix: Some(1_700_000_000),
+            weather_type: Some(15),
+            opponents: vec![
+                AiOpponent {
+                    car: "ks_porsche_911_gt3_r".into(),
+                    skin: "gulf".into(),
+                    driver_name: "Alice".into(),
+                    ballast: 10,
+                    ai_level: 95,
+                    ai_aggression: Some(55),
+                    ..Default::default()
+                },
+                AiOpponent {
+                    car: "ks_audi_r8_lms".into(),
+                    driver_name: "Bob".into(),
+                    ai_level: 89,
+                    ..Default::default()
+                },
+            ],
+            ghost_car: GhostCarConfig {
+                enabled: true,
+                playing: true,
+                load: true,
+                file: "pb.ghost".into(),
+                advantage_centis: 50,
+                ..Default::default()
+            },
+            ..QuickRace::default()
+        };
+        race.extras.mode = RaceMode::TrackDay;
+        race.extras.track_day_minutes = 45;
+        assert!(race.validate().is_ok());
+        let ini = race.to_race_ini();
+        assert!(ini.contains("CARS=3\r\n"));
+        assert!(ini.contains("MODEL=ks_porsche_911_gt3_r\r\n"));
+        assert!(ini.contains("DRIVER_NAME=Alice\r\n"));
+        assert!(ini.contains("BALLAST=20\r\n"));
+        assert!(ini.contains("SETUP=race_spa.ini\r\n"));
+        assert!(ini.contains("TYPE=1\r\nDURATION_MINUTES=45\r\nSPAWN_SET=PIT\r\n"));
+        assert!(ini.contains("__CM_UNCLAMPED_SUN_ANGLE="));
+        assert!(ini.contains("__CM_DATE=1700000000\r\n"));
+        assert!(ini.contains("__CM_WEATHER_TYPE=15\r\n"));
+        assert!(ini.contains("FILE=pb.ghost\r\nENABLED=1\r\nADVANTAGE=0.50\r\n"));
+
+        race.extras.mode = RaceMode::Drag;
+        race.extras.drag_matches = 5;
+        let drag_ini = race.to_race_ini();
+        assert!(drag_ini.contains("TYPE=7\r\nMATCHES=5\r\n"));
+
+        let rep = replay_race_ini("my_race.acreplay");
+        assert!(rep.contains("[REPLAY]\r\nACTIVE=1\r\nFILENAME=my_race.acreplay\r\n"));
     }
 }
 

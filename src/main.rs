@@ -6,11 +6,19 @@
 
 mod ui;
 
-use acxs_manager::{content, crash_report, csp, game, settings};
+use acxs_manager::{content, crash_report, csp, game, ipc, settings, uri};
 use eframe::egui;
 use std::path::PathBuf;
 
 fn main() -> eframe::Result {
+    // Single-instance URI / focus forwarding: if another instance is already listening on the
+    // local named pipe, hand it our CLI argument (e.g. an `acmanager://` link) and exit cleanly.
+    let raw_arg = std::env::args().nth(1);
+    if ipc::try_forward(raw_arg.as_deref()) {
+        return Ok(());
+    }
+    let initial_uri = raw_arg.as_deref().and_then(|raw| uri::parse_join_uri(raw).ok());
+
     // Panics are stored next to settings.json, whether or not reports are sent.
     let settings_dir = settings::settings_path()
         .parent()
@@ -28,12 +36,13 @@ fn main() -> eframe::Result {
     if let (Some(x), Some(y)) = (window.x, window.y) {
         viewport = viewport.with_position([x, y]);
     }
-    let options = eframe::NativeOptions { viewport, ..Default::default() };
+    // 24-bit hardware depth buffer enables native 3D rendering inside `egui::PaintCallback`.
+    let options = eframe::NativeOptions { viewport, depth_buffer: 24, ..Default::default() };
 
     eframe::run_native(
         "ACXS Manager",
         options,
-        Box::new(|cc| Ok(Box::new(ui::App::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(ui::App::new_with_uri(cc, initial_uri)))),
     )
 }
 
@@ -45,7 +54,6 @@ fn app_icon() -> egui::IconData {
     for y in 0..SIZE {
         for x in 0..SIZE {
             let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            // Rounded square.
             let radius = 14.0;
             let dx = (fx - size / 2.0).abs() - (size / 2.0 - radius);
             let dy = (fy - size / 2.0).abs() - (size / 2.0 - radius);
@@ -53,17 +61,17 @@ fn app_icon() -> egui::IconData {
             if !inside {
                 continue;
             }
-            // The A: two slanted strokes from the apex plus a crossbar.
             let apex = (size / 2.0, 14.0);
             let stroke = 4.5;
             let t = ((fy - apex.1) / (size - 14.0 - apex.1)).clamp(0.0, 1.0);
             let half = 2.0 + t * 17.0;
             let on_leg = (fy >= apex.1 - 1.0 && fy <= size - 14.0)
-                && (((fx - (size / 2.0 - half)).abs() < stroke / 2.0 + 0.5) || ((fx - (size / 2.0 + half)).abs() < stroke / 2.0 + 0.5));
+                && (((fx - (size / 2.0 - half)).abs() < stroke / 2.0 + 0.5)
+                    || ((fx - (size / 2.0 + half)).abs() < stroke / 2.0 + 0.5));
             let bar = fy > 38.0 && fy < 42.5 && (fx - size / 2.0).abs() < half;
             let letter = on_leg || bar;
             let i = ((y * SIZE + x) * 4) as usize;
-            let color = if letter { [255, 255, 255, 255] } else { [0xFF, 0x7A, 0x1A, 255] };
+            let color = if letter { [255, 255, 255, 255] } else { [0xFF, 0x5A, 0x1F, 255] };
             rgba[i..i + 4].copy_from_slice(&color);
         }
     }

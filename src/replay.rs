@@ -440,6 +440,337 @@ pub fn read_replay_samples(path: &Path) -> Result<ReplaySamples, ReplayError> {
     parse_replay_samples(&bytes)
 }
 
+/// Byte offset of body orientation Euler angles (3 x f32, radians) in a car frame.
+const FRAME_ROTATION: usize = 12;
+/// Byte offset of the 4 wheel local pose blocks (4 x 24 bytes: pos[3] + rot[3]).
+const FRAME_WHEELS: usize = 24;
+/// Byte offset of car status/lights flags byte in a car frame.
+const FRAME_LIGHTS: usize = 236;
+
+/// Local position and rotation of one wheel decoded from a replay frame.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct WheelPose {
+    pub pos: [f32; 3],
+    pub rot: [f32; 3],
+}
+
+/// Full 3D pose + telemetry for one car at one replay frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CarFrame3D {
+    pub sample: Sample,
+    /// Body Euler angles `[pitch, yaw, roll]` in radians (zeroed if non-finite).
+    pub rotation: [f32; 3],
+    /// Four wheels (`LF`, `RF`, `LR`, `RR`).
+    pub wheels: [WheelPose; 4],
+    /// Bitmask for headlights/brake lights/status flags.
+    pub lights_flags: u8,
+    pub current_lap: u8,
+}
+
+/// Per-car metadata and decoded 3D frames from a multi-car `.acreplay`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CarReplay {
+    pub car_id: String,
+    pub driver: String,
+    pub nation: String,
+    pub team: String,
+    pub skin_id: String,
+    pub lap_times_ms: Vec<u32>,
+    pub frames: Vec<CarFrame3D>,
+}
+
+/// Complete multi-car `.acreplay` recording for 2D/3D playback.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultiCarReplay {
+    pub info: ReplayInfo,
+    pub recording_interval_ms: f64,
+    /// Per-frame sun angles `(sun_angle_1, sun_angle_2)` from the global replay header.
+    pub sun_angles: Vec<(i16, i16)>,
+    pub cars: Vec<CarReplay>,
+    pub capped: bool,
+}
+
+fn decode_car_frame_3d(
+    frame: &[u8],
+    index: usize,
+    interval_ms: f64,
+) -> Result<CarFrame3D, ReplayError> {
+    let sample = decode_sample(frame, index, interval_ms)?;
+    let mut rotation = [0.0f32; 3];
+    for (i, slot) in rotation.iter_mut().enumerate() {
+        let v = frame_f32(frame, FRAME_ROTATION + i * 4)?;
+        *slot = if v.is_finite() { v } else { 0.0 };
+    }
+    let mut wheels = [WheelPose::default(); 4];
+    for (w_idx, wheel) in wheels.iter_mut().enumerate() {
+        let base = FRAME_WHEELS + w_idx * 24;
+        for i in 0..3 {
+            let p = frame_f32(frame, base + i * 4)?;
+            let r = frame_f32(frame, base + 12 + i * 4)?;
+            wheel.pos[i] = if p.is_finite() { p } else { 0.0 };
+            wheel.rot[i] = if r.is_finite() { r } else { 0.0 };
+        }
+    }
+    Ok(CarFrame3D {
+        sample,
+        rotation,
+        wheels,
+        lights_flags: frame_u8(frame, FRAME_LIGHTS)?,
+        current_lap: frame_u8(frame, FRAME_CURRENT_LAP)?,
+    })
+}
+
+/// Parses a v16 `.acreplay` buffer and decodes 3D frames for ALL cars (up to `max_frames` per car).
+pub fn parse_replay_multicar(
+    bytes: &[u8],
+    max_frames: usize,
+) -> Result<MultiCarReplay, ReplayError> {
+    let mut r = Reader::new(bytes);
+    let version = r.u32()?;
+    if version == 0 || version > MAX_PLAUSIBLE_VERSION {
+        return Err(ReplayError::BadHeader);
+    }
+    if version != SUPPORTED_VERSION {
+        return Err(ReplayError::UnsupportedVersion(version));
+    }
+    let recording_interval_ms = r.f64()?;
+    if !recording_interval_ms.is_finite() || recording_interval_ms <= 0.0 {
+        return Err(ReplayError::BadHeader);
+    }
+
+    let weather = r.string()?;
+    let track = r.string()?;
+    let track_config = r.string()?;
+    let num_cars = r.u32()?;
+    let _current_recording_index = r.u32()?;
+    let num_frames = r.u32()?;
+    let num_track_objects = r.u32()?;
+    if num_cars == 0 {
+        return Err(ReplayError::BadHeader);
+    }
+
+    let obj_bytes = 12u64
+        .checked_mul(u64::from(num_track_objects))
+        .ok_or(ReplayError::BadHeader)?;
+    let mut sun_angles = Vec::with_capacity((num_frames as usize).min(max_frames));
+    for i in 0..num_frames {
+        let s = r.take(4)?;
+        if (i as usize) < max_frames {
+            let a = i16::from_le_bytes([s[0], s[1]]);
+            let b = i16::from_le_bytes([s[2], s[3]]);
+            sun_angles.push((a, b));
+        }
+        r.skip(obj_bytes)?;
+    }
+
+    let mut cars = Vec::with_capacity(num_cars as usize);
+    let mut capped = false;
+    for _ in 0..num_cars {
+        let car_id = r.string()?;
+        let driver = r.string()?;
+        let nation = r.string()?;
+        let team = r.string()?;
+        let skin_id = r.string()?;
+        let car_frames = r.u32()?;
+        let num_wings = r.u32()?;
+        r.skip(CAR_HEADER_PAD)?;
+
+        let wing_bytes = u64::from(num_wings) * 4;
+        let mut laps = LapTracker::default();
+        let mut frames = Vec::with_capacity((car_frames as usize).min(max_frames));
+        for i in 0..car_frames {
+            let frame = r.take(CAR_FRAME_SIZE)?;
+            laps.observe(frame)?;
+            if (i as usize) < max_frames {
+                frames.push(decode_car_frame_3d(frame, i as usize, recording_interval_ms)?);
+            } else {
+                capped = true;
+            }
+            if i + 1 < car_frames {
+                r.skip(FRAME_GAP + wing_bytes)?;
+            } else {
+                r.skip(wing_bytes)?;
+                let count = r.u32()?;
+                r.skip(u64::from(count) * TRAILING_ENTRY_SIZE)?;
+            }
+        }
+        cars.push(CarReplay {
+            car_id,
+            driver,
+            nation,
+            team,
+            skin_id,
+            lap_times_ms: laps.lap_times_ms,
+            frames,
+        });
+    }
+
+    let first = cars.first().ok_or(ReplayError::BadHeader)?;
+    let sample_count = first.frames.len();
+    let info = ReplayInfo {
+        version,
+        track,
+        config_track: (!track_config.is_empty()).then_some(track_config),
+        car: first.car_id.clone(),
+        driver: first.driver.clone(),
+        lap_count: first.lap_times_ms.len(),
+        lap_times_ms: first.lap_times_ms.clone(),
+        duration_s: sample_count as f64 * recording_interval_ms / 1000.0,
+        sample_count,
+        weather,
+        num_cars: cars.len(),
+    };
+    Ok(MultiCarReplay {
+        info,
+        recording_interval_ms,
+        sun_angles,
+        cars,
+        capped,
+    })
+}
+
+/// Reads and parses a multi-car `.acreplay` file from disk.
+pub fn read_replay_multicar(path: &Path, max_frames: usize) -> Result<MultiCarReplay, ReplayError> {
+    let bytes = std::fs::read(path)?;
+    parse_replay_multicar(&bytes, max_frames)
+}
+
+/// Slices a v16 `.acreplay` binary buffer to the half-open frame range `[start_frame, end_frame)`,
+/// producing a valid, self-contained `.acreplay` clip preserving all cars, track objects, and
+/// trailing metadata blocks.
+pub fn trim_replay(bytes: &[u8], start_frame: u32, end_frame: u32) -> Result<Vec<u8>, ReplayError> {
+    if start_frame >= end_frame {
+        return Err(ReplayError::BadHeader);
+    }
+    let mut r = Reader::new(bytes);
+    let version = r.u32()?;
+    if version != SUPPORTED_VERSION {
+        return Err(ReplayError::UnsupportedVersion(version));
+    }
+    let interval_ms = r.f64()?;
+    if !interval_ms.is_finite() || interval_ms <= 0.0 {
+        return Err(ReplayError::BadHeader);
+    }
+    let weather = r.string()?;
+    let track = r.string()?;
+    let track_config = r.string()?;
+    let num_cars = r.u32()?;
+    let _current_recording_index = r.u32()?;
+    let num_frames = r.u32()?;
+    let num_track_objects = r.u32()?;
+    if num_cars == 0 || end_frame > num_frames {
+        return Err(ReplayError::BadHeader);
+    }
+
+    let new_num_frames = end_frame - start_frame;
+    let mut out = Vec::with_capacity(bytes.len() / 2 + 256);
+    let put_str = |buf: &mut Vec<u8>, s: &str| {
+        buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        buf.extend_from_slice(s.as_bytes());
+    };
+    out.extend_from_slice(&version.to_le_bytes());
+    out.extend_from_slice(&interval_ms.to_le_bytes());
+    put_str(&mut out, &weather);
+    put_str(&mut out, &track);
+    put_str(&mut out, &track_config);
+    out.extend_from_slice(&num_cars.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes()); // current_recording_index reset
+    out.extend_from_slice(&new_num_frames.to_le_bytes());
+    out.extend_from_slice(&num_track_objects.to_le_bytes());
+
+    // Slice global sun + track-object block.
+    let per_global = (4u64 + 12u64 * u64::from(num_track_objects)) as usize;
+    let global_block = r.take(
+        per_global
+            .checked_mul(num_frames as usize)
+            .ok_or(ReplayError::Truncated)?,
+    )?;
+    let g_start = (start_frame as usize) * per_global;
+    let g_end = (end_frame as usize) * per_global;
+    out.extend_from_slice(&global_block[g_start..g_end]);
+
+    // Slice each car block.
+    for _ in 0..num_cars {
+        let car_id = r.string()?;
+        let driver = r.string()?;
+        let nation = r.string()?;
+        let team = r.string()?;
+        let skin = r.string()?;
+        let car_frames = r.u32()?;
+        let num_wings = r.u32()?;
+        let pad = r.take(CAR_HEADER_PAD as usize)?;
+        let wing_bytes = (num_wings as usize) * 4;
+        let gap = FRAME_GAP as usize;
+
+        let mut raw_frames: Vec<&[u8]> = Vec::with_capacity(car_frames as usize);
+        let mut raw_wings: Vec<&[u8]> = Vec::with_capacity(car_frames as usize);
+        let mut raw_gaps: Vec<&[u8]> = Vec::with_capacity(car_frames as usize);
+        let mut trailing_count = 0u32;
+        let mut trailing_bytes: &[u8] = &[];
+
+        for i in 0..car_frames {
+            raw_frames.push(r.take(CAR_FRAME_SIZE)?);
+            if i + 1 < car_frames {
+                let between = r.take(gap + wing_bytes)?;
+                raw_wings.push(&between[..wing_bytes]);
+                raw_gaps.push(&between[wing_bytes..]);
+            } else {
+                raw_wings.push(r.take(wing_bytes)?);
+                trailing_count = r.u32()?;
+                let tb_len = (trailing_count as usize)
+                    .checked_mul(TRAILING_ENTRY_SIZE as usize)
+                    .ok_or(ReplayError::Truncated)?;
+                trailing_bytes = r.take(tb_len)?;
+            }
+        }
+
+        let s = (start_frame as usize).min(raw_frames.len());
+        let e = (end_frame as usize).min(raw_frames.len());
+        let kept = e.saturating_sub(s);
+
+        put_str(&mut out, &car_id);
+        put_str(&mut out, &driver);
+        put_str(&mut out, &nation);
+        put_str(&mut out, &team);
+        put_str(&mut out, &skin);
+        out.extend_from_slice(&(kept as u32).to_le_bytes());
+        out.extend_from_slice(&num_wings.to_le_bytes());
+        out.extend_from_slice(pad);
+
+        for k in 0..kept {
+            let idx = s + k;
+            out.extend_from_slice(raw_frames[idx]);
+            if k + 1 < kept {
+                out.extend_from_slice(raw_wings[idx]);
+                out.extend_from_slice(raw_gaps[idx]);
+            } else {
+                out.extend_from_slice(raw_wings[idx]);
+                out.extend_from_slice(&trailing_count.to_le_bytes());
+                out.extend_from_slice(trailing_bytes);
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// Reads `src`, trims `[start_frame, end_frame)`, and writes to a new file `dst`
+/// (refusing to overwrite an existing file).
+pub fn trim_replay_file(
+    src: &Path,
+    dst: &Path,
+    start_frame: u32,
+    end_frame: u32,
+) -> Result<usize, ReplayError> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    let bytes = std::fs::read(src)?;
+    let trimmed = trim_replay(&bytes, start_frame, end_frame)?;
+    let mut file = OpenOptions::new().write(true).create_new(true).open(dst)?;
+    file.write_all(&trimmed)?;
+    Ok(trimmed.len())
+}
+
 /// Format a lap time as `M:SS.mmm`, e.g. `1:23.456`.
 pub fn format_lap_time(ms: u32) -> String {
     let minutes = ms / 60_000;
@@ -772,5 +1103,77 @@ mod tests {
         assert!(ReplayError::UnsupportedVersion(7).to_string().contains('7'));
         let e: ReplayError = io::Error::other("boom").into();
         assert!(matches!(e, ReplayError::Io(_)));
+    }
+
+    #[test]
+    fn multicar_decode_and_trim_replay_round_trip() {
+        // Build a synthetic 2-car, 60-frame, 3-track-object, 2-wing, 4-trailing-entry v16 replay.
+        let num_frames = 60u32;
+        let num_objects = 3u32;
+        let num_wings = 2u32;
+        let trailing_count = 4u32;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&16u32.to_le_bytes());
+        buf.extend_from_slice(&33.333f64.to_le_bytes());
+        push_str(&mut buf, "3_clear");
+        push_str(&mut buf, "monza");
+        push_str(&mut buf, "");
+        buf.extend_from_slice(&2u32.to_le_bytes()); // num_cars
+        buf.extend_from_slice(&0u32.to_le_bytes()); // current_recording_index
+        buf.extend_from_slice(&num_frames.to_le_bytes());
+        buf.extend_from_slice(&num_objects.to_le_bytes());
+        for f in 0..num_frames {
+            buf.extend_from_slice(&(f as i16).to_le_bytes());
+            buf.extend_from_slice(&(-(f as i16)).to_le_bytes());
+            buf.extend_from_slice(&vec![0xABu8; (num_objects as usize) * 12]);
+        }
+        for car_i in 0..2u32 {
+            push_str(&mut buf, &format!("car_{car_i}"));
+            push_str(&mut buf, &format!("Driver {car_i}"));
+            push_str(&mut buf, "DE");
+            push_str(&mut buf, "Team");
+            push_str(&mut buf, &format!("skin_{car_i}"));
+            buf.extend_from_slice(&num_frames.to_le_bytes());
+            buf.extend_from_slice(&num_wings.to_le_bytes());
+            buf.extend_from_slice(&vec![0u8; CAR_HEADER_PAD as usize]);
+            for f in 0..num_frames {
+                let mut fr = frame(0, f * 33, 0);
+                let x = (f as f32) + (car_i as f32) * 100.0;
+                fr[FRAME_POSITION..FRAME_POSITION + 4].copy_from_slice(&x.to_le_bytes());
+                fr[FRAME_ROTATION + 4..FRAME_ROTATION + 8].copy_from_slice(&0.5f32.to_le_bytes());
+                fr[FRAME_LIGHTS] = 0b0000_0011;
+                buf.extend_from_slice(&fr);
+                if f + 1 < num_frames {
+                    buf.extend_from_slice(&vec![0x11u8; (FRAME_GAP as usize) + (num_wings as usize) * 4]);
+                } else {
+                    buf.extend_from_slice(&vec![0x22u8; (num_wings as usize) * 4]);
+                    buf.extend_from_slice(&trailing_count.to_le_bytes());
+                    buf.extend_from_slice(&vec![0x33u8; (trailing_count as usize) * (TRAILING_ENTRY_SIZE as usize)]);
+                }
+            }
+        }
+
+        let mc = parse_replay_multicar(&buf, 1000).unwrap();
+        assert_eq!(mc.cars.len(), 2);
+        assert_eq!(mc.sun_angles.len(), 60);
+        assert_eq!(mc.cars[1].skin_id, "skin_1");
+        assert!((mc.cars[0].frames[15].sample.x - 15.0).abs() < 1e-5);
+        assert!((mc.cars[0].frames[15].rotation[1] - 0.5).abs() < 1e-5);
+        assert_eq!(mc.cars[0].frames[15].lights_flags, 0b0000_0011);
+
+        // Trim [10, 40) -> 30 frames, re-parse and verify exact positions & metadata.
+        let trimmed = trim_replay(&buf, 10, 40).unwrap();
+        assert!(trimmed.len() < buf.len());
+        let mc_trim = parse_replay_multicar(&trimmed, 1000).unwrap();
+        assert_eq!(mc_trim.cars.len(), 2);
+        assert_eq!(mc_trim.cars[0].frames.len(), 30);
+        assert_eq!(mc_trim.cars[1].frames.len(), 30);
+        assert_eq!(mc_trim.sun_angles[0], (10, -10));
+        assert!((mc_trim.cars[0].frames[0].sample.x - 10.0).abs() < 1e-5);
+        assert!((mc_trim.cars[1].frames[29].sample.x - 139.0).abs() < 1e-5);
+
+        // Invalid ranges rejected.
+        assert!(trim_replay(&buf, 40, 40).is_err());
+        assert!(trim_replay(&buf, 10, 61).is_err());
     }
 }
