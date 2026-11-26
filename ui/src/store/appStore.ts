@@ -27,6 +27,7 @@ import type {
 export interface SubTabDefinition {
   id: SubTab;
   label: string;
+  group?: string;
 }
 
 export interface PillarDefinition {
@@ -45,51 +46,60 @@ export const PILLAR_NAV: PillarDefinition[] = [
     id: "drive",
     label: "Drive",
     subTabs: [
-      { id: "quick-race", label: "Quick Race" },
-      { id: "events", label: "Events" },
-      { id: "championships", label: "Championships" },
+      { id: "quick-race", label: "Quick Race", group: "Racing" },
+      { id: "events", label: "Events & Career", group: "Racing" },
+      { id: "championships", label: "Championships", group: "Racing" },
     ],
   },
   {
     id: "garage",
     label: "Garage",
     subTabs: [
-      { id: "showroom", label: "Showroom" },
-      { id: "cars", label: "Cars" },
-      { id: "tracks", label: "Tracks" },
-      { id: "setups", label: "Setups" },
-      { id: "studio", label: "Studio" },
-      { id: "library", label: "Library" },
+      { id: "showroom", label: "3D Showroom", group: "Showcase" },
+      { id: "cars", label: "Cars", group: "Showcase" },
+      { id: "tracks", label: "Tracks", group: "Showcase" },
+      { id: "setups", label: "Setups", group: "Workshop" },
+      { id: "skins", label: "Skins & Metadata", group: "Workshop" },
+      { id: "painter", label: "Livery Painter", group: "Workshop" },
+      { id: "plates", label: "License Plates", group: "Workshop" },
+      { id: "models", label: "3D Models & AO", group: "Workshop" },
+      { id: "installer", label: "Install Packages", group: "Content" },
+      { id: "jsgme", label: "JSGME Mods", group: "Content" },
+      { id: "health", label: "Health & Repairs", group: "Content" },
+      { id: "tuning", label: "Car Tuning & ACD", group: "Content" },
+      { id: "sfx", label: "SFX Swapper", group: "Content" },
     ],
   },
   {
     id: "online",
     label: "Online",
     subTabs: [
-      { id: "servers", label: "Server Browser" },
-      { id: "dedicated", label: "Dedicated Server" },
+      { id: "servers", label: "Server Browser", group: "Multiplayer" },
+      { id: "dedicated", label: "Dedicated Server", group: "Multiplayer" },
     ],
   },
   {
     id: "telemetry",
     label: "Telemetry",
     subTabs: [
-      { id: "sessions", label: "Sessions" },
-      { id: "live", label: "Live Pit-Wall" },
-      { id: "replay", label: "Replay" },
-      { id: "trajectory", label: "Trajectory" },
-      { id: "strategy", label: "Strategy & Timing" },
+      { id: "sessions", label: "Sessions & Coach", group: "Analysis" },
+      { id: "live", label: "Live Pit-Wall", group: "Analysis" },
+      { id: "replay", label: "Replay Viewer", group: "Analysis" },
+      { id: "trajectory", label: "Trajectory Studio", group: "Analysis" },
+      { id: "strategy", label: "Race Strategy", group: "Race Ops" },
+      { id: "timing", label: "Timing Tower", group: "Race Ops" },
+      { id: "laptimes", label: "Lap Times", group: "Race Ops" },
     ],
   },
   {
     id: "setup",
     label: "Setup",
     subTabs: [
-      { id: "game", label: "Game Settings" },
-      { id: "csp", label: "CSP Config" },
-      { id: "csp-patches", label: "CSP Patches" },
-      { id: "csp-weather", label: "WeatherFX" },
-      { id: "app", label: "App Settings" },
+      { id: "game", label: "Game Settings", group: "Simulation" },
+      { id: "csp", label: "CSP Config", group: "Shaders Patch" },
+      { id: "csp-patches", label: "CSP Patches", group: "Shaders Patch" },
+      { id: "csp-weather", label: "WeatherFX", group: "Shaders Patch" },
+      { id: "app", label: "App Settings", group: "Application" },
     ],
   },
 ];

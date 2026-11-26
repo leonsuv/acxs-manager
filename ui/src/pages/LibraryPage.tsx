@@ -1,16 +1,12 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
-  Archive,
   ArrowLeftRight,
   Check,
   CheckCircle2,
   FolderInput,
   Lock,
-  Package,
   RefreshCw,
-  ShieldAlert,
-  Sliders,
   Sparkles,
   Unlock,
   Upload,
@@ -33,7 +29,6 @@ import {
   Button,
   KpiTile,
   PageHeader,
-  SegmentedControl,
   Slider,
 } from "../components/Primitives";
 
@@ -117,10 +112,14 @@ function formatBytes(bytes: number): string {
   return `${bytes} B`;
 }
 
-export function LibraryPage() {
+export function LibraryPage({
+  view = "installer",
+}: {
+  view?: LibraryTab;
+}) {
   const { cars, armedSession, notify, rescan } = useAppStore();
 
-  const [tab, setTab] = useState<LibraryTab>("installer");
+  const tab = view;
 
   // 1. Universal Installer
   const [dragActive, setDragActive] = useState(false);
@@ -438,21 +437,27 @@ export function LibraryPage() {
       <div className="p-6 pb-4 shrink-0">
         <PageHeader
           eyebrow="Garage · Content Management"
-          title="Library"
-          subtitle="Universal archive installer, JSGME load order, content health, ACD physics tuning, and SFX sound swapper"
-          actions={
-            <SegmentedControl
-              size="sm"
-              value={tab}
-              onChange={setTab}
-              options={[
-                { value: "installer", label: "Universal Installer", icon: <Package className="w-3.5 h-3.5" /> },
-                { value: "jsgme", label: "JSGME Mods", icon: <Archive className="w-3.5 h-3.5" /> },
-                { value: "health", label: "Health & Repairs", icon: <ShieldAlert className="w-3.5 h-3.5" /> },
-                { value: "tuning", label: "Car Tuning & ACD", icon: <Sliders className="w-3.5 h-3.5" /> },
-                { value: "sfx", label: "SFX Sound Swapper", icon: <Volume2 className="w-3.5 h-3.5" /> },
-              ]}
-            />
+          title={
+            tab === "installer"
+              ? "Install Packages"
+              : tab === "jsgme"
+                ? "JSGME Mods"
+                : tab === "health"
+                  ? "Health & Repairs"
+                  : tab === "tuning"
+                    ? "Car Tuning & ACD"
+                    : "SFX Sound Swapper"
+          }
+          subtitle={
+            tab === "installer"
+              ? "Drop .zip, .7z, .tar.gz, .rar, folders, or PP filters for safe atomic installation"
+              : tab === "jsgme"
+                ? "Manage MODS/ overlays with load-order tracking, conflict detection, and clean rollback"
+                : tab === "health"
+                  ? "Scan installed cars & tracks for broken previews, GUIDs, tags, or unpacked data conflicts"
+                  : tab === "tuning"
+                    ? "Unpack/repack data.acd safely and tune power, mass, fuel, gearing, and suspension"
+                    : "Inspect FMOD soundbanks & GUIDs.txt and swap engine audio from donor cars"
           }
         />
       </div>

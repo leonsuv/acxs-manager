@@ -9,7 +9,6 @@ import {
   Gauge,
   RefreshCw,
   Timer,
-  Trophy,
   Upload,
 } from "lucide-react";
 import { api } from "../lib/api";
@@ -21,7 +20,6 @@ import {
   Card,
   KpiTile,
   PageHeader,
-  SegmentedControl,
   Slider,
 } from "../components/Primitives";
 
@@ -62,9 +60,13 @@ const DEMO_PERSONAL_BESTS = [
   { track: "Nürburgring Nordschleife", car: "Mazda 787B", s1: 118400, s2: 142900, s3: 112600, bestLap: 375120, date: "Last week" },
 ];
 
-export default function StrategyTimingPage() {
+export default function StrategyTimingPage({
+  view = "strategy",
+}: {
+  view?: "strategy" | "timing" | "laptimes";
+}) {
   const { notify } = useAppStore();
-  const [tab, setTab] = useState<"strategy" | "timing" | "laptimes">("strategy");
+  const tab = view;
 
   // Strategy Sliders (sensible defaults so visuals paint immediately)
   const [fuelPerLap, setFuelPerLap] = useState(3.2);
@@ -202,18 +204,19 @@ export default function StrategyTimingPage() {
     <div className="p-6 max-w-[1620px] mx-auto space-y-5 animate-fade-in">
       <PageHeader
         eyebrow="TELEMETRY · RACE OPERATIONS"
-        title="Strategy & Timing Tower"
-        subtitle="Fuel & pit-window calculator, F1-style Broadcast Timing Tower, and personal best sector records."
-        actions={
-          <SegmentedControl
-            value={tab}
-            onChange={setTab}
-            options={[
-              { value: "strategy", label: "Race Strategy", icon: <Fuel className="w-3.5 h-3.5" /> },
-              { value: "timing", label: "Broadcast Timing Tower", icon: <Flag className="w-3.5 h-3.5" /> },
-              { value: "laptimes", label: "Lap Times", icon: <Trophy className="w-3.5 h-3.5" /> },
-            ]}
-          />
+        title={
+          tab === "strategy"
+            ? "Race Strategy"
+            : tab === "timing"
+              ? "Broadcast Timing Tower"
+              : "Lap Times & Sectors"
+        }
+        subtitle={
+          tab === "strategy"
+            ? "Live fuel burn calculator, pit window timeline, and multi-stint stop planner."
+            : tab === "timing"
+              ? "F1-style broadcast race order auto-loaded from race_out.json or CSV timing feeds."
+              : "Personal best lap records with theoretical best sector splits."
         }
       />
 

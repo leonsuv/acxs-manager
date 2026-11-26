@@ -85,7 +85,7 @@ export function TopBar() {
                   key={item.id}
                   type="button"
                   onClick={() => navigate(item.id)}
-                  className={`relative h-full px-3.5 flex items-center text-[13px] font-medium transition-colors duration-150 cursor-pointer ${
+                  className={`relative h-full px-3.5 flex items-center font-display text-[15px] font-bold uppercase tracking-[0.12em] transition-colors duration-150 cursor-pointer ${
                     active
                       ? "text-[var(--text-primary)]"
                       : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"

@@ -16,6 +16,15 @@ export type GarageSubTab =
   | "cars"
   | "tracks"
   | "setups"
+  | "skins"
+  | "painter"
+  | "plates"
+  | "models"
+  | "installer"
+  | "jsgme"
+  | "health"
+  | "tuning"
+  | "sfx"
   | "studio"
   | "library";
 export type OnlineSubTab = "servers" | "dedicated";
@@ -24,7 +33,9 @@ export type TelemetrySubTab =
   | "live"
   | "replay"
   | "trajectory"
-  | "strategy";
+  | "strategy"
+  | "timing"
+  | "laptimes";
 export type SetupSubTab = "game" | "csp" | "csp-patches" | "csp-weather" | "app";
 
 export type SubTab =

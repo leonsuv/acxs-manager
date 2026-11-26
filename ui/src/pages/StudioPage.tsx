@@ -1,16 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Box,
   Brush,
   Check,
   Cpu,
-  CreditCard,
   Download,
   Eraser,
   FolderOpen,
   Layers,
   PaintBucket,
-  Palette,
   RotateCcw,
   Save,
   Sun,
@@ -311,14 +308,18 @@ function drawPlateCanvas(
   ctx.stroke();
 }
 
-export function StudioPage() {
+export function StudioPage({
+  view = "skins",
+}: {
+  view?: StudioTab;
+}) {
   const { cars, armedSession, accent, notify } = useAppStore();
   const accentHex = useMemo(
     () => ACCENT_PRESETS.find((p) => p.id === accent)?.hex ?? "#FF4D2E",
     [accent]
   );
 
-  const [tab, setTab] = useState<StudioTab>("skins");
+  const tab = view;
   const [selectedCarId, setSelectedCarId] = useState<string>(
     armedSession.carId || cars[0]?.id || ""
   );
@@ -547,20 +548,24 @@ export function StudioPage() {
     <div className="h-full flex flex-col overflow-hidden animate-fade-in">
       <div className="p-6 pb-4 space-y-3 shrink-0">
         <PageHeader
-          eyebrow="Garage · Content Authoring"
-          title="Studio"
-          subtitle="Skins & metadata, 2D/3D livery painter, crisp TrueType license plates, and KN5 AO baking"
-          actions={
-            <SegmentedControl
-              value={tab}
-              onChange={setTab}
-              options={[
-                { value: "skins", label: "Skins & Metadata", icon: <Palette className="w-3.5 h-3.5" /> },
-                { value: "painter", label: "Livery Painter", icon: <Brush className="w-3.5 h-3.5" /> },
-                { value: "plates", label: "License Plates", icon: <CreditCard className="w-3.5 h-3.5" /> },
-                { value: "models", label: "3D Models & AO", icon: <Box className="w-3.5 h-3.5" /> },
-              ]}
-            />
+          eyebrow="Garage · Workshop"
+          title={
+            tab === "skins"
+              ? "Skins & Metadata"
+              : tab === "painter"
+                ? "Livery Painter"
+                : tab === "plates"
+                  ? "License Plates"
+                  : "3D Models & AO Baker"
+          }
+          subtitle={
+            tab === "skins"
+              ? "Browse car liveries and edit ui_skin.json driver, team, and race number metadata"
+              : tab === "painter"
+                ? "Interactive 2D/3D livery canvas with brush, fill, stripe tools and DXT1/DXT5 export"
+                : tab === "plates"
+                  ? "High-resolution TrueType vector plate renderer with EU, UK, US, JDM & Carbon templates"
+                  : "Inspect KN5 models and bake 2M-triangle BVH UV ambient occlusion & CSP .vao-patch files"
           }
         />
 
