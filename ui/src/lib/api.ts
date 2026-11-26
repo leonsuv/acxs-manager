@@ -553,6 +553,10 @@ export const api = {
   installCspPatch: (name: string) => invoke<string>("install_csp_patch", { name }),
   uninstallCspPatch: () => invoke<string>("uninstall_csp_patch"),
   syncCspConfigs: () => invoke<string>("sync_csp_configs"),
+  listCspConfigFiles: () => invoke<unknown[]>("list_csp_config_files"),
+  readCspConfig: (file: string) => invoke<unknown>("read_csp_config", { file }),
+  saveCspConfig: (file: string, edits: Record<string, string>) =>
+    invoke<void>("save_csp_config", { file, edits }),
   listConfigSnapshots: () => invoke<ConfigSnapshot[]>("list_config_snapshots"),
   createConfigSnapshot: (label: string) => invoke<ConfigSnapshot>("create_config_snapshot", { label }),
   restoreConfigSnapshot: (id: string) => invoke<void>("restore_config_snapshot", { id }),

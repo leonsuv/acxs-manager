@@ -146,16 +146,60 @@ export default function GameSettingsPage() {
       api.listConfigSnapshots().catch(() => []),
     ]).then(([v, vrRes, ffbRes, rigList, snapList]) => {
       if (v) {
-        setVideo(v);
-        setSavedVideo(v);
+        const raw = v as unknown as Record<string, unknown>;
+        const normalizedVideo: VideoSettings = {
+          ...DEFAULT_VIDEO,
+          width: Number(raw.width ?? DEFAULT_VIDEO.width),
+          height: Number(raw.height ?? DEFAULT_VIDEO.height),
+          refreshHz: Number(raw.refreshHz ?? raw.refresh ?? DEFAULT_VIDEO.refreshHz),
+          fullscreen: Boolean(raw.fullscreen ?? DEFAULT_VIDEO.fullscreen),
+          vsync: Boolean(raw.vsync ?? DEFAULT_VIDEO.vsync),
+          fpsCap: Number(raw.fpsCap ?? raw.fps_cap ?? DEFAULT_VIDEO.fpsCap),
+          msaa: Number(raw.msaa ?? raw.aa_samples ?? DEFAULT_VIDEO.msaa),
+          anisotropic: Number(raw.anisotropic ?? DEFAULT_VIDEO.anisotropic),
+          shadowMapSize: Number(raw.shadowMapSize ?? raw.shadow_map_size ?? DEFAULT_VIDEO.shadowMapSize),
+          worldDetail: Number(raw.worldDetail ?? raw.world_detail ?? DEFAULT_VIDEO.worldDetail),
+          postProcessing: Boolean(raw.postProcessing ?? raw.post_process ?? DEFAULT_VIDEO.postProcessing),
+          ppFilter: String(raw.ppFilter ?? raw.pp_filter ?? DEFAULT_VIDEO.ppFilter),
+        };
+        setVideo(normalizedVideo);
+        setSavedVideo(normalizedVideo);
       }
       if (vrRes) {
-        setVr(vrRes);
-        setSavedVr(vrRes);
+        const raw = vrRes as unknown as Record<string, unknown>;
+        const triple = (raw.triple_screen ?? raw.tripleScreen ?? {}) as Record<string, unknown>;
+        const openvr = (raw.openvr ?? raw.oculus ?? {}) as Record<string, unknown>;
+        const normalizedVr: VrTripleSettings = {
+          ...DEFAULT_VR,
+          renderMode: (raw.renderMode as VrTripleSettings["renderMode"]) ?? DEFAULT_VR.renderMode,
+          tripleFovDeg: Number(raw.tripleFovDeg ?? triple.fov_deg ?? DEFAULT_VR.tripleFovDeg),
+          screenWidthMm: Number(raw.screenWidthMm ?? triple.width_mm ?? DEFAULT_VR.screenWidthMm),
+          distanceMm: Number(raw.distanceMm ?? triple.distance_mm ?? DEFAULT_VR.distanceMm),
+          bezelMm: Number(raw.bezelMm ?? triple.bezel_mm ?? DEFAULT_VR.bezelMm),
+          sideAngleDeg: Number(raw.sideAngleDeg ?? triple.angle_deg ?? DEFAULT_VR.sideAngleDeg),
+          vrPixelDensity: Number(raw.vrPixelDensity ?? openvr.pixel_per_display ?? DEFAULT_VR.vrPixelDensity),
+        };
+        setVr(normalizedVr);
+        setSavedVr(normalizedVr);
       }
       if (ffbRes) {
-        setFfb(ffbRes);
-        setSavedFfb(ffbRes);
+        const raw = ffbRes as unknown as Record<string, unknown>;
+        const pp = (raw.post_process ?? raw.postProcess ?? {}) as Record<string, unknown>;
+        const normalizedFfb: FfbConfig = {
+          ...DEFAULT_FFB,
+          gain: Number(raw.gain ?? DEFAULT_FFB.gain),
+          filter: Number(raw.filter ?? DEFAULT_FFB.filter),
+          minForce: Number(raw.minForce ?? DEFAULT_FFB.minForce),
+          kerbEffect: Number(raw.kerbEffect ?? DEFAULT_FFB.kerbEffect),
+          roadEffect: Number(raw.roadEffect ?? DEFAULT_FFB.roadEffect),
+          slipEffect: Number(raw.slipEffect ?? DEFAULT_FFB.slipEffect),
+          absEffect: Number(raw.absEffect ?? DEFAULT_FFB.absEffect),
+          enhancedUndersteer: Boolean(raw.enhancedUndersteer ?? DEFAULT_FFB.enhancedUndersteer),
+          gammaEnabled: Boolean(raw.gammaEnabled ?? pp.enabled ?? DEFAULT_FFB.gammaEnabled),
+          gammaValue: Number(raw.gammaValue ?? pp.gamma ?? DEFAULT_FFB.gammaValue),
+        };
+        setFfb(normalizedFfb);
+        setSavedFfb(normalizedFfb);
       }
       setRigs(
         rigList && rigList.length > 0

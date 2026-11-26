@@ -379,9 +379,16 @@ export function DrivePage() {
     notify,
   } = useAppStore();
 
-  // Session params
-  const [laps, setLaps] = useState(5);
-  const [durationMinutes, setDurationMinutes] = useState(15);
+  // Session params & combinable Weekend sessions
+  const [practiceEnabled, setPracticeEnabled] = useState(true);
+  const [practiceMinutes, setPracticeMinutes] = useState(15);
+  const [qualifyEnabled, setQualifyEnabled] = useState(true);
+  const [qualifyMinutes, setQualifyMinutes] = useState(10);
+  const [raceEnabled, setRaceEnabled] = useState(true);
+  const [laps, setLaps] = useState(8);
+  const [durationMinutes, setDurationMinutes] = useState(20);
+  const [dragMatches, setDragMatches] = useState(3);
+  const [unlimitedTrackDay, setUnlimitedTrackDay] = useState(true);
   const [timeOfDayMinutes, setTimeOfDayMinutes] = useState(660);
   const [weatherId, setWeatherId] = useState("3_clear");
   const [weatherControllers, setWeatherControllers] = useState<
@@ -1117,35 +1124,179 @@ export function DrivePage() {
             </div>
           </Card>
 
-          {/* Session Rules, Ghost & CSP Flood */}
+          {/* Mode-Adaptive Session Rules & Realism */}
           <Card variant="glass" padding="md" className="space-y-3.5">
-            <div className="flex items-center gap-2">
-              <Flame className="w-4 h-4 text-[var(--accent)]" />
-              <span className="text-xs font-semibold uppercase tracking-wider text-[var(--text-primary)]">
-                Realism, Ghost & CSP Traffic
-              </span>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Flame className="w-4 h-4 text-[var(--accent)]" />
+                <span className="text-xs font-semibold uppercase tracking-wider text-[var(--text-primary)]">
+                  {effectiveMode === "Weekend"
+                    ? "Weekend Sessions & Rules"
+                    : effectiveMode === "TrackDay"
+                      ? "Track Day & CSP Traffic"
+                      : effectiveMode === "Hotlap"
+                        ? "Hotlap & Ghost Setup"
+                        : effectiveMode === "Drift"
+                          ? "Drift Session Rules"
+                          : effectiveMode === "Drag"
+                            ? "Drag Strip Matches"
+                            : "Time Attack Rules"}
+                </span>
+              </div>
+              <Badge variant="accent">{effectiveMode}</Badge>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            {/* WEEKEND: Combinable Practice + Qualifying + Race */}
+            {effectiveMode === "Weekend" && (
+              <div className="space-y-2.5">
+                <div className="text-[11px] text-[var(--text-muted)]">
+                  Combine any sessions for your race weekend:
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  {[
+                    { label: "Practice", on: practiceEnabled, toggle: () => setPracticeEnabled((v) => !v), meta: `${practiceMinutes}m` },
+                    { label: "Qualifying", on: qualifyEnabled, toggle: () => setQualifyEnabled((v) => !v), meta: `${qualifyMinutes}m` },
+                    { label: "Race", on: raceEnabled, toggle: () => setRaceEnabled((v) => !v), meta: `${laps} laps` },
+                  ].map((s) => (
+                    <button
+                      key={s.label}
+                      type="button"
+                      onClick={s.toggle}
+                      className={`px-3 py-2 rounded-xl border text-left transition-all cursor-pointer ${
+                        s.on
+                          ? "bg-[var(--accent-soft)] border-[var(--accent-border)] text-[var(--text-primary)]"
+                          : "bg-white/[0.02] border-white/[0.07] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold">{s.label}</span>
+                        <span className={`w-2 h-2 rounded-full ${s.on ? "bg-[var(--accent)]" : "bg-white/20"}`} />
+                      </div>
+                      <div className="text-[10px] font-mono mt-0.5 opacity-80">
+                        {s.on ? s.meta : "Skipped"}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1">
+                  {practiceEnabled && (
+                    <Slider
+                      label="Practice"
+                      value={practiceMinutes}
+                      min={5}
+                      max={120}
+                      step={5}
+                      unit="m"
+                      onChange={setPracticeMinutes}
+                    />
+                  )}
+                  {qualifyEnabled && (
+                    <Slider
+                      label="Qualifying"
+                      value={qualifyMinutes}
+                      min={5}
+                      max={60}
+                      step={5}
+                      unit="m"
+                      onChange={setQualifyMinutes}
+                    />
+                  )}
+                  {raceEnabled && (
+                    <Slider
+                      label="Race Laps"
+                      value={laps}
+                      min={1}
+                      max={60}
+                      onChange={setLaps}
+                    />
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* TRACK DAY: Duration + CSP AI Flood */}
+            {effectiveMode === "TrackDay" && (
+              <div className="space-y-2.5">
+                <Toggle
+                  checked={unlimitedTrackDay}
+                  onChange={setUnlimitedTrackDay}
+                  label="Unlimited Open Pitlane"
+                  description="Drive as long as you want without session timer"
+                />
+                {!unlimitedTrackDay && (
+                  <Slider
+                    label="Session Duration"
+                    value={durationMinutes}
+                    min={10}
+                    max={180}
+                    step={5}
+                    unit="m"
+                    onChange={setDurationMinutes}
+                  />
+                )}
+                <Toggle
+                  checked={aiFlood}
+                  onChange={setAiFlood}
+                  label="CSP AI Flood Traffic"
+                  description="Continuous respawning highway & trackday traffic around your car"
+                />
+              </div>
+            )}
+
+            {/* DRAG: Best-of Matches */}
+            {effectiveMode === "Drag" && (
               <Slider
-                label="Race Laps"
-                value={laps}
+                label="Best-of Matches"
+                value={dragMatches}
                 min={1}
-                max={60}
-                onChange={setLaps}
+                max={15}
+                step={2}
+                unit=" runs"
+                onChange={setDragMatches}
               />
+            )}
+
+            {/* DRIFT: Session Duration */}
+            {effectiveMode === "Drift" && (
               <Slider
-                label="Duration"
+                label="Drift Session Time"
                 value={durationMinutes}
                 min={5}
-                max={120}
+                max={90}
                 step={5}
                 unit="m"
                 onChange={setDurationMinutes}
               />
-            </div>
+            )}
 
-            <div className="grid grid-cols-3 gap-2.5">
+            {/* HOTLAP: Ghost Car front-and-center */}
+            {effectiveMode === "Hotlap" && (
+              <div className="space-y-2.5">
+                <Toggle
+                  checked={ghostEnabled}
+                  onChange={setGhostEnabled}
+                  label="Personal Best Ghost Car"
+                  description="Spawn your fastest lap ghost directly on track"
+                />
+                {ghostEnabled && (
+                  <div className="pl-2 border-l-2 border-[var(--accent-border)]">
+                    <Slider
+                      label="Ghost Lead Offset"
+                      value={ghostAdvantageSec}
+                      min={-5}
+                      max={5}
+                      step={0.1}
+                      formatValue={(v) => `${v >= 0 ? "+" : ""}${v.toFixed(1)}s`}
+                      onChange={setGhostAdvantageSec}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Realism Sliders */}
+            <div className="grid grid-cols-3 gap-2.5 pt-1 border-t border-white/[0.06]">
               <Slider
                 label="Damage"
                 value={damageMultiplier}
@@ -1175,215 +1326,217 @@ export function DrivePage() {
               />
             </div>
 
-            <div className="space-y-2.5 pt-1 border-t border-white/[0.06]">
-              <Toggle
-                checked={penaltiesEnabled}
-                onChange={setPenaltiesEnabled}
-                label="Track Cut Penalties"
-                description="Enforce 3-wheel off-track slowdown penalties"
-              />
-              <Toggle
-                checked={ghostEnabled}
-                onChange={setGhostEnabled}
-                label="Ghost Car"
-                description="Race against your personal best ghost telemetry"
-              />
-              {ghostEnabled && (
-                <div className="pl-2 border-l-2 border-[var(--accent-border)]">
-                  <Slider
-                    label="Ghost Advantage"
-                    value={ghostAdvantageSec}
-                    min={-5}
-                    max={5}
-                    step={0.1}
-                    formatValue={(v) => `${v >= 0 ? "+" : ""}${v.toFixed(1)}s`}
-                    onChange={setGhostAdvantageSec}
-                  />
-                </div>
-              )}
-              <Toggle
-                checked={aiFlood}
-                onChange={setAiFlood}
-                label="CSP AI Flood Traffic"
-                description="Continuous respawning highway & trackday traffic"
-              />
-            </div>
+            {(effectiveMode === "Weekend" || effectiveMode === "Hotlap" || effectiveMode === "TimeAttack") && (
+              <div className="pt-1 border-t border-white/[0.06]">
+                <Toggle
+                  checked={penaltiesEnabled}
+                  onChange={setPenaltiesEnabled}
+                  label="Track Cut Penalties"
+                  description="Enforce 3-wheel off-track slowdown penalties"
+                />
+              </div>
+            )}
           </Card>
         </div>
 
         {/* ================================================================= */}
-        {/* RIGHT COLUMN (4 cols): AI Grid Builder, Ballast, Launch CTA       */}
+        {/* RIGHT COLUMN (4 cols): Mode-Specific Opponents / Solo Info, BoP   */}
         {/* ================================================================= */}
         <div className="xl:col-span-4 space-y-4">
-          {/* AI Grid Builder */}
-          <Card variant="glass" padding="md" className="space-y-3.5">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <Users className="w-4 h-4 text-[var(--accent)]" />
-                <span className="text-xs font-semibold uppercase tracking-wider text-[var(--text-primary)]">
-                  AI Grid Builder
-                </span>
-                <Badge variant="neutral">{aiOpponents.length} AI</Badge>
-              </div>
-              {aiOpponents.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => setAiOpponents([])}
-                  className="text-[11px] text-[var(--text-muted)] hover:text-red-300 cursor-pointer"
-                >
-                  Clear
-                </button>
-              )}
-            </div>
-
-            {/* Action Buttons: + Add Opponent & Match My Pace */}
-            <div className="grid grid-cols-2 gap-2">
-              <Button
-                variant="secondary"
-                size="sm"
-                icon={<Plus className="w-3.5 h-3.5" />}
-                onClick={() => {
-                  setPickerMode("opponent");
-                  setPickerQuery("");
-                  setPickerFilter("All");
-                }}
-              >
-                Add Opponent
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                loading={computingAdaptive}
-                icon={<Sparkles className="w-3.5 h-3.5 text-amber-300" />}
-                onClick={handleMatchMyPace}
-                className="border-amber-500/25 hover:border-amber-400/50"
-              >
-                Match My Pace
-              </Button>
-            </div>
-
-            {adaptiveSuggestion && (
-              <div className="rounded-lg bg-amber-500/10 border border-amber-500/25 px-3 py-2 flex items-center justify-between text-[11px]">
-                <span className="text-amber-200">
-                  Adaptive Target:{" "}
-                  <strong className="font-mono">
-                    {Math.round(adaptiveSuggestion.recommendedLevel)}%
-                  </strong>{" "}
-                  ({adaptiveSuggestion.minLevel}–{adaptiveSuggestion.maxLevel}%)
-                </span>
-                <span className="font-mono text-amber-300/80">
-                  {Math.round(adaptiveSuggestion.confidence * 100)}% conf
-                </span>
-              </div>
-            )}
-
-            {/* Global AI Skill / Aggression Sliders */}
-            <div className="grid grid-cols-2 gap-3">
-              <Slider
-                label="Grid Skill"
-                value={defaultAiSkill}
-                min={70}
-                max={100}
-                unit="%"
-                onChange={(v) => {
-                  setDefaultAiSkill(v);
-                  applyBatchAiStats(v, defaultAiAggression);
-                }}
-              />
-              <Slider
-                label="Aggression"
-                value={defaultAiAggression}
-                min={0}
-                max={100}
-                unit="%"
-                onChange={(v) => {
-                  setDefaultAiAggression(v);
-                  applyBatchAiStats(defaultAiSkill, v);
-                }}
-              />
-            </div>
-
-            {/* Opponent List */}
-            {aiOpponents.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-white/[0.1] p-5 text-center space-y-1.5">
-                <Ghost className="w-5 h-5 text-[var(--text-muted)] mx-auto" />
-                <div className="text-xs font-medium text-[var(--text-secondary)]">
-                  Solo Track Session
+          {effectiveMode === "Hotlap" || effectiveMode === "Drift" || effectiveMode === "TimeAttack" ? (
+            <Card variant="glass" padding="md" className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Ghost className="w-4 h-4 text-[var(--accent)]" />
+                  <span className="text-xs font-semibold uppercase tracking-wider text-[var(--text-primary)]">
+                    {effectiveMode === "Drift"
+                      ? "Solo Drift Stage"
+                      : effectiveMode === "Hotlap"
+                        ? "Solo Hotlap Stage"
+                        : "Solo Time Attack Stage"}
+                  </span>
                 </div>
-                <p className="text-[11px] text-[var(--text-muted)]">
-                  Add multi-class AI opponents or click{" "}
-                  <span className="text-amber-300">Match My Pace</span> to build
-                  a balanced grid.
-                </p>
+                <Badge variant="info">Solo</Badge>
               </div>
-            ) : (
-              <div className="space-y-2 max-h-[260px] overflow-y-auto pr-1">
-                {aiOpponents.map((opp, idx) => {
-                  const carInfo = cars.find((c) => c.id === opp.carId);
-                  return (
-                    <div
-                      key={`${opp.carId}-${idx}`}
-                      className="rounded-lg bg-white/[0.03] border border-white/[0.07] p-2.5 space-y-2"
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="min-w-0">
-                          <div className="text-xs font-semibold text-[var(--text-primary)] truncate">
-                            {carInfo?.name ?? opp.carId}
+              <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
+                {effectiveMode === "Drift"
+                  ? "No AI traffic on track — full circuit clearance for chaining drift combos, angle multipliers, and clean transitions."
+                  : effectiveMode === "Hotlap"
+                    ? "Rolling flying start with clean track and optional personal-best ghost telemetry."
+                    : "Checkpoint-based solo run against the clock. Track racing-line (fast_lane.ai) is checked before launch."}
+              </p>
+            </Card>
+          ) : (
+            <Card variant="glass" padding="md" className="space-y-3.5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Users className="w-4 h-4 text-[var(--accent)]" />
+                  <span className="text-xs font-semibold uppercase tracking-wider text-[var(--text-primary)]">
+                    {effectiveMode === "Drag" ? "1v1 Drag Rival" : "AI Grid Builder"}
+                  </span>
+                  <Badge variant="neutral">
+                    {effectiveMode === "Drag"
+                      ? `${Math.min(1, aiOpponents.length)} / 1`
+                      : `${aiOpponents.length} AI`}
+                  </Badge>
+                </div>
+                {aiOpponents.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setAiOpponents([])}
+                    className="text-[11px] text-[var(--text-muted)] hover:text-red-300 cursor-pointer"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  icon={<Plus className="w-3.5 h-3.5" />}
+                  onClick={() => {
+                    setPickerMode("opponent");
+                    setPickerQuery("");
+                    setPickerFilter("All");
+                  }}
+                >
+                  {effectiveMode === "Drag" ? "Pick Rival Car" : "Add Opponent"}
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  loading={computingAdaptive}
+                  icon={<Sparkles className="w-3.5 h-3.5 text-amber-300" />}
+                  onClick={handleMatchMyPace}
+                  className="border-amber-500/25 hover:border-amber-400/50"
+                >
+                  Match My Pace
+                </Button>
+              </div>
+
+              {adaptiveSuggestion && (
+                <div className="rounded-lg bg-amber-500/10 border border-amber-500/25 px-3 py-2 flex items-center justify-between text-[11px]">
+                  <span className="text-amber-200">
+                    Adaptive Target:{" "}
+                    <strong className="font-mono">
+                      {Math.round(adaptiveSuggestion.recommendedLevel)}%
+                    </strong>{" "}
+                    ({adaptiveSuggestion.minLevel}–{adaptiveSuggestion.maxLevel}%)
+                  </span>
+                  <span className="font-mono text-amber-300/80">
+                    {Math.round(adaptiveSuggestion.confidence * 100)}% conf
+                  </span>
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-3">
+                <Slider
+                  label="Grid Skill"
+                  value={defaultAiSkill}
+                  min={70}
+                  max={100}
+                  unit="%"
+                  onChange={(v) => {
+                    setDefaultAiSkill(v);
+                    applyBatchAiStats(v, defaultAiAggression);
+                  }}
+                />
+                <Slider
+                  label="Aggression"
+                  value={defaultAiAggression}
+                  min={0}
+                  max={100}
+                  unit="%"
+                  onChange={(v) => {
+                    setDefaultAiAggression(v);
+                    applyBatchAiStats(defaultAiSkill, v);
+                  }}
+                />
+              </div>
+
+              {aiOpponents.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-white/[0.1] p-5 text-center space-y-1.5">
+                  <Ghost className="w-5 h-5 text-[var(--text-muted)] mx-auto" />
+                  <div className="text-xs font-medium text-[var(--text-secondary)]">
+                    {effectiveMode === "Drag" ? "No Drag Rival Selected" : "Solo Track Session"}
+                  </div>
+                  <p className="text-[11px] text-[var(--text-muted)]">
+                    {effectiveMode === "Drag"
+                      ? "Pick a rival car above to race head-to-head down the strip."
+                      : "Add multi-class AI opponents or click Match My Pace to build a balanced grid."}
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-[260px] overflow-y-auto pr-1">
+                  {(effectiveMode === "Drag" ? aiOpponents.slice(0, 1) : aiOpponents).map((opp, idx) => {
+                    const carInfo = cars.find((c) => c.id === opp.carId);
+                    return (
+                      <div
+                        key={`${opp.carId}-${idx}`}
+                        className="rounded-lg bg-white/[0.03] border border-white/[0.07] p-2.5 space-y-2"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="text-xs font-semibold text-[var(--text-primary)] truncate">
+                              {carInfo?.name ?? opp.carId}
+                            </div>
+                            <div className="text-[10px] font-mono text-[var(--text-muted)]">
+                              {opp.driverName ?? `Grid Slot #${idx + 1}`}
+                            </div>
                           </div>
-                          <div className="text-[10px] font-mono text-[var(--text-muted)]">
-                            {opp.driverName ?? `Grid Slot #${idx + 1}`}
-                          </div>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setAiOpponents((prev) =>
+                                prev.filter((_, i) => i !== idx)
+                              )
+                            }
+                            className="p-1 text-[var(--text-muted)] hover:text-red-400 cursor-pointer"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setAiOpponents((prev) =>
-                              prev.filter((_, i) => i !== idx)
-                            )
-                          }
-                          className="p-1 text-[var(--text-muted)] hover:text-red-400 cursor-pointer"
-                        >
-                          <X className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                      <div className="grid grid-cols-2 gap-2">
-                        <Slider
-                          label="Skill"
-                          value={opp.aiLevel}
-                          min={70}
-                          max={100}
-                          unit="%"
-                          onChange={(val) =>
-                            setAiOpponents((prev) =>
-                              prev.map((item, i) =>
-                                i === idx ? { ...item, aiLevel: val } : item
+                        <div className="grid grid-cols-2 gap-2">
+                          <Slider
+                            label="Skill"
+                            value={opp.aiLevel}
+                            min={70}
+                            max={100}
+                            unit="%"
+                            onChange={(val) =>
+                              setAiOpponents((prev) =>
+                                prev.map((item, i) =>
+                                  i === idx ? { ...item, aiLevel: val } : item
+                                )
                               )
-                            )
-                          }
-                        />
-                        <Slider
-                          label="Aggr"
-                          value={opp.aiAggression}
-                          min={0}
-                          max={100}
-                          unit="%"
-                          onChange={(val) =>
-                            setAiOpponents((prev) =>
-                              prev.map((item, i) =>
-                                i === idx
-                                  ? { ...item, aiAggression: val }
-                                  : item
+                            }
+                          />
+                          <Slider
+                            label="Aggr"
+                            value={opp.aiAggression}
+                            min={0}
+                            max={100}
+                            unit="%"
+                            onChange={(val) =>
+                              setAiOpponents((prev) =>
+                                prev.map((item, i) =>
+                                  i === idx
+                                    ? { ...item, aiAggression: val }
+                                    : item
+                                )
                               )
-                            )
-                          }
-                        />
+                            }
+                          />
+                        </div>
                       </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </Card>
+                    );
+                  })}
+                </div>
+              )}
+            </Card>
+          )}
 
           {/* Player Ballast & Restrictor */}
           <Card variant="glass" padding="md" className="space-y-3">

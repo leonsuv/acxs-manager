@@ -137,9 +137,10 @@ export function Slider({
   disabled = false,
   className,
 }: SliderProps) {
+  const safeValue = typeof value === "number" && Number.isFinite(value) ? value : min;
   const pct =
-    max > min ? Math.min(100, Math.max(0, ((value - min) / (max - min)) * 100)) : 0;
-  const display = formatValue ? formatValue(value) : `${value}${unit}`;
+    max > min ? Math.min(100, Math.max(0, ((safeValue - min) / (max - min)) * 100)) : 0;
+  const display = formatValue ? formatValue(safeValue) : `${safeValue}${unit}`;
 
   return (
     <div className={cn("flex flex-col gap-1.5", disabled && "opacity-50", className)}>
@@ -173,7 +174,7 @@ export function Slider({
           min={min}
           max={max}
           step={step}
-          value={value}
+          value={safeValue}
           disabled={disabled}
           onChange={(e) => onChange(Number(e.target.value))}
           className="acxs-range relative z-10 w-full h-5 m-0"
