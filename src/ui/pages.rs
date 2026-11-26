@@ -341,7 +341,7 @@ pub fn settings(app: &mut App, ui: &mut egui::Ui) {
     widgets::heading(
         ui,
         "App Settings",
-        "Appearance, OS protocol handlers, folders, updates and diagnostics. Sim options live under Setup → Video & Audio / Controls.",
+        "Appearance, OS protocol handlers, folders, updates and diagnostics. Sim options live under Setup → Game Settings.",
     );
     let ac_valid = app.snapshot.ac_valid;
 
@@ -355,132 +355,166 @@ pub fn settings(app: &mut App, ui: &mut egui::Ui) {
     }
 
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        ui.set_max_width(860.0);
-
-        // Accent Theme Card.
-        theme::card_elevated().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            widgets::section_title(ui, "Appearance & Motorsport Accent");
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(10.0, 8.0);
-                for (preset, name) in [
-                    (AccentPreset::MotorsportRed, "Motorsport Red"),
-                    (AccentPreset::TelemetryCyan, "Telemetry Cyan"),
-                    (AccentPreset::AmberGold, "Amber Gold"),
-                    (AccentPreset::Emerald, "Emerald"),
-                ] {
-                    let color = theme::accent_color(preset);
-                    let active = app.settings.accent_preset == preset;
-                    let fill = if active { color.gamma_multiply(0.20) } else { theme::SURFACE_RAISED };
-                    let stroke = if active { Stroke::new(1.5, color) } else { Stroke::new(1.0, theme::BORDER_SUBTLE) };
-                    let btn = egui::Frame::new()
-                        .fill(fill)
-                        .stroke(stroke)
-                        .corner_radius(CornerRadius::same(10))
-                        .inner_margin(Margin::symmetric(12, 8))
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                let (dot, _) = ui.allocate_exact_size(vec2(12.0, 12.0), egui::Sense::hover());
-                                ui.painter().circle_filled(dot.center(), 6.0, color);
-                                ui.label(RichText::new(name).font(if active { theme::bold(13.5) } else { egui::FontId::proportional(13.5) }));
-                            });
-                        })
-                        .response
-                        .interact(egui::Sense::click())
-                        .on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if btn.clicked() && !active {
-                        app.settings.accent_preset = preset;
-                        theme::apply_with_accent(ui.ctx(), preset);
-                        let _ = app.settings.save(&settings::settings_path());
-                        app.push_notice(format!("Switched accent to {name}."), true);
-                    }
-                }
-            });
-        });
-
-        ui.add_space(14.0);
-
-        // Protocol Registration (`acmanager://` & `acxs://`).
-        theme::card_elevated().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            widgets::section_title(ui, "Invite Links (acmanager:// & acxs://)");
-            let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("acxs-manager.exe"));
-            let registered = uri_register::is_registered(&exe);
-            ui.horizontal(|ui| {
-                widgets::status_pill(
-                    ui,
-                    if registered { "Registered" } else { "Not registered" },
-                    if registered { OK } else { MUTED },
-                );
-                ui.label(
-                    RichText::new("Open Discord & web server invite links directly in ACXS Manager.")
-                        .size(13.0)
-                        .color(MUTED),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if registered {
-                        if ui.button("Unregister").clicked() {
-                            match uri_register::unregister_protocols() {
-                                Ok(()) => app.push_notice("Removed acmanager:// and acxs:// protocol handlers.", true),
-                                Err(e) => app.push_notice(format!("Protocol unregister failed: {e}"), false),
-                            }
-                        }
-                    } else if ui.add(widgets::primary_button("Register protocol")).clicked() {
-                        match uri_register::register_protocols(&exe) {
-                            Ok(()) => app.push_notice("Registered acmanager:// and acxs:// handlers.", true),
-                            Err(e) => app.push_notice(format!("Protocol registration failed: {e}"), false),
-                        }
-                    }
+        let avail = ui.available_width();
+        if avail >= 1000.0 {
+            let gap = 16.0;
+            let col_w = ((avail - gap) * 0.5).floor();
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                ui.allocate_ui(vec2(col_w, 0.0), |ui| {
+                    ui.set_width(col_w);
+                    ui.vertical(|ui| {
+                        settings_appearance_card(app, ui);
+                        ui.add_space(14.0);
+                        settings_protocol_card(app, ui);
+                        ui.add_space(14.0);
+                        update_card(app, ui);
+                        ui.add_space(14.0);
+                        crash_card(app, ui);
+                        ui.add_space(8.0);
+                    });
+                });
+                ui.allocate_ui(vec2(col_w, 0.0), |ui| {
+                    ui.set_width(col_w);
+                    ui.vertical(|ui| {
+                        settings_folders_card(app, ui, &mut extra, ac_valid);
+                        ui.add_space(14.0);
+                        about_card(ui);
+                        ui.add_space(8.0);
+                    });
                 });
             });
-        });
-
-        ui.add_space(14.0);
-        update_card(app, ui);
-        ui.add_space(14.0);
-
-        // Folders & Advanced Paths.
-        theme::card_elevated().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            widgets::section_title(ui, "Folders & Sources");
-            path_row(ui, "Assetto Corsa folder", "Not set", &mut app.ac_input);
-            ui.add_space(10.0);
-            path_row(ui, "Lights patch library", "Next to this program", &mut app.library_input);
-            ui.add_space(10.0);
-            path_row(ui, "JSGME MODS folder (optional override)", "<AC root>/MODS", &mut extra.mods_dir);
-            ui.add_space(10.0);
-            file_row(ui, "7-Zip executable (optional, for .rar/.7z fallback)", "Auto-detect 7z.exe", &mut extra.seven_zip);
-            ui.add_space(10.0);
-            ui.label(RichText::new("CSP online catalog URL (optional HTTPS override)").color(MUTED));
-            ui.add_space(2.0);
-            ui.add(
-                egui::TextEdit::singleline(&mut extra.csp_catalog)
-                    .desired_width(f32::INFINITY)
-                    .hint_text(csp_online::DEFAULT_CATALOG_URL)
-                    .margin(Margin::symmetric(10, 7)),
-            );
-            ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                if widgets::cta_button(ui, "SAVE SETTINGS", vec2(150.0, 36.0), true).clicked() {
-                    app.settings.seven_zip_path = (!extra.seven_zip.trim().is_empty()).then(|| PathBuf::from(extra.seven_zip.trim()));
-                    app.settings.mods_dir = (!extra.mods_dir.trim().is_empty()).then(|| PathBuf::from(extra.mods_dir.trim()));
-                    app.settings.csp_catalog_url = (!extra.csp_catalog.trim().is_empty()).then(|| extra.csp_catalog.trim().to_string());
-                    app.save_paths();
-                }
-                if !ac_valid {
-                    ui.label(RichText::new("Choose the folder that contains acs.exe, then save.").color(WARN));
-                }
-            });
-        });
-
-        ui.add_space(14.0);
-        crash_card(app, ui);
-        ui.add_space(14.0);
-        about_card(ui);
-        ui.add_space(8.0);
+        } else {
+            settings_appearance_card(app, ui);
+            ui.add_space(14.0);
+            settings_protocol_card(app, ui);
+            ui.add_space(14.0);
+            update_card(app, ui);
+            ui.add_space(14.0);
+            crash_card(app, ui);
+            ui.add_space(14.0);
+            settings_folders_card(app, ui, &mut extra, ac_valid);
+            ui.add_space(14.0);
+            about_card(ui);
+            ui.add_space(8.0);
+        }
     });
 
     ui.ctx().data_mut(|d| d.insert_temp(extra_id, extra));
+}
+
+fn settings_appearance_card(app: &mut App, ui: &mut egui::Ui) {
+    theme::card_elevated().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        widgets::section_title(ui, "Appearance & Motorsport Accent");
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(10.0, 8.0);
+            for (preset, name) in [
+                (AccentPreset::MotorsportRed, "Motorsport Red"),
+                (AccentPreset::TelemetryCyan, "Telemetry Cyan"),
+                (AccentPreset::AmberGold, "Amber Gold"),
+                (AccentPreset::Emerald, "Emerald"),
+            ] {
+                let color = theme::accent_color(preset);
+                let active = app.settings.accent_preset == preset;
+                let fill = if active { color.gamma_multiply(0.20) } else { theme::SURFACE_RAISED };
+                let stroke = if active { Stroke::new(1.5, color) } else { Stroke::new(1.0, theme::BORDER_SUBTLE) };
+                let btn = egui::Frame::new()
+                    .fill(fill)
+                    .stroke(stroke)
+                    .corner_radius(CornerRadius::same(10))
+                    .inner_margin(Margin::symmetric(12, 8))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (dot, _) = ui.allocate_exact_size(vec2(12.0, 12.0), egui::Sense::hover());
+                            ui.painter().circle_filled(dot.center(), 6.0, color);
+                            ui.label(RichText::new(name).font(if active { theme::bold(13.5) } else { egui::FontId::proportional(13.5) }));
+                        });
+                    })
+                    .response
+                    .interact(egui::Sense::click())
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                if btn.clicked() && !active {
+                    app.settings.accent_preset = preset;
+                    theme::apply_with_accent(ui.ctx(), preset);
+                    let _ = app.settings.save(&settings::settings_path());
+                    app.push_notice(format!("Switched accent to {name}."), true);
+                }
+            }
+        });
+    });
+}
+
+fn settings_protocol_card(app: &mut App, ui: &mut egui::Ui) {
+    theme::card_elevated().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        widgets::section_title(ui, "Invite Links (acmanager:// & acxs://)");
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("acxs-manager.exe"));
+        let registered = uri_register::is_registered(&exe);
+        ui.horizontal(|ui| {
+            widgets::status_pill(
+                ui,
+                if registered { "Registered" } else { "Not registered" },
+                if registered { OK } else { MUTED },
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if registered {
+                    if ui.button("Unregister").clicked() {
+                        match uri_register::unregister_protocols() {
+                            Ok(()) => app.push_notice("Removed acmanager:// and acxs:// protocol handlers.", true),
+                            Err(e) => app.push_notice(format!("Protocol unregister failed: {e}"), false),
+                        }
+                    }
+                } else if ui.add(widgets::primary_button("Register protocol")).clicked() {
+                    match uri_register::register_protocols(&exe) {
+                        Ok(()) => app.push_notice("Registered acmanager:// and acxs:// handlers.", true),
+                        Err(e) => app.push_notice(format!("Protocol registration failed: {e}"), false),
+                    }
+                }
+            });
+        });
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("Open Discord & web server invite links directly in ACXS Manager.")
+                .size(13.0)
+                .color(MUTED),
+        );
+    });
+}
+
+fn settings_folders_card(app: &mut App, ui: &mut egui::Ui, extra: &mut ExtraPathsState, ac_valid: bool) {
+    theme::card_elevated().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        widgets::section_title(ui, "Folders & Sources");
+        path_row(ui, "Assetto Corsa folder", "Not set", &mut app.ac_input);
+        ui.add_space(10.0);
+        path_row(ui, "Lights patch library", "Next to this program", &mut app.library_input);
+        ui.add_space(10.0);
+        path_row(ui, "JSGME MODS folder (optional override)", "<AC root>/MODS", &mut extra.mods_dir);
+        ui.add_space(10.0);
+        file_row(ui, "7-Zip executable (optional, for .rar/.7z fallback)", "Auto-detect 7z.exe", &mut extra.seven_zip);
+        ui.add_space(10.0);
+        ui.label(RichText::new("CSP online catalog URL (optional HTTPS override)").color(MUTED));
+        ui.add_space(2.0);
+        ui.add(
+            egui::TextEdit::singleline(&mut extra.csp_catalog)
+                .desired_width(f32::INFINITY)
+                .hint_text(csp_online::DEFAULT_CATALOG_URL)
+                .margin(Margin::symmetric(10, 7)),
+        );
+        ui.add_space(12.0);
+        ui.horizontal_wrapped(|ui| {
+            if widgets::cta_button(ui, "SAVE SETTINGS", vec2(150.0, 36.0), true).clicked() {
+                app.settings.seven_zip_path = (!extra.seven_zip.trim().is_empty()).then(|| PathBuf::from(extra.seven_zip.trim()));
+                app.settings.mods_dir = (!extra.mods_dir.trim().is_empty()).then(|| PathBuf::from(extra.mods_dir.trim()));
+                app.settings.csp_catalog_url = (!extra.csp_catalog.trim().is_empty()).then(|| extra.csp_catalog.trim().to_string());
+                app.save_paths();
+            }
+            if !ac_valid {
+                ui.label(RichText::new("Choose the folder that contains acs.exe, then save.").color(WARN));
+            }
+        });
+    });
 }
 
 fn path_row(ui: &mut egui::Ui, label: &str, hint: &str, value: &mut String) {

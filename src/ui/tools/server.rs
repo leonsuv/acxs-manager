@@ -203,7 +203,7 @@ impl Tool for ServerPage {
     }
 
     fn content_width(&self) -> f32 {
-        1400.0
+        2400.0
     }
 
     fn group(&self) -> &'static str {
@@ -240,25 +240,53 @@ impl Tool for ServerPage {
             ],
         );
         ui.add_space(8.0);
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.tab {
-            ServerPageTab::Config => {
-                self.folder_card(ui);
-                self.process_card(ui, &mut action);
-                self.live_card(ui, &egui_ctx);
-                self.server_card(ui, &mut action);
-                self.extended_config_cards(ui, notices);
-                self.problem_list(ui);
-                ui.add_space(8.0);
-                self.action_bar(ui, &mut action);
-                ui.add_space(16.0);
-                self.entries_card(ui, &mut action);
-            }
-            ServerPageTab::CspExtra => {
-                self.folder_card(ui);
-                self.csp_extra_tab(ui, notices);
-            }
-            ServerPageTab::Rcon => {
-                self.rcon_tab(ui, &egui_ctx, notices);
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            let wide = ui.available_width() >= 960.0;
+            match self.tab {
+                ServerPageTab::Config => {
+                    self.folder_card(ui);
+                    ui.add_space(10.0);
+                    if wide {
+                        let (left_w, right_w) = split_widths(ui, 0.52);
+                        ui.horizontal_top(|ui| {
+                            ui.spacing_mut().item_spacing.x = 16.0;
+                            ui.allocate_ui(egui::vec2(left_w, 0.0), |ui| {
+                                ui.set_width(left_w);
+                                self.server_card(ui, &mut action);
+                                self.extended_config_cards(ui, notices);
+                                self.problem_list(ui);
+                                ui.add_space(8.0);
+                                self.action_bar(ui, &mut action);
+                            });
+                            ui.allocate_ui(egui::vec2(right_w, 0.0), |ui| {
+                                ui.set_width(right_w);
+                                self.process_card(ui, &mut action);
+                                ui.add_space(10.0);
+                                self.live_card(ui, &egui_ctx);
+                            });
+                        });
+                    } else {
+                        self.process_card(ui, &mut action);
+                        ui.add_space(10.0);
+                        self.live_card(ui, &egui_ctx);
+                        ui.add_space(10.0);
+                        self.server_card(ui, &mut action);
+                        self.extended_config_cards(ui, notices);
+                        self.problem_list(ui);
+                        ui.add_space(8.0);
+                        self.action_bar(ui, &mut action);
+                    }
+                    ui.add_space(14.0);
+                    self.entries_card(ui, &mut action);
+                }
+                ServerPageTab::CspExtra => {
+                    self.folder_card(ui);
+                    ui.add_space(10.0);
+                    self.csp_extra_tab(ui, wide, notices);
+                }
+                ServerPageTab::Rcon => {
+                    self.rcon_tab(ui, wide, &egui_ctx, notices);
+                }
             }
         });
 
@@ -483,6 +511,7 @@ impl ServerPage {
         let pill_tint = status_color(self.status);
         let auto_scroll = self.auto_scroll;
         theme::card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 widgets::pill(ui, &label, pill_tint);
                 if busy {
@@ -507,7 +536,7 @@ impl ServerPage {
             ui.add_space(8.0);
             egui::ScrollArea::vertical()
                 .id_salt("server_log")
-                .max_height(280.0)
+                .max_height(320.0)
                 .auto_shrink([false, false])
                 .stick_to_bottom(auto_scroll)
                 .show(ui, |ui| {
@@ -525,6 +554,7 @@ impl ServerPage {
     fn live_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         widgets::section_title(ui, "Live status");
         theme::card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
             let mut refresh = false;
             ui.horizontal_wrapped(|ui| {
                 ui.label("Host");
@@ -602,6 +632,7 @@ impl ServerPage {
     fn folder_card(&mut self, ui: &mut egui::Ui) {
         widgets::section_title(ui, "Server folder");
         theme::card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.label(
                 RichText::new("The folder with server_cfg.ini and entry_list.ini. Default: <AC root>/server/cfg.")
                     .color(MUTED),
@@ -631,6 +662,8 @@ impl ServerPage {
     fn server_card(&mut self, ui: &mut egui::Ui, action: &mut Action) {
         widgets::section_title(ui, "Server settings");
         theme::card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let field_w = (ui.available_width() - 150.0).clamp(180.0, FIELD_WIDTH.max(440.0));
             let cfg = &mut self.cfg;
             let cars = &mut self.cars_text;
             egui::Grid::new("server_form")
@@ -649,12 +682,12 @@ impl ServerPage {
                             });
                     });
                     row(ui, "Server name", |ui| {
-                        ui.add(egui::TextEdit::singleline(&mut cfg.name).desired_width(FIELD_WIDTH));
+                        ui.add(egui::TextEdit::singleline(&mut cfg.name).desired_width(field_w));
                     });
                     row(ui, "Password", |ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut cfg.password)
-                                .desired_width(FIELD_WIDTH)
+                                .desired_width(field_w)
                                 .hint_text("Empty means no password"),
                         );
                     });
@@ -662,24 +695,24 @@ impl ServerPage {
                         ui.add(
                             egui::TextEdit::singleline(&mut cfg.admin_password)
                                 .password(true)
-                                .desired_width(FIELD_WIDTH)
+                                .desired_width(field_w)
                                 .hint_text("Empty lets anyone join as admin"),
                         );
                     });
                     row(ui, "Track", |ui| {
-                        ui.add(egui::TextEdit::singleline(&mut cfg.track).desired_width(FIELD_WIDTH));
+                        ui.add(egui::TextEdit::singleline(&mut cfg.track).desired_width(field_w));
                     });
                     row(ui, "Track layout", |ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut cfg.config_track)
-                                .desired_width(FIELD_WIDTH)
+                                .desired_width(field_w)
                                 .hint_text("Empty for tracks without layouts"),
                         );
                     });
                     row(ui, "Cars", |ui| {
                         ui.add(
                             egui::TextEdit::singleline(cars)
-                                .desired_width(FIELD_WIDTH)
+                                .desired_width(field_w)
                                 .hint_text("Comma-separated model ids"),
                         );
                     });
@@ -723,7 +756,7 @@ impl ServerPage {
     }
 
     fn action_bar(&self, ui: &mut egui::Ui, action: &mut Action) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.add_enabled(!self.busy, egui::Button::new("Load")).clicked() {
                 *action = Action::Load;
             }
@@ -750,6 +783,7 @@ impl ServerPage {
     fn entries_card(&mut self, ui: &mut egui::Ui, action: &mut Action) {
         widgets::section_title(ui, "Entry list");
         theme::card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.label(
                 RichText::new("Each row becomes a [CAR_n] section. Save entry list replaces the file and keeps a backup.")
                     .color(MUTED),
@@ -823,6 +857,7 @@ impl ServerPage {
             .id_salt("srv_sessions")
             .show(ui, |ui| {
                 theme::card().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     let mut has_b = self.cfg.booking.is_some();
                     if ui.checkbox(&mut has_b, "Enable [BOOKING]").changed() {
                         self.cfg.booking = has_b.then(|| SessionCfg { name: "Booking".into(), time_min: 10, is_open: 1 });
@@ -883,6 +918,7 @@ impl ServerPage {
             .id_salt("srv_weather")
             .show(ui, |ui| {
                 theme::card().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     if ui.button("Add [WEATHER_n] slot").clicked() {
                         self.cfg.weather.push(WeatherSlot::default());
                     }
@@ -910,6 +946,7 @@ impl ServerPage {
             .id_salt("srv_realism_voting")
             .show(ui, |ui| {
                 theme::card().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     let mut has_realism = self.cfg.realism.is_some();
                     if ui.checkbox(&mut has_realism, "Manage Realism & Assists keys").changed() {
                         self.cfg.realism = has_realism.then(RealismConfig::default);
@@ -951,6 +988,7 @@ impl ServerPage {
             .id_salt("srv_presets_multi")
             .show(ui, |ui| {
                 theme::card().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     let root = Self::presets_root();
                     ui.horizontal_wrapped(|ui| {
                         ui.add(egui::TextEdit::singleline(&mut self.preset_slug).hint_text("preset-name").desired_width(180.0));
@@ -1009,9 +1047,31 @@ impl ServerPage {
             });
     }
 
-    fn csp_extra_tab(&mut self, ui: &mut egui::Ui, notices: &mut Vec<Notice>) {
+    fn csp_extra_tab(&mut self, ui: &mut egui::Ui, wide: bool, notices: &mut Vec<Notice>) {
+        if wide {
+            let (left_w, right_w) = split_widths(ui, 0.5);
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 16.0;
+                ui.allocate_ui(egui::vec2(left_w, 0.0), |ui| {
+                    ui.set_width(left_w);
+                    self.csp_options_card(ui, notices);
+                });
+                ui.allocate_ui(egui::vec2(right_w, 0.0), |ui| {
+                    ui.set_width(right_w);
+                    self.extra_cfg_yml_card(ui, notices);
+                });
+            });
+        } else {
+            self.csp_options_card(ui, notices);
+            ui.add_space(12.0);
+            self.extra_cfg_yml_card(ui, notices);
+        }
+    }
+
+    fn csp_options_card(&mut self, ui: &mut egui::Ui, notices: &mut Vec<Notice>) {
         widgets::section_title(ui, "CSP csp_extra_options.ini");
         theme::card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.horizontal_wrapped(|ui| {
                 if ui.button("Load csp_extra_options.ini").clicked()
                     && let Some(dir) = self.dir()
@@ -1039,21 +1099,24 @@ impl ServerPage {
             ui.checkbox(&mut self.csp_opts.no_collisions, "Disable car-to-car collisions");
             ui.checkbox(&mut self.csp_opts.use_custom_weather, "Use custom WeatherFX");
             ui.checkbox(&mut self.csp_opts.force_rain, "Force rain");
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Pit speed limit (km/h)");
                 ui.add(egui::DragValue::new(&mut self.csp_opts.pits_speed_kmh).range(30..=160));
                 ui.label("Min CSP build");
                 ui.add(egui::DragValue::new(&mut self.csp_opts.minimum_csp_build).range(0..=99999));
             });
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Content URL");
-                ui.add(egui::TextEdit::singleline(&mut self.csp_opts.content_url).desired_width(360.0));
+                let url_w = (ui.available_width() - 100.0).clamp(180.0, 420.0);
+                ui.add(egui::TextEdit::singleline(&mut self.csp_opts.content_url).desired_width(url_w));
             });
         });
+    }
 
-        ui.add_space(12.0);
+    fn extra_cfg_yml_card(&mut self, ui: &mut egui::Ui, notices: &mut Vec<Notice>) {
         widgets::section_title(ui, "AssettoServer extra_cfg.yml");
         theme::card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.horizontal_wrapped(|ui| {
                 if ui.button("Load extra_cfg.yml").clicked()
                     && let Some(dir) = self.dir()
@@ -1079,15 +1142,16 @@ impl ServerPage {
             ui.checkbox(&mut self.extra_yml.enable_ai, "Enable AI traffic");
             ui.checkbox(&mut self.extra_yml.enable_client_messages, "Enable client messages");
             ui.checkbox(&mut self.extra_yml.enable_real_penalty, "Enable RealPenalty");
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("AI Max Density");
                 ui.add(egui::DragValue::new(&mut self.extra_yml.ai_max_density).range(1..=200));
                 ui.label("AI Max Speed (km/h)");
                 ui.add(egui::DragValue::new(&mut self.extra_yml.ai_max_speed_kph).range(30..=350));
             });
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Content URL");
-                ui.add(egui::TextEdit::singleline(&mut self.extra_yml.content_url).desired_width(360.0));
+                let url_w = (ui.available_width() - 100.0).clamp(180.0, 420.0);
+                ui.add(egui::TextEdit::singleline(&mut self.extra_yml.content_url).desired_width(url_w));
             });
         });
     }
@@ -1189,9 +1253,35 @@ impl ServerPage {
         }
     }
 
-    fn rcon_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, notices: &mut Vec<Notice>) {
+    fn rcon_tab(&mut self, ui: &mut egui::Ui, wide: bool, ctx: &egui::Context, notices: &mut Vec<Notice>) {
+        if wide {
+            let (left_w, right_w) = split_widths(ui, 0.56);
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 16.0;
+                ui.allocate_ui(egui::vec2(left_w, 0.0), |ui| {
+                    ui.set_width(left_w);
+                    self.rcon_control_card(ui, ctx, notices);
+                });
+                ui.allocate_ui(egui::vec2(right_w, 0.0), |ui| {
+                    ui.set_width(right_w);
+                    self.spectator_card(ui, notices);
+                    ui.add_space(10.0);
+                    self.rcon_log_card(ui);
+                });
+            });
+        } else {
+            self.rcon_control_card(ui, ctx, notices);
+            ui.add_space(12.0);
+            self.spectator_card(ui, notices);
+            ui.add_space(12.0);
+            self.rcon_log_card(ui);
+        }
+    }
+
+    fn rcon_control_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, notices: &mut Vec<Notice>) {
         widgets::section_title(ui, "Live Admin / RCON (AC Server UDP Plugin v4)");
         theme::card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
             let connected = self.rcon_client.is_some();
             ui.horizontal_wrapped(|ui| {
                 ui.label("Local UDP Port");
@@ -1284,10 +1374,12 @@ impl ServerPage {
                 });
             }
         });
+    }
 
-        ui.add_space(12.0);
+    fn spectator_card(&mut self, ui: &mut egui::Ui, notices: &mut Vec<Notice>) {
         widgets::section_title(ui, "Live Spectator Web Dashboard (/spectator)");
         theme::card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.horizontal_wrapped(|ui| {
                 if let Some(dash) = &self.spectator_dash {
                     let url = format!("http://{}/spectator", dash.local_addr());
@@ -1316,6 +1408,35 @@ impl ServerPage {
             });
         });
     }
+
+    fn rcon_log_card(&self, ui: &mut egui::Ui) {
+        widgets::section_title(ui, "Live RCON events & chat");
+        theme::card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            egui::ScrollArea::vertical()
+                .id_salt("rcon_event_log")
+                .max_height(260.0)
+                .auto_shrink([false, false])
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    if self.rcon_chat_log.is_empty() {
+                        ui.label(RichText::new("Connect RCON to stream driver joins, chat, and incidents.").color(MUTED));
+                    }
+                    for line in &self.rcon_chat_log {
+                        ui.label(RichText::new(line.as_str()).font(theme::mono(12.0)).color(MUTED));
+                    }
+                });
+        });
+    }
+}
+
+/// Compute left and right column widths for a full-width 2-column split with a 16px gutter.
+fn split_widths(ui: &egui::Ui, left_fraction: f32) -> (f32, f32) {
+    let gap = 16.0;
+    let total = ui.available_width();
+    let left_w = ((total - gap) * left_fraction).floor().max(260.0);
+    let right_w = (total - gap - left_w).max(260.0);
+    (left_w, right_w)
 }
 
 /// One label/field pair in a two-column grid.

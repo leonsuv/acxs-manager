@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::SystemTime;
 
+use acxs_manager::content::{self, CarEntry, TrackEntry};
 use acxs_manager::ini::Ini;
 use acxs_manager::ini_merge::{self, MergeConflict, MergeResult};
 use acxs_manager::laptimes::format_lap;
@@ -27,12 +28,24 @@ const ARCHIVE_DIR: &str = "_archive";
 /// Conflicts listed in full before the rest are summarized.
 const MAX_CONFLICTS_SHOWN: usize = 50;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorkspaceTab {
+    Editor,
+    CompareMerge,
+    AbTesting,
+}
+
 pub fn tool() -> Box<dyn Tool> {
     let (tx, rx) = mpsc::channel();
     Box::new(SetupsPage {
         ac_root: None,
         root_input: default_root(),
         import_track: "generic".to_string(),
+        tab: WorkspaceTab::Editor,
+        car_query: String::new(),
+        installed_cars: Vec::new(),
+        installed_tracks: Vec::new(),
+        catalog_scanned_for: None,
         started: false,
         error: None,
         cars: Vec::new(),
@@ -69,6 +82,16 @@ struct SetupsPage {
     /// Track folder (inside the car folder) that imports go into. The game lists
     /// setups per track; `generic` is offered on every track.
     import_track: String,
+    /// Active tab in the right workspace.
+    tab: WorkspaceTab,
+    /// Search filter for the visual car selector list.
+    car_query: String,
+    /// Installed cars scanned from `ac_root` for rich brand/name display.
+    installed_cars: Vec<CarEntry>,
+    /// Installed tracks scanned from `ac_root` for the track pill selector.
+    installed_tracks: Vec<TrackEntry>,
+    /// `ac_root` for which installed cars/tracks were last scanned.
+    catalog_scanned_for: Option<PathBuf>,
     /// The first scan happens on the first frame the page is drawn.
     started: bool,
     /// Why the setups root could not be read, shown in the page.
@@ -170,6 +193,7 @@ struct MergePreview {
 /// Results sent back from background jobs. Every job sends exactly one message.
 enum Msg {
     Cars(Result<Vec<String>, String>),
+    Catalog { cars: Vec<CarEntry>, tracks: Vec<TrackEntry> },
     Setups { car: String, setups: Vec<SetupFile> },
     Compared(Comparison),
     Merged(MergePreview),
@@ -201,7 +225,7 @@ impl Tool for SetupsPage {
     }
 
     fn content_width(&self) -> f32 {
-        1100.0
+        f32::INFINITY
     }
 
     fn group(&self) -> &'static str {
@@ -214,6 +238,18 @@ impl Tool for SetupsPage {
         if !self.started {
             self.started = true;
             self.rescan(&ctx);
+        }
+        if self.ac_root != self.catalog_scanned_for {
+            self.catalog_scanned_for = self.ac_root.clone();
+            if let Some(root) = self.ac_root.clone() {
+                self.spawn(&ctx, move || Msg::Catalog {
+                    cars: content::scan_cars(&root),
+                    tracks: content::scan_tracks(&root),
+                });
+            } else {
+                self.installed_cars.clear();
+                self.installed_tracks.clear();
+            }
         }
 
         self.drain(notices);
@@ -275,6 +311,10 @@ impl SetupsPage {
                     self.error = Some(e);
                     self.cars.clear();
                     self.car = None;
+                }
+                Msg::Catalog { cars, tracks } => {
+                    self.installed_cars = cars;
+                    self.installed_tracks = tracks;
                 }
                 Msg::Setups { car, setups } => {
                     if self.car.as_deref() == Some(car.as_str()) {
@@ -486,45 +526,68 @@ impl SetupsPage {
         widgets::heading(
             ui,
             "Setups",
-            "Browse car setups, import and archive them, compare two setups or merge three.",
+            "Browse car setups, edit values with car schemas, compare, 3-way merge, or run stint A/B tests.",
         );
         let busy = self.busy > 0;
-
         let car_names = self.ac_root.clone().map(|root| super::names::names(&root, ui.ctx()));
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            // Folder and car selection.
-            theme::card().show(ui, |ui| {
-                if let Some(error) = &self.error {
-                    ui.label(RichText::new(error.as_str()).color(DANGER));
-                }
 
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("Car").color(MUTED));
-                    let label = self.car.as_deref().map_or("Choose a car".to_string(), |id| car_names.as_ref().map_or(id.to_string(), |n| n.car(id)));
-                    egui::ComboBox::from_id_salt("setups_car")
-                        .selected_text(label)
-                        .width(280.0)
-                        .height(420.0)
-                        .show_ui(ui, |ui| {
-                            for car in &self.cars {
-                                let name = car_names.as_ref().map_or(car.clone(), |n| n.car(car));
-                                ui.selectable_value(&mut self.car, Some(car.clone()), name);
-                            }
-                        });
-                    ui.label(RichText::new("Import for track").color(MUTED));
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.import_track)
-                            .desired_width(110.0)
-                            .hint_text("generic"),
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            let avail = ui.available_width();
+            if avail >= 880.0 {
+                let left_w = 360.0;
+                let gap = 16.0;
+                let right_w = (avail - left_w - gap).max(400.0);
+                ui.horizontal_top(|ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(left_w, 0.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_width(left_w);
+                            self.draw_left_browser(ui, busy, car_names.as_deref(), intent);
+                        },
                     );
-                    if ui.add_enabled(!busy && self.car.is_some(), egui::Button::new("Import .ini...")).clicked() {
-                        *intent = Some(Intent::Import);
-                    }
+                    ui.add_space(gap);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(right_w, 0.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_width(right_w);
+                            self.draw_right_workspace(ui, busy, intent);
+                        },
+                    );
+                });
+            } else {
+                self.draw_left_browser(ui, busy, car_names.as_deref(), intent);
+                ui.add_space(14.0);
+                self.draw_right_workspace(ui, busy, intent);
+            }
+        });
+    }
+
+    fn draw_left_browser(
+        &mut self,
+        ui: &mut egui::Ui,
+        busy: bool,
+        car_names: Option<&super::names::Names>,
+        intent: &mut Option<Intent>,
+    ) {
+        // Build merged car list: existing setup folders first, plus installed cars.
+        let mut all_car_ids: Vec<String> = self.cars.clone();
+        for c in &self.installed_cars {
+            if !all_car_ids.iter().any(|id| id == &c.id) {
+                all_car_ids.push(c.id.clone());
+            }
+        }
+
+        // Visual searchable car selector card.
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                widgets::section_title(ui, "Cars");
+                widgets::pill(ui, &all_car_ids.len().to_string(), INFO);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.add_enabled(!busy, egui::Button::new("Rescan")).clicked() {
                         *intent = Some(Intent::Rescan);
-                    }
-                    if ui.add_enabled(!busy && self.selected.is_some(), egui::Button::new("Archive selected")).clicked() {
-                        *intent = Some(Intent::Archive);
                     }
                     if busy {
                         ui.spinner();
@@ -532,115 +595,272 @@ impl SetupsPage {
                 });
             });
 
-            // Setup list for the selected car, newest first.
-            ui.add_space(16.0);
-            let car_title = self.car.clone().unwrap_or_else(|| "no car".into());
-            widgets::section_title(ui, &format!("Setups for {car_title}"));
-            if self.car.is_none() {
-                widgets::empty_state(ui, "No car folders found in the setups folder.");
-            } else if self.setups.is_empty() {
-                widgets::empty_state(ui, "No setups for this car yet. Import one to start.");
-            } else {
-                for setup in &self.setups {
-                    let selected = self.selected.as_ref() == Some(&setup.path);
-                    if widgets::list_row(ui, selected, |ui| setup_row(ui, setup)) {
-                        self.selected = Some(setup.path.clone());
-                    }
+            if all_car_ids.is_empty() {
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("No setups or installed cars found yet.")
+                        .color(MUTED),
+                );
+                ui.label(
+                    RichText::new("Set your Assetto Corsa folder in Settings or import a setup .ini file.")
+                        .small()
+                        .color(theme::FAINT),
+                );
+                ui.add_space(8.0);
+                if ui.add_enabled(!busy, widgets::primary_button("Rescan Setups")).clicked() {
+                    *intent = Some(Intent::Rescan);
                 }
+            } else {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.car_query)
+                        .desired_width(ui.available_width())
+                        .hint_text("Search cars by name or brand..."),
+                );
+                ui.add_space(6.0);
+                let q = self.car_query.trim().to_lowercase();
+                egui::ScrollArea::vertical()
+                    .id_salt("setups_car_list")
+                    .max_height(210.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for car_id in &all_car_ids {
+                            let meta = self.installed_cars.iter().find(|c| &c.id == car_id);
+                            let display_name = meta
+                                .map(|m| m.name.clone())
+                                .unwrap_or_else(|| car_names.map_or(car_id.clone(), |n| n.car(car_id)));
+                            let brand = meta.map(|m| m.brand.as_str()).unwrap_or("");
+                            if !q.is_empty()
+                                && !display_name.to_lowercase().contains(&q)
+                                && !brand.to_lowercase().contains(&q)
+                                && !car_id.to_lowercase().contains(&q)
+                            {
+                                continue;
+                            }
+                            let selected = self.car.as_deref() == Some(car_id.as_str());
+                            let has_folder = self.cars.iter().any(|c| c == car_id);
+                            if widgets::list_row(ui, selected, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.vertical(|ui| {
+                                        ui.spacing_mut().item_spacing.y = 1.0;
+                                        ui.label(RichText::new(&display_name).font(theme::bold(13.0)).color(TEXT));
+                                        let sub = if brand.is_empty() { car_id.as_str() } else { brand };
+                                        ui.label(RichText::new(sub).small().color(MUTED));
+                                    });
+                                    if has_folder {
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            widgets::pill(ui, "SAVED", OK);
+                                        });
+                                    }
+                                });
+                            }) {
+                                self.car = Some(car_id.clone());
+                            }
+                            ui.add_space(3.0);
+                        }
+                    });
             }
 
-            self.draw_values(ui, busy, intent);
-
-            // Compare two setups.
-            ui.add_space(16.0);
-            widgets::section_title(ui, "Compare two setups");
-            theme::card().show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    setup_combo(ui, "setups_left", "Left", &self.setups, &mut self.left);
-                    setup_combo(ui, "setups_right", "Right", &self.setups, &mut self.right);
-                    let ready = self.left.is_some() && self.right.is_some() && self.left != self.right;
-                    if ui.add_enabled(!busy && ready, widgets::primary_button("Compare")).clicked() {
-                        *intent = Some(Intent::Compare);
-                    }
-                });
-                if let Some(comparison) = &self.compare {
-                    show_comparison(ui, comparison);
-                }
-            });
-
-            // Three-way merge.
-            ui.add_space(16.0);
-            widgets::section_title(ui, "Three-way merge");
-            theme::card().show(ui, |ui| {
-                ui.label(
-                    RichText::new(
-                        "Changes from Theirs (relative to Base) are applied onto Ours. Ours is the file that gets written.",
-                    )
-                    .small()
-                    .color(MUTED),
-                );
-                ui.horizontal_wrapped(|ui| {
-                    setup_combo(ui, "setups_base", "Base", &self.setups, &mut self.base);
-                    setup_combo(ui, "setups_ours", "Ours", &self.setups, &mut self.ours);
-                    setup_combo(ui, "setups_theirs", "Theirs", &self.setups, &mut self.theirs);
-                    let ready = self.base.is_some() && self.ours.is_some() && self.theirs.is_some();
-                    if ui.add_enabled(!busy && ready, widgets::primary_button("Merge")).clicked() {
-                        *intent = Some(Intent::Merge);
-                    }
-                });
-
-                if let Some(preview) = &self.merge {
-                    let result = &preview.result;
-                    let conflicts = !result.conflicts.is_empty();
-                    ui.add_space(8.0);
-                    ui.label(RichText::new(preview.title.as_str()).color(MUTED));
-                    ui.horizontal_wrapped(|ui| {
-                        widgets::pill(ui, &format!("{} taken from Theirs", result.applied_from_theirs), INFO);
-                        widgets::pill(ui, &format!("{} kept from Ours", result.applied_from_ours), INFO);
-                        widgets::pill(
-                            ui,
-                            &format!("{} conflicts", result.conflicts.len()),
-                            if conflicts { DANGER } else { OK },
-                        );
-                    });
-                    for conflict in result.conflicts.iter().take(MAX_CONFLICTS_SHOWN) {
-                        let MergeConflict::Both { section, key, base, ours, theirs } = conflict;
-                        ui.label(
-                            RichText::new(format!(
-                                "[{section}] {key}: base {} / ours {} / theirs {}",
-                                opt(base),
-                                opt(ours),
-                                opt(theirs)
-                            ))
-                            .color(WARN),
-                        );
-                    }
-                    if result.conflicts.len() > MAX_CONFLICTS_SHOWN {
-                        ui.label(
-                            RichText::new(format!(
-                                "...and {} more",
-                                result.conflicts.len() - MAX_CONFLICTS_SHOWN
-                            ))
-                            .small()
-                            .color(MUTED),
-                        );
-                    }
-
-                    ui.checkbox(
-                        &mut self.allow_conflicts,
-                        "Write even with conflicts (conflicting keys keep the Ours value)",
-                    );
-                    let can_apply = !busy && (!conflicts || self.allow_conflicts);
+            // Track pill selector + Import / Archive actions.
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(8.0);
+            ui.label(RichText::new("IMPORT TARGET TRACK").font(theme::display(12.0)).color(MUTED));
+            ui.add_space(4.0);
+            egui::ScrollArea::horizontal()
+                .id_salt("setups_track_pills")
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        if ui.add_enabled(can_apply, widgets::primary_button("Apply to Ours")).clicked() {
-                            *intent = Some(Intent::Apply);
+                        if ui.selectable_label(self.import_track == "generic", "Generic (All)").clicked() {
+                            self.import_track = "generic".to_string();
                         }
-                        ui.label(
-                            RichText::new("A backup of the current Ours file is kept.").small().color(MUTED),
-                        );
+                        for track in self.installed_tracks.iter().take(12) {
+                            let active = self.import_track == track.id;
+                            if ui.selectable_label(active, &track.name).clicked() {
+                                self.import_track = track.id.clone();
+                            }
+                        }
                     });
+                });
+
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(!busy && self.car.is_some(), widgets::primary_button("Import .ini..."))
+                    .clicked()
+                {
+                    *intent = Some(Intent::Import);
+                }
+                if ui
+                    .add_enabled(!busy && self.selected.is_some(), egui::Button::new("Archive selected"))
+                    .clicked()
+                {
+                    *intent = Some(Intent::Archive);
                 }
             });
+        });
+
+        ui.add_space(14.0);
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let car_title = self
+                .car
+                .as_deref()
+                .map(|id| car_names.map_or(id.to_string(), |n| n.car(id)))
+                .unwrap_or_else(|| "No Car".into());
+            ui.horizontal(|ui| {
+                widgets::section_title(ui, &format!("Setups · {car_title}"));
+                widgets::pill(ui, &self.setups.len().to_string(), INFO);
+            });
+            if self.car.is_none() {
+                widgets::empty_state(ui, "Pick a car above to browse its setups.");
+                ui.add_space(12.0);
+            } else if self.setups.is_empty() {
+                ui.add_space(8.0);
+                ui.label(RichText::new("No setups saved for this car yet.").color(MUTED));
+                ui.add_space(8.0);
+                if ui.add_enabled(!busy, widgets::primary_button("Import .ini Setup...")).clicked() {
+                    *intent = Some(Intent::Import);
+                }
+                ui.add_space(6.0);
+            } else {
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("setups_left_list")
+                    .max_height(380.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for setup in &self.setups {
+                            let selected = self.selected.as_ref() == Some(&setup.path);
+                            if widgets::list_row(ui, selected, |ui| setup_row(ui, setup)) {
+                                self.selected = Some(setup.path.clone());
+                            }
+                            ui.add_space(4.0);
+                        }
+                    });
+            }
+        });
+    }
+
+    fn draw_right_workspace(&mut self, ui: &mut egui::Ui, busy: bool, intent: &mut Option<Intent>) {
+        let pending_badge = self
+            .editor
+            .as_ref()
+            .map(|e| e.pending().len())
+            .filter(|&n| n > 0)
+            .map(|n| n.to_string());
+        widgets::animated_tabs(
+            ui,
+            "setups_workspace_tabs",
+            &mut self.tab,
+            &[
+                (WorkspaceTab::Editor, "Editor", pending_badge.as_deref()),
+                (WorkspaceTab::CompareMerge, "Compare & 3-Way Merge", None),
+                (WorkspaceTab::AbTesting, "A/B Testing", None),
+            ],
+        );
+        ui.add_space(10.0);
+
+        match self.tab {
+            WorkspaceTab::Editor => self.draw_values(ui, busy, intent),
+            WorkspaceTab::CompareMerge => self.draw_compare_merge(ui, busy, intent),
+            WorkspaceTab::AbTesting => self.draw_ab_testing(ui),
+        }
+    }
+
+    fn draw_compare_merge(&mut self, ui: &mut egui::Ui, busy: bool, intent: &mut Option<Intent>) {
+        // Compare two setups.
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section_title(ui, "Compare Two Setups");
+            ui.horizontal_wrapped(|ui| {
+                setup_combo(ui, "setups_left", "Left", &self.setups, &mut self.left);
+                setup_combo(ui, "setups_right", "Right", &self.setups, &mut self.right);
+                let ready = self.left.is_some() && self.right.is_some() && self.left != self.right;
+                if ui.add_enabled(!busy && ready, widgets::primary_button("Compare")).clicked() {
+                    *intent = Some(Intent::Compare);
+                }
+            });
+            if let Some(comparison) = &self.compare {
+                show_comparison(ui, comparison);
+            }
+        });
+
+        // Three-way merge.
+        ui.add_space(14.0);
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section_title(ui, "Three-Way Merge");
+            ui.label(
+                RichText::new(
+                    "Changes from Theirs (relative to Base) are applied onto Ours. Ours is the file that gets written.",
+                )
+                .small()
+                .color(MUTED),
+            );
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                setup_combo(ui, "setups_base", "Base", &self.setups, &mut self.base);
+                setup_combo(ui, "setups_ours", "Ours", &self.setups, &mut self.ours);
+                setup_combo(ui, "setups_theirs", "Theirs", &self.setups, &mut self.theirs);
+                let ready = self.base.is_some() && self.ours.is_some() && self.theirs.is_some();
+                if ui.add_enabled(!busy && ready, widgets::primary_button("Merge")).clicked() {
+                    *intent = Some(Intent::Merge);
+                }
+            });
+
+            if let Some(preview) = &self.merge {
+                let result = &preview.result;
+                let conflicts = !result.conflicts.is_empty();
+                ui.add_space(8.0);
+                ui.label(RichText::new(preview.title.as_str()).color(MUTED));
+                ui.horizontal_wrapped(|ui| {
+                    widgets::pill(ui, &format!("{} taken from Theirs", result.applied_from_theirs), INFO);
+                    widgets::pill(ui, &format!("{} kept from Ours", result.applied_from_ours), INFO);
+                    widgets::pill(
+                        ui,
+                        &format!("{} conflicts", result.conflicts.len()),
+                        if conflicts { DANGER } else { OK },
+                    );
+                });
+                for conflict in result.conflicts.iter().take(MAX_CONFLICTS_SHOWN) {
+                    let MergeConflict::Both { section, key, base, ours, theirs } = conflict;
+                    ui.label(
+                        RichText::new(format!(
+                            "[{section}] {key}: base {} / ours {} / theirs {}",
+                            opt(base),
+                            opt(ours),
+                            opt(theirs)
+                        ))
+                        .font(theme::mono(12.0))
+                        .color(WARN),
+                    );
+                }
+                if result.conflicts.len() > MAX_CONFLICTS_SHOWN {
+                    ui.label(
+                        RichText::new(format!(
+                            "...and {} more",
+                            result.conflicts.len() - MAX_CONFLICTS_SHOWN
+                        ))
+                        .small()
+                        .color(MUTED),
+                    );
+                }
+
+                ui.checkbox(
+                    &mut self.allow_conflicts,
+                    "Write even with conflicts (conflicting keys keep the Ours value)",
+                );
+                let can_apply = !busy && (!conflicts || self.allow_conflicts);
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(can_apply, widgets::primary_button("Apply to Ours")).clicked() {
+                        *intent = Some(Intent::Apply);
+                    }
+                    ui.label(
+                        RichText::new("A backup of the current Ours file is kept.").small().color(MUTED),
+                    );
+                });
+            }
         });
     }
 
@@ -657,11 +877,22 @@ impl SetupsPage {
             };
         }
 
-        let Some(selected) = self.selected.clone() else { return };
-        ui.add_space(16.0);
-        widgets::section_title(ui, &format!("Values in {}.ini", stem(&selected)));
+        let Some(selected) = self.selected.clone() else {
+            theme::card_elevated().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                widgets::empty_state(
+                    ui,
+                    "Select a setup on the left to inspect and edit its values.",
+                );
+                ui.add_space(32.0);
+            });
+            return;
+        };
+
         let schema = self.schema.as_ref();
         theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section_title(ui, &format!("Values in {}.ini", stem(&selected)));
             let Some(editor) = self.editor.as_mut() else {
                 ui.label(RichText::new("Reading the setup...").color(MUTED));
                 return;
@@ -675,7 +906,7 @@ impl SetupsPage {
                     draw_value_groups(ui, &mut editor.rows, schema);
                 }
 
-                ui.add_space(8.0);
+                ui.add_space(10.0);
                 ui.checkbox(&mut editor.new_key_enabled, "New key (allow adding keys to this setup)");
                 ui.add_enabled_ui(editor.new_key_enabled, |ui| {
                     ui.horizontal_wrapped(|ui| {
@@ -698,7 +929,7 @@ impl SetupsPage {
                 });
             });
 
-            ui.add_space(8.0);
+            ui.add_space(10.0);
             let bar = PendingChangesBar {
                 changed_count: pending_count,
                 summary: format!("{pending_count} pending setup value(s) — backup created on save"),
@@ -718,15 +949,20 @@ impl SetupsPage {
                 PendingAction::ToggleDiff | PendingAction::None => {}
             }
         });
-
-        self.draw_ab_testing(ui);
     }
 
     fn draw_ab_testing(&mut self, ui: &mut egui::Ui) {
-        let Some(car_id) = self.car.clone() else { return };
-        ui.add_space(16.0);
-        widgets::section_title(ui, "Setup A/B Testing (Recorded Stints)");
-        theme::card().show(ui, |ui| {
+        let Some(car_id) = self.car.clone() else {
+            theme::card_elevated().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                widgets::empty_state(ui, "Select a car on the left to compare recorded stints.");
+                ui.add_space(32.0);
+            });
+            return;
+        };
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section_title(ui, "Setup A/B Testing (Recorded Stints)");
             ui.horizontal(|ui| {
                 if ui.button("Load recorded stints").clicked() {
                     let all = session_recorder::load_all(&session_recorder::sessions_dir());

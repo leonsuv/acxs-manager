@@ -298,18 +298,35 @@ const FFB_LUT_TAB: &str = "FFB LUT";
 const RIG_PROFILES_TAB: &str = "Rig Profiles";
 const CAMERA_REPLAY_TAB: &str = "Camera & Replay";
 const ADVANCED_TAB: &str = "Advanced";
-const TABS: [&str; 11] = [
-    VIDEO_TAB,
-    VR_TRIPLE_TAB,
-    CONTROLS_TAB,
-    FFB_LUT_TAB,
-    RIG_PROFILES_TAB,
-    CAMERA_REPLAY_TAB,
-    "Audio",
-    "Force feedback",
-    "Gameplay",
-    "Filter and apps",
-    ADVANCED_TAB,
+
+/// Grouped navigation rail categories: `(section_header, &[(display_label, internal_tab_key)])`.
+const RAIL_GROUPS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "DISPLAY",
+        &[
+            ("Video", VIDEO_TAB),
+            ("VR & Triple", VR_TRIPLE_TAB),
+            ("Camera & Replay", CAMERA_REPLAY_TAB),
+        ],
+    ),
+    (
+        "CONTROLS",
+        &[
+            ("Controls", CONTROLS_TAB),
+            ("FFB & LUT", FFB_LUT_TAB),
+            ("Rig Profiles", RIG_PROFILES_TAB),
+        ],
+    ),
+    (
+        "SIMULATION",
+        &[
+            ("Audio", "Audio"),
+            ("Force Feedback", "Force feedback"),
+            ("Gameplay", "Gameplay"),
+            ("Filters & Apps", "Filter and apps"),
+            ("Advanced & Snapshots", ADVANCED_TAB),
+        ],
+    ),
 ];
 
 struct GameSettings {
@@ -562,17 +579,101 @@ impl GameSettings {
     fn video_section(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let idle = self.video_pending == 0;
         let base = self.saved_form.clone();
-        theme::card().show(ui, |ui| {
+        let changes = video_changes(&base, &self.form);
+        let (quality_was, cost_was) = impact(&base);
+        let (quality_now, cost_now) = impact(&self.form);
+        let parsed = self.form.to_settings();
+        let problems = match &parsed {
+            Ok(settings) => game_cfg::validate_video(settings),
+            Err(messages) => messages.clone(),
+        };
+        let can_save = idle && problems.is_empty() && !self.video_dir.trim().is_empty();
+        let mut revert = false;
+        let mut trigger_save = false;
+
+        let avail = ui.available_width();
+        if avail >= 820.0 {
+            let gap = 16.0;
+            let left_w = ((avail - gap) * 0.56).floor();
+            let right_w = (avail - gap - left_w).max(300.0);
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(left_w, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(left_w);
+                        self.video_controls_card(ui, &base, &problems, can_save, &mut trigger_save);
+                    },
+                );
+                ui.add_space(gap);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(right_w, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(right_w);
+                        video_impact_card(ui, quality_was, quality_now, cost_was, cost_now, &changes, &mut revert);
+                    },
+                );
+            });
+        } else {
+            self.video_controls_card(ui, &base, &problems, can_save, &mut trigger_save);
+            ui.add_space(12.0);
+            video_impact_card(ui, quality_was, quality_now, cost_was, cost_now, &changes, &mut revert);
+        }
+
+        if revert {
+            self.form = base.clone();
+        }
+        if trigger_save && let Ok(settings) = parsed.clone() {
+            self.saved_form = self.form.clone();
+            self.save_video(ctx, settings);
+        }
+
+        ui.add_space(10.0);
+        let bar_action = widgets::pending_changes_bar(
+            ui,
+            &widgets::PendingChangesBar {
+                changed_count: changes.len(),
+                summary: format!("{} video setting(s) modified", changes.len()),
+                can_save,
+                blocked_reason: problems.first().cloned(),
+            },
+        );
+        match bar_action {
+            widgets::PendingAction::Save => {
+                if let Ok(settings) = parsed {
+                    self.saved_form = self.form.clone();
+                    self.save_video(ctx, settings);
+                }
+            }
+            widgets::PendingAction::RevertAll => {
+                self.form = base;
+            }
+            _ => {}
+        }
+    }
+
+    fn video_controls_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        base: &VideoForm,
+        problems: &[String],
+        can_save: bool,
+        trigger_save: &mut bool,
+    ) {
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section_title(ui, "Video Settings (video.ini)");
             if !self.video_loaded {
                 ui.label(RichText::new("Loading...").small().color(MUTED));
             } else if !self.video_file_present {
                 ui.label(RichText::new(format!("{VIDEO_FILE} not found: showing defaults.")).small().color(WARN));
             }
-            ui.add_space(6.0);
+            ui.add_space(8.0);
 
             egui::Grid::new("game_settings_video")
                 .num_columns(2)
-                .spacing([16.0, 8.0])
+                .spacing([18.0, 10.0])
                 .show(ui, |ui| {
                     row_label(ui, "Resolution", base.width != self.form.width || base.height != self.form.height);
                     ui.horizontal(|ui| {
@@ -581,13 +682,13 @@ impl GameSettings {
                                 .desired_width(72.0)
                                 .hint_text("width"),
                         );
-                        ui.label("x");
+                        ui.label("×");
                         ui.add(
                             egui::TextEdit::singleline(&mut self.form.height)
                                 .desired_width(72.0)
                                 .hint_text("height"),
                         );
-                        ui.label(RichText::new("empty keeps the file's value").small().color(MUTED));
+                        ui.label(RichText::new("empty keeps file value").small().color(MUTED));
                     });
                     ui.end_row();
 
@@ -651,80 +752,19 @@ impl GameSettings {
                     ui.end_row();
                 });
 
-            let changes = video_changes(&base, &self.form);
-            let (quality_was, cost_was) = impact(&base);
-            let (quality_now, cost_now) = impact(&self.form);
-            let mut revert = false;
-            ui.add_space(8.0);
-            theme::card_flat().show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(RichText::new("What this changes").font(theme::bold(13.5)));
-                ui.add_space(4.0);
-                meter(ui, "Visual quality", quality_was, quality_now, true);
-                meter(ui, "Performance cost", cost_was, cost_now, false);
-                ui.label(RichText::new("The white tick is what the file holds now. A guide, not a benchmark.").size(11.5).color(theme::FAINT));
-                ui.add_space(6.0);
-                if changes.is_empty() {
-                    ui.label(RichText::new("Nothing changed yet.").color(MUTED));
-                } else {
-                    for (name, was, now) in &changes {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(*name).color(MUTED));
-                            ui.label(RichText::new(was).color(theme::FAINT).strikethrough());
-                            ui.label(RichText::new("→").color(MUTED));
-                            ui.label(RichText::new(now).font(theme::bold(13.5)).color(theme::ACCENT));
-                        });
-                    }
-                    ui.add_space(4.0);
-                    if ui.button("Revert all changes").clicked() {
-                        revert = true;
-                    }
+            if !problems.is_empty() {
+                ui.add_space(8.0);
+                for problem in problems {
+                    ui.label(RichText::new(problem).color(WARN));
                 }
-            });
-            if revert {
-                self.form = base.clone();
             }
-            ui.add_space(6.0);
-            let parsed = self.form.to_settings();
-            let problems = match &parsed {
-                Ok(settings) => game_cfg::validate_video(settings),
-                Err(messages) => messages.clone(),
-            };
-            for problem in &problems {
-                ui.label(RichText::new(problem).color(WARN));
-            }
-            let can_save = idle && problems.is_empty() && !self.video_dir.trim().is_empty();
-            let bar_action = widgets::pending_changes_bar(
-                ui,
-                &widgets::PendingChangesBar {
-                    changed_count: changes.len(),
-                    summary: format!("{} video setting(s) modified", changes.len()),
-                    can_save,
-                    blocked_reason: problems.first().cloned(),
-                },
-            );
-            match bar_action {
-                widgets::PendingAction::Save => {
-                    if let Ok(settings) = parsed.clone() {
-                        self.saved_form = self.form.clone();
-                        self.save_video(ctx, settings);
-                    }
-                }
-                widgets::PendingAction::RevertAll => {
-                    self.form = base.clone();
-                }
-                _ => {}
-            }
-            ui.add_space(6.0);
+
+            ui.add_space(12.0);
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(can_save, widgets::primary_button("Save video settings"))
-                    .clicked()
-                    && let Ok(settings) = parsed
-                {
-                    self.save_video(ctx, settings);
+                if ui.add_enabled(can_save, widgets::primary_button("Save video settings")).clicked() {
+                    *trigger_save = true;
                 }
-                ui.label(RichText::new("The previous file is kept as a backup.").small().color(MUTED));
+                ui.label(RichText::new("Previous file is kept as a backup.").small().color(MUTED));
             });
         });
     }
@@ -732,7 +772,9 @@ impl GameSettings {
     fn ac_section(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let idle = self.ac_pending == 0;
         let base = self.saved_ac_form.clone();
-        theme::card().show(ui, |ui| {
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section_title(ui, "Advanced Game Options (assetto_corsa.ini)");
             if self.ac_dir.trim().is_empty() {
                 ui.label(
                     RichText::new("Set the Assetto Corsa folder in Settings.").color(WARN),
@@ -852,7 +894,9 @@ impl GameSettings {
         root: Option<PathBuf>,
         game_running: bool,
     ) {
-        theme::card().show(ui, |ui| {
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section_title(ui, "Configuration Snapshots");
             let Some(root) = root else {
                 ui.label(RichText::new("Set the Assetto Corsa folder in Settings to make snapshots.").color(WARN));
                 return;
@@ -1298,7 +1342,7 @@ impl Tool for GameSettings {
     }
 
     fn content_width(&self) -> f32 {
-        1120.0
+        f32::INFINITY
     }
 
     fn group(&self) -> &'static str {
@@ -1328,44 +1372,152 @@ impl Tool for GameSettings {
             self.list_snapshots(&egui_ctx, root.clone());
         }
 
-        ui.horizontal_wrapped(|ui| {
-            for tab in TABS {
-                ui.selectable_value(&mut self.tab, tab, tab);
-            }
-        });
-        ui.add_space(10.0);
+        egui::ScrollArea::vertical()
+            .id_salt("gs_main_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let avail = ui.available_width();
+                let rail_w = 210.0;
+                let gap = 16.0;
+                let content_w = (avail - rail_w - gap).max(360.0);
 
-        match self.tab {
-            VIDEO_TAB => {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.video_section(ui, &egui_ctx));
-            }
-            VR_TRIPLE_TAB => {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.vr_triple_section(ui, notices));
-            }
-            CONTROLS_TAB => {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.controls_section(ui, notices));
-            }
-            FFB_LUT_TAB => {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.ffb_lut_section(ui, notices));
-            }
-            RIG_PROFILES_TAB => {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.rig_profiles_section(ui, notices));
-            }
-            CAMERA_REPLAY_TAB => {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.camera_replay_section(ui, notices));
-            }
-            ADVANCED_TAB => {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    widgets::section_title(ui, "Advanced game options");
-                    self.ac_section(ui, &egui_ctx);
-                    ui.add_space(16.0);
-                    widgets::section_title(ui, "Saved copies of your settings");
-                    self.snapshot_section(ui, &egui_ctx, ctx.ac_root.clone(), ctx.game_running);
+                ui.horizontal_top(|ui| {
+                    // Left 210 px category rail.
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(rail_w, 0.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_width(rail_w);
+                            theme::card_elevated().show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                for (g_idx, (group_title, items)) in RAIL_GROUPS.iter().enumerate() {
+                                    if g_idx > 0 {
+                                        ui.add_space(10.0);
+                                    }
+                                    ui.label(theme::micro_label(group_title));
+                                    ui.add_space(4.0);
+                                    for &(label, key) in *items {
+                                        if widgets::nav_item(ui, self.tab == key, label, None, 2.0).clicked() {
+                                            self.tab = key;
+                                        }
+                                    }
+                                }
+                            });
+                        },
+                    );
+
+                    ui.add_space(gap);
+
+                    // Right full-width content area (flows naturally inside outer ScrollArea; never clips).
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(content_w, 0.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_width(content_w);
+                            match self.tab {
+                                VIDEO_TAB => self.video_section(ui, &egui_ctx),
+                                VR_TRIPLE_TAB => self.vr_triple_section(ui, notices),
+                                CONTROLS_TAB => self.controls_section(ui, notices),
+                                FFB_LUT_TAB => self.ffb_lut_section(ui, notices),
+                                RIG_PROFILES_TAB => self.rig_profiles_section(ui, notices),
+                                CAMERA_REPLAY_TAB => self.camera_replay_section(ui, notices),
+                                ADVANCED_TAB => {
+                                    let w = ui.available_width();
+                                    if w >= 860.0 {
+                                        let col_gap = 16.0;
+                                        let half = ((w - col_gap) * 0.5).floor();
+                                        ui.horizontal_top(|ui| {
+                                            ui.allocate_ui_with_layout(
+                                                egui::vec2(half, 0.0),
+                                                egui::Layout::top_down(egui::Align::Min),
+                                                |ui| {
+                                                    ui.set_width(half);
+                                                    self.ac_section(ui, &egui_ctx);
+                                                },
+                                            );
+                                            ui.add_space(col_gap);
+                                            ui.allocate_ui_with_layout(
+                                                egui::vec2(half, 0.0),
+                                                egui::Layout::top_down(egui::Align::Min),
+                                                |ui| {
+                                                    ui.set_width(half);
+                                                    self.snapshot_section(ui, &egui_ctx, ctx.ac_root.clone(), ctx.game_running);
+                                                },
+                                            );
+                                        });
+                                    } else {
+                                        self.ac_section(ui, &egui_ctx);
+                                        ui.add_space(14.0);
+                                        self.snapshot_section(ui, &egui_ctx, ctx.ac_root.clone(), ctx.game_running);
+                                    }
+                                }
+                                tab => {
+                                    theme::card_elevated().show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.set_min_height(520.0);
+                                        widgets::section_title(ui, tab);
+                                        self.options.show(ui, ctx, notices, tab);
+                                    });
+                                }
+                            }
+                        },
+                    );
+                });
+            });
+    }
+}
+
+fn video_impact_card(
+    ui: &mut egui::Ui,
+    quality_was: f32,
+    quality_now: f32,
+    cost_was: f32,
+    cost_now: f32,
+    changes: &[(&'static str, String, String)],
+    revert: &mut bool,
+) {
+    theme::card_elevated().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        widgets::section_title(ui, "Visual Quality vs Performance");
+        ui.add_space(4.0);
+        meter(ui, "Visual quality", quality_was, quality_now, true);
+        ui.add_space(6.0);
+        meter(ui, "Performance cost", cost_was, cost_now, false);
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("The white tick marks the saved file value. Relative guide, not a benchmark.")
+                .size(11.5)
+                .color(theme::FAINT),
+        );
+    });
+    ui.add_space(12.0);
+    theme::card_elevated().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            widgets::section_title(ui, "Changed Values");
+            widgets::pill(
+                ui,
+                &changes.len().to_string(),
+                if changes.is_empty() { MUTED } else { theme::ACCENT },
+            );
+        });
+        if changes.is_empty() {
+            ui.label(RichText::new("No unsaved video changes.").color(MUTED));
+        } else {
+            for (name, was, now) in changes {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(*name).color(MUTED));
+                    ui.label(RichText::new(was).color(theme::FAINT).strikethrough());
+                    ui.label(RichText::new("→").color(MUTED));
+                    ui.label(RichText::new(now).font(theme::bold(13.5)).color(theme::ACCENT));
                 });
             }
-            tab => self.options.show(ui, ctx, notices, tab),
+            ui.add_space(8.0);
+            if ui.button("Revert all changes").clicked() {
+                *revert = true;
+            }
         }
-    }
+    });
 }
 
 /// A grid label that is marked and tinted when its value differs from the saved one.

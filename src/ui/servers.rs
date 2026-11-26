@@ -1202,15 +1202,16 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     let mut sort_click: Option<usize> = None;
     let mut join_request: Option<JoinRequest> = None;
 
-    // Detail panel for the selected server.
+    // Detail panel for the selected server — rendered FIRST so egui reserves the exact right-pane
+    // width before the server list table lays out in the remaining space.
     let selected = sv.selected.clone();
     let mut panel_edit: Option<(String, Option<String>, Option<String>, String, String, String, bool)> = None;
     let mut panel_actions: Vec<detail::Action> = Vec::new();
     let mut panel_key = String::new();
-    egui::Panel::right("server_detail")
+    let detail_resp = egui::Panel::right("server_detail_panel")
         .resizable(true)
-        .default_size(440.0)
-        .size_range(340.0..=680.0)
+        .default_size(420.0)
+        .size_range(340.0..=540.0)
         .frame(
             egui::Frame::new()
                 .fill(theme::SIDEBAR)
@@ -1246,24 +1247,19 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
             let (mut pick_model, mut pick_skin) = (sv.pick_model.clone(), sv.pick_skin.clone());
             let (mut driver, mut password, mut car_query) = (sv.driver.clone(), sv.password.clone(), sv.car_query.clone());
             let mut installed_only = sv.installed_only;
-            let actions = egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    let mut edit = detail::Edit {
-                        pick_model: &mut pick_model,
-                        pick_skin: &mut pick_skin,
-                        driver: &mut driver,
-                        password: &mut password,
-                        car_query: &mut car_query,
-                        installed_only: &mut installed_only,
-                    };
-                    detail::show(ui, &input, &mut edit)
-                })
-                .inner;
-            panel_actions = actions;
+            let mut edit = detail::Edit {
+                pick_model: &mut pick_model,
+                pick_skin: &mut pick_skin,
+                driver: &mut driver,
+                password: &mut password,
+                car_query: &mut car_query,
+                installed_only: &mut installed_only,
+            };
+            panel_actions = detail::show(ui, &input, &mut edit);
             panel_key = key;
             panel_edit = Some((String::new(), pick_model, pick_skin, driver, password, car_query, installed_only));
         });
+    let detail_rect = detail_resp.response.rect;
     if let Some((_, pick_model, pick_skin, driver, password, car_query, installed_only)) = panel_edit {
         if let Some(model) = &pick_model {
             sv.picks.insert(panel_key.clone(), (model.clone(), pick_skin.clone().unwrap_or_default()));
@@ -1394,146 +1390,178 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         }
     }
 
-    // The table.
+    // The table — strictly isolated to the remaining area left of `detail_rect` and clipped so
+    // PLAYERS / PING can NEVER bleed over the right-hand detail panel at any window width.
     let current = sv.selected.clone();
     let live_map = &sv.live;
     let live_map_lobby = &sv.lobby;
-    let width = ui.available_width() - 6.0;
-    // Column x offsets: star, dot+name (flexible), track, players, ping.
-    let (track_w, players_w, ping_w) = (150.0_f32.min(width * 0.22), 110.0, 62.0);
-    let name_w = (width - 56.0 - track_w - players_w - ping_w - 16.0).max(120.0);
-    let col_x = [44.0, 44.0 + name_w, 44.0 + name_w + track_w, 44.0 + name_w + track_w + players_w];
+    let avail = ui.available_rect_before_wrap();
+    let right_limit = (detail_rect.left() - 10.0).min(avail.max.x);
+    let table_rect = Rect::from_min_max(avail.min, egui::pos2(right_limit.max(avail.min.x + 1.0), avail.max.y));
 
-    // Header.
-    let (head, _) = ui.allocate_exact_size(vec2(width, 28.0), Sense::hover());
-    for (i, (label, x)) in [("Server", col_x[0]), ("Track", col_x[1]), ("Players", col_x[2]), ("Ping", col_x[3])].iter().enumerate() {
-        let cell = Rect::from_min_size(head.min + vec2(*x - 4.0, 0.0), vec2(if i == 0 { name_w } else { 90.0 }, 28.0));
-        let response = ui.interact(cell, ui.next_auto_id().with(("srv_head", i)), Sense::click());
-        let active = sv.sort_col == i;
-        let arrow = if active { if sv.sort_desc { " ▼" } else { " ▲" } } else { "" };
-        ui.painter().text(
-            head.min + vec2(*x, 14.0),
-            Align2::LEFT_CENTER,
-            format!("{}{arrow}", label.to_uppercase()),
-            theme::bold(11.0),
-            if active { ACCENT } else if response.hovered() { TEXT } else { FAINT },
-        );
-        if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-            sort_click = Some(i);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(table_rect), |ui| {
+        ui.set_clip_rect(ui.clip_rect().intersect(table_rect));
+        let width = table_rect.width().max(1.0);
+        let cols = compute_table_columns(width);
+
+        // Header.
+        let (head, _) = ui.allocate_exact_size(vec2(width, 28.0), Sense::hover());
+        let header_specs = [
+            ("Server", cols.x[0], cols.widths[0]),
+            ("Track", cols.x[1], cols.widths[1]),
+            ("Players", cols.x[2], cols.widths[2]),
+            ("Ping", cols.x[3], cols.widths[3]),
+        ];
+        for (i, (label, x, col_w)) in header_specs.iter().enumerate() {
+            let cell = Rect::from_min_size(head.min + vec2(*x - 4.0, 0.0), vec2((*col_w).max(16.0), 28.0));
+            let response = ui.interact(cell, ui.next_auto_id().with(("srv_head", i)), Sense::click());
+            let active = sv.sort_col == i;
+            let arrow = if active { if sv.sort_desc { " ▼" } else { " ▲" } } else { "" };
+            let text_color = if active { ACCENT } else if response.hovered() { TEXT } else { FAINT };
+            let galley = media::clipped(
+                ui,
+                &format!("{}{arrow}", label.to_uppercase()),
+                theme::bold(11.0),
+                text_color,
+                (*col_w - 4.0).max(8.0),
+            );
+            let size = galley.size();
+            ui.painter().galley(head.min + vec2(*x, 14.0 - size.y * 0.5), galley, text_color);
+            if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                sort_click = Some(i);
+            }
         }
-    }
-    ui.painter().hline(head.x_range(), head.bottom(), egui::Stroke::new(1.0, theme::BORDER));
+        ui.painter().hline(head.x_range(), head.bottom(), egui::Stroke::new(1.0, theme::BORDER));
 
-    if shown.is_empty() {
-        widgets::empty_state(ui, "No server matches.");
-    } else {
-        ui.spacing_mut().item_spacing.y = 2.0;
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, ROW_HEIGHT, shown.len(), |ui, range| {
-            for index in range {
-                let entry = &shown[index];
-                let live = live_map.get(&entry.key());
-                let status = live.and_then(|l| l.status.as_ref());
-                let (rect, response) = ui.allocate_exact_size(vec2(width, ROW_HEIGHT), Sense::click());
-                let selected = current.as_deref() == Some(entry.key().as_str());
-                let hover = ui.ctx().animate_bool_with_time(response.id, response.hovered(), 0.1);
-                let fill = if selected {
-                    theme::CARD_SELECTED
-                } else {
-                    Color32::TRANSPARENT.lerp_to_gamma(theme::CARD_HOVER, hover)
-                };
-                ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
-                if selected {
-                    ui.painter().rect_filled(
-                        Rect::from_center_size(rect.left_center() + vec2(2.0, 0.0), vec2(3.0, 18.0)),
-                        CornerRadius::same(2),
-                        ACCENT,
-                    );
-                }
-
-                // Star.
-                let star_rect = Rect::from_center_size(rect.left_center() + vec2(18.0, 0.0), vec2(26.0, 26.0));
-                let star_resp = ui.interact(star_rect, response.id.with("star"), Sense::click());
-                let (glyph, color) = if entry.favorite { ("★", WARN) } else { ("☆", if star_resp.hovered() { TEXT } else { FAINT }) };
-                ui.painter().text(star_rect.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(15.0), color);
-                let star_clicked = star_resp.on_hover_text("Favorite").clicked();
-                if star_clicked {
-                    star = Some(entry.key());
-                }
-
-                // Status dot, name.
-                let dot = if status.is_some() { OK } else if live.is_some_and(|l| l.checking) { WARN } else { FAINT };
-                ui.painter().circle_filled(rect.left_center() + vec2(col_x[0] + 4.0, 0.0), 4.0, dot);
-                let title = status.and_then(|s| s.name.clone()).unwrap_or_else(|| entry.key());
-                let galley = media::clipped(ui, &title, FontId::proportional(14.0), if status.is_some() { TEXT } else { MUTED }, name_w - 24.0);
-                let size = galley.size();
-                ui.painter().galley(rect.left_center() + vec2(col_x[0] + 16.0, -size.y / 2.0), galley, TEXT);
-
-                // Track.
-                if let Some(s) = status {
-                    let track_name = track_for(s)
-                        .map(|t| t.name.clone())
-                        .or_else(|| s.track.as_deref().map(|raw| resolve_track(raw, &tracks).1))
-                        .or_else(|| live_map_lobby.get(&entry.key()).map(|l| l.track_name.clone()))
-                        .unwrap_or_default();
-                    let missing = s.track.is_some() && track_for(s).is_none();
-                    let galley = media::clipped(ui, &track_name, FontId::proportional(13.0), if missing { WARN } else { MUTED }, track_w - 12.0);
-                    let size = galley.size();
-                    ui.painter().galley(rect.left_center() + vec2(col_x[1], -size.y / 2.0), galley, MUTED);
-
-                    // Players with a small fill bar.
-                    let (n, max) = (s.clients.unwrap_or(0), s.max_clients.unwrap_or(0));
-                    let bar = Rect::from_min_size(rect.left_center() + vec2(col_x[2], 6.0), vec2(players_w - 24.0, 4.0));
-                    ui.painter().rect_filled(bar, CornerRadius::same(2), theme::INPUT);
-                    if max > 0 {
-                        let share = (n as f32 / max as f32).clamp(0.0, 1.0);
-                        let tint = if share > 0.9 { WARN } else { OK };
-                        ui.painter().rect_filled(
-                            Rect::from_min_size(bar.min, vec2(bar.width() * share, 4.0)),
+        if shown.is_empty() {
+            widgets::empty_state(ui, "No server matches.");
+        } else {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, ROW_HEIGHT, shown.len(), |ui, range| {
+                let row_w = ui.available_width().min(width).max(1.0);
+                let row_cols = compute_table_columns(row_w);
+                for index in range {
+                    let entry = &shown[index];
+                    let live = live_map.get(&entry.key());
+                    let status = live.and_then(|l| l.status.as_ref());
+                    let (rect, response) = ui.allocate_exact_size(vec2(row_w, ROW_HEIGHT), Sense::click());
+                    let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
+                    let selected = current.as_deref() == Some(entry.key().as_str());
+                    let hover = ui.ctx().animate_bool_with_time(response.id, response.hovered(), 0.1);
+                    let fill = if selected {
+                        theme::CARD_SELECTED
+                    } else {
+                        Color32::TRANSPARENT.lerp_to_gamma(theme::CARD_HOVER, hover)
+                    };
+                    painter.rect_filled(rect, CornerRadius::same(8), fill);
+                    if selected {
+                        painter.rect_filled(
+                            Rect::from_center_size(rect.left_center() + vec2(2.0, 0.0), vec2(3.0, 18.0)),
                             CornerRadius::same(2),
-                            tint,
+                            ACCENT,
                         );
                     }
-                    ui.painter().text(
-                        rect.left_center() + vec2(col_x[2], -6.0),
-                        Align2::LEFT_CENTER,
-                        format!("{n}/{max}"),
-                        FontId::proportional(12.5),
-                        TEXT,
-                    );
-                }
-                if let Some(ms) = live.and_then(|l| l.latency_ms) {
-                    let color = if ms < 60 { OK } else if ms < 140 { WARN } else { DANGER };
-                    ui.painter().text(rect.left_center() + vec2(col_x[3], 0.0), Align2::LEFT_CENTER, format!("{ms} ms"), FontId::proportional(12.5), color);
-                }
 
-                let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-                if response.clicked() && !star_clicked {
-                    chosen = Some(entry.key());
-                }
-                if response.double_clicked() {
-                    join_request = Some(JoinRequest { entry: entry.clone(), model: None, skin: None });
-                }
-                response.context_menu(|ui| {
-                    if ui.button("Join").clicked() {
-                        join_request = Some(JoinRequest { entry: entry.clone(), model: None, skin: None });
-                        ui.close();
-                    }
-                    if ui.button(if entry.favorite { "Remove from favorites" } else { "Add to favorites" }).clicked() {
+                    // Star.
+                    let star_rect = Rect::from_center_size(rect.left_center() + vec2(18.0, 0.0), vec2(26.0, 26.0));
+                    let star_resp = ui.interact(star_rect, response.id.with("star"), Sense::click());
+                    let (glyph, color) = if entry.favorite { ("★", WARN) } else { ("☆", if star_resp.hovered() { TEXT } else { FAINT }) };
+                    painter.text(star_rect.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(15.0), color);
+                    let star_clicked = star_resp.on_hover_text("Favorite").clicked();
+                    if star_clicked {
                         star = Some(entry.key());
-                        ui.close();
                     }
-                    if ui.button("Copy address").clicked() {
-                        ui.ctx().copy_text(entry.key());
-                        ui.close();
+
+                    // Status dot, name.
+                    let dot = if status.is_some() { OK } else if live.is_some_and(|l| l.checking) { WARN } else { FAINT };
+                    painter.circle_filled(rect.left_center() + vec2(row_cols.x[0] + 4.0, 0.0), 4.0, dot);
+                    let title = status.and_then(|s| s.name.clone()).unwrap_or_else(|| entry.key());
+                    let name_max = (row_cols.widths[0] - 24.0).max(8.0);
+                    let title_color = if status.is_some() { TEXT } else { MUTED };
+                    let galley = media::clipped(ui, &title, FontId::proportional(14.0), title_color, name_max);
+                    let size = galley.size();
+                    painter.galley(rect.left_center() + vec2(row_cols.x[0] + 16.0, -size.y / 2.0), galley, title_color);
+
+                    // Track.
+                    if let Some(s) = status {
+                        let track_name = track_for(s)
+                            .map(|t| t.name.clone())
+                            .or_else(|| s.track.as_deref().map(|raw| resolve_track(raw, &tracks).1))
+                            .or_else(|| live_map_lobby.get(&entry.key()).map(|l| l.track_name.clone()))
+                            .unwrap_or_default();
+                        let missing = s.track.is_some() && track_for(s).is_none();
+                        let track_color = if missing { WARN } else { MUTED };
+                        let track_max = (row_cols.widths[1] - 10.0).max(8.0);
+                        let galley = media::clipped(ui, &track_name, FontId::proportional(13.0), track_color, track_max);
+                        let size = galley.size();
+                        painter.galley(rect.left_center() + vec2(row_cols.x[1], -size.y / 2.0), galley, track_color);
+
+                        // Players with a small fill bar.
+                        let (n, max) = (s.clients.unwrap_or(0), s.max_clients.unwrap_or(0));
+                        let bar_w = (row_cols.widths[2] - 16.0).max(16.0);
+                        let bar = Rect::from_min_size(rect.left_center() + vec2(row_cols.x[2], 6.0), vec2(bar_w, 4.0));
+                        painter.rect_filled(bar, CornerRadius::same(2), theme::INPUT);
+                        if max > 0 {
+                            let share = (n as f32 / max as f32).clamp(0.0, 1.0);
+                            let tint = if share > 0.9 { WARN } else { OK };
+                            painter.rect_filled(
+                                Rect::from_min_size(bar.min, vec2(bar.width() * share, 4.0)),
+                                CornerRadius::same(2),
+                                tint,
+                            );
+                        }
+                        let players_galley = media::clipped(
+                            ui,
+                            &format!("{n}/{max}"),
+                            FontId::proportional(12.5),
+                            TEXT,
+                            (row_cols.widths[2] - 6.0).max(8.0),
+                        );
+                        let psize = players_galley.size();
+                        painter.galley(rect.left_center() + vec2(row_cols.x[2], -6.0 - psize.y * 0.5), players_galley, TEXT);
                     }
-                    if ui.button("Remove").clicked() {
-                        remove = Some(entry.key());
-                        ui.close();
+                    if let Some(ms) = live.and_then(|l| l.latency_ms) {
+                        let color = if ms < 60 { OK } else if ms < 140 { WARN } else { DANGER };
+                        let ping_galley = media::clipped(
+                            ui,
+                            &format!("{ms} ms"),
+                            FontId::proportional(12.5),
+                            color,
+                            (row_cols.widths[3] - 4.0).max(8.0),
+                        );
+                        let psize = ping_galley.size();
+                        painter.galley(rect.left_center() + vec2(row_cols.x[3], -psize.y * 0.5), ping_galley, color);
                     }
-                });
-            }
-        });
-    }
+
+                    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if response.clicked() && !star_clicked {
+                        chosen = Some(entry.key());
+                    }
+                    if response.double_clicked() {
+                        join_request = Some(JoinRequest { entry: entry.clone(), model: None, skin: None });
+                    }
+                    response.context_menu(|ui| {
+                        if ui.button("Join").clicked() {
+                            join_request = Some(JoinRequest { entry: entry.clone(), model: None, skin: None });
+                            ui.close();
+                        }
+                        if ui.button(if entry.favorite { "Remove from favorites" } else { "Add to favorites" }).clicked() {
+                            star = Some(entry.key());
+                            ui.close();
+                        }
+                        if ui.button("Copy address").clicked() {
+                            ui.ctx().copy_text(entry.key());
+                            ui.close();
+                        }
+                        if ui.button("Remove").clicked() {
+                            remove = Some(entry.key());
+                            ui.close();
+                        }
+                    });
+                }
+            });
+        }
+    });
 
     if let Some(col) = sort_click {
         if sv.sort_col == col {
@@ -1612,6 +1640,36 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     app.servers = sv;
     for n in notices {
         app.push_notice(n.text, n.ok);
+    }
+}
+
+/// Column geometry for the server list table.
+/// Guarantees `x[3] + widths[3] <= width` for EVERY positive table width.
+#[derive(Debug, Clone, Copy)]
+struct TableColumns {
+    x: [f32; 4],
+    widths: [f32; 4],
+}
+
+fn compute_table_columns(width: f32) -> TableColumns {
+    let star_w = 36.0_f32.min(width * 0.12);
+    let pad_r = 6.0_f32.min(width * 0.02);
+    let usable = (width - star_w - pad_r).max(0.0);
+
+    let ping_w = (usable * 0.14).clamp(44.0, 64.0).min(usable * 0.22);
+    let rem_after_ping = (usable - ping_w).max(0.0);
+    let players_w = (usable * 0.20).clamp(64.0, 108.0).min(rem_after_ping * 0.34);
+    let rem_after_players = (rem_after_ping - players_w).max(0.0);
+    let track_w = (usable * 0.25).clamp(52.0, 175.0).min(rem_after_players * 0.42);
+    let name_w = (rem_after_players - track_w).max(0.0);
+
+    let x0 = star_w;
+    let x1 = x0 + name_w;
+    let x2 = x1 + track_w;
+    let x3 = x2 + players_w;
+    TableColumns {
+        x: [x0, x1, x2, x3],
+        widths: [name_w, track_w, players_w, ping_w],
     }
 }
 
@@ -1806,5 +1864,25 @@ mod refresh_tests {
         live.status.as_mut().unwrap().name = Some("Real name".into());
         sv.upsert_lobby(server("10.0.0.1", 6));
         assert_eq!(sv.live["10.0.0.1:8081"].status.as_ref().unwrap().name.as_deref(), Some("Real name"));
+    }
+
+    #[test]
+    fn table_columns_never_overflow_at_any_viewport_width() {
+        // Test every window-derived table width from ultra-narrow (200px) to 2560px ultrawide.
+        for width in [200.0_f32, 320.0, 480.0, 580.0, 720.0, 920.0, 1280.0, 1600.0, 2100.0, 2560.0] {
+            let cols = compute_table_columns(width);
+            let right_edge = cols.x[3] + cols.widths[3];
+            assert!(
+                right_edge <= width + 0.01,
+                "columns overflowed at width={width}: right_edge={right_edge}, cols={cols:?}"
+            );
+            for i in 0..3 {
+                assert!(
+                    cols.x[i] + cols.widths[i] <= cols.x[i + 1] + 0.01,
+                    "column {i} overlaps column {} at width={width}: cols={cols:?}",
+                    i + 1
+                );
+            }
+        }
     }
 }

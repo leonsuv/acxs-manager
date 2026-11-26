@@ -85,6 +85,10 @@ pub(super) fn show(ui: &mut egui::Ui, input: &DetailIn, edit: &mut Edit) -> Vec<
             .map(|g| g.0.clone());
     }
 
+    // -----------------------------------------------------------------------
+    // Pinned header: banner, status/track/CSP pills, and Join/Book CTA card.
+    // Never scrolls off-screen when expanding Drivers / Server Info / Entry List.
+    // -----------------------------------------------------------------------
     banner(ui, input, status, track, &track_layout);
     ui.add_space(8.0);
 
@@ -128,7 +132,8 @@ pub(super) fn show(ui: &mut egui::Ui, input: &DetailIn, edit: &mut Edit) -> Vec<
         }
     });
     if let Some(error) = &live.error {
-        ui.label(RichText::new(error).size(12.5).color(DANGER));
+        ui.add_space(4.0);
+        status_badge(ui, error, DANGER);
     }
     ui.add_space(8.0);
 
@@ -142,18 +147,18 @@ pub(super) fn show(ui: &mut egui::Ui, input: &DetailIn, edit: &mut Edit) -> Vec<
     let needs_password = input.lobby.is_some_and(|l| l.password);
     let is_booking = status.and_then(|s| s.session.as_deref()) == Some("0");
 
-    let mut problems: Vec<String> = Vec::new();
+    let mut problems: Vec<(String, Color32)> = Vec::new();
     if status.is_none() {
-        problems.push("The server does not answer right now.".into());
+        problems.push(("Server unreachable".into(), DANGER));
     }
     if status.is_some_and(|s| s.track.is_some()) && track.is_none() {
-        problems.push(format!("You do not have the track {track_id}."));
+        problems.push((format!("Missing track: {track_id}"), WARN));
     }
     if chosen.is_some() && chosen_car.is_none() {
-        problems.push("You do not have this car. Pick one marked as installed.".into());
+        problems.push(("Car not installed — pick an installed car below".into(), WARN));
     }
     if status.is_some() && chosen.is_none() {
-        problems.push("Pick a car below.".into());
+        problems.push(("Pick a car below to join".into(), INFO));
     }
     if let Some(req) = min_csp_build
         && csp_too_old
@@ -161,10 +166,10 @@ pub(super) fn show(ui: &mut egui::Ui, input: &DetailIn, edit: &mut Edit) -> Vec<
         let have = input
             .installed_csp_build
             .map_or_else(|| "none".into(), |b| b.to_string());
-        problems.push(format!("Requires CSP build {req} or newer (installed: {have})."));
+        problems.push((format!("Requires CSP ≥ {req} (installed: {have})"), DANGER));
     }
     if needs_password && edit.password.trim().is_empty() {
-        problems.push("This server needs a password.".into());
+        problems.push(("Password required".into(), WARN));
     }
     let can_join = problems.is_empty();
 
@@ -180,7 +185,7 @@ pub(super) fn show(ui: &mut egui::Ui, input: &DetailIn, edit: &mut Edit) -> Vec<
         .map(|s| content_dl::parse_server_content_urls(&s.raw_info, &s.raw_entries, missing_track_opt, &missing_cars))
         .unwrap_or_default();
 
-    theme::card_elevated().show(ui, |ui| {
+    theme::card_elevated().inner_margin(egui::Margin::same(14)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         let label = match (is_booking, chosen_car, edit.pick_skin.as_deref()) {
             (true, Some(car), _) => format!("BOOK SLOT (/SUB)  ·  {}", car.name),
@@ -189,8 +194,7 @@ pub(super) fn show(ui: &mut egui::Ui, input: &DetailIn, edit: &mut Edit) -> Vec<
             (false, Some(car), None) => format!("JOIN  ·  {}", car.name),
             (false, None, _) => "JOIN".to_string(),
         };
-        let button = widgets::primary_button(&label).min_size(vec2(ui.available_width(), 46.0));
-        if ui.add_enabled(can_join, button).clicked() {
+        if join_cta_button(ui, &label, can_join).clicked() {
             let req = JoinRequest {
                 entry: input.entry.clone(),
                 model: edit.pick_model.clone(),
@@ -203,11 +207,17 @@ pub(super) fn show(ui: &mut egui::Ui, input: &DetailIn, edit: &mut Edit) -> Vec<
             }
         }
         if let Some(bstatus) = &input.booking_status {
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             widgets::pill(ui, bstatus, INFO);
         }
-        for problem in &problems {
-            ui.label(RichText::new(problem).size(12.5).color(WARN));
+        if !problems.is_empty() {
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(6.0, 5.0);
+                for (problem, color) in &problems {
+                    status_badge(ui, problem, *color);
+                }
+            });
         }
 
         // Missing-content auto-installer bar.
@@ -255,13 +265,13 @@ pub(super) fn show(ui: &mut egui::Ui, input: &DetailIn, edit: &mut Edit) -> Vec<
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Race as").color(MUTED));
-            ui.add(egui::TextEdit::singleline(edit.driver).desired_width(120.0).margin(egui::Margin::symmetric(8, 5)));
+            ui.add(egui::TextEdit::singleline(edit.driver).desired_width(116.0).margin(egui::Margin::symmetric(8, 5)));
             if needs_password {
                 ui.label(RichText::new("Password").color(MUTED));
                 ui.add(
                     egui::TextEdit::singleline(edit.password)
                         .password(true)
-                        .desired_width(110.0)
+                        .desired_width(106.0)
                         .margin(egui::Margin::symmetric(8, 5)),
                 );
             }
@@ -293,34 +303,101 @@ pub(super) fn show(ui: &mut egui::Ui, input: &DetailIn, edit: &mut Edit) -> Vec<
             });
         });
     });
-    ui.add_space(10.0);
 
-    // Cars.
-    if !groups.is_empty() {
-        car_picker(ui, input, edit, &groups, &mut actions);
-    }
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(6.0);
 
-    // Details, folded away.
-    if let Some(s) = status {
-        ui.add_space(8.0);
-        egui::CollapsingHeader::new(RichText::new(format!("Drivers ({})", s.players.len())).font(theme::bold(13.5)))
-            .id_salt(("srv_drivers", input.entry.key()))
-            .show(ui, |ui| {
-                if s.players.is_empty() {
-                    ui.label(RichText::new("Nobody connected right now.").color(MUTED));
-                }
-                for driver in &s.players {
-                    ui.label(RichText::new(driver).size(13.5));
-                }
-            });
-        egui::CollapsingHeader::new(RichText::new("Server info").font(theme::bold(13.5)))
-            .id_salt(("srv_info", input.entry.key()))
-            .show(ui, |ui| raw_json(ui, &s.raw_info));
-        egui::CollapsingHeader::new(RichText::new(format!("Entry list ({} slots)", s.cars.len())).font(theme::bold(13.5)))
-            .id_salt(("srv_entries", input.entry.key()))
-            .show(ui, |ui| raw_json(ui, &s.raw_entries));
-    }
+    // -----------------------------------------------------------------------
+    // Scrollable lower body: Car Chooser + Drivers + Server Info + Entry List.
+    // -----------------------------------------------------------------------
+    egui::ScrollArea::vertical()
+        .id_salt(("srv_detail_body", input.entry.key()))
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            if !groups.is_empty() {
+                car_picker(ui, input, edit, &groups, &mut actions);
+            }
+
+            if let Some(s) = status {
+                ui.add_space(10.0);
+                egui::CollapsingHeader::new(RichText::new(format!("Drivers ({})", s.players.len())).font(theme::bold(13.5)))
+                    .id_salt(("srv_drivers", input.entry.key()))
+                    .show(ui, |ui| {
+                        if s.players.is_empty() {
+                            ui.label(RichText::new("Nobody connected right now.").color(MUTED));
+                        }
+                        for driver in &s.players {
+                            ui.label(RichText::new(driver).size(13.5));
+                        }
+                    });
+                egui::CollapsingHeader::new(RichText::new("Server info").font(theme::bold(13.5)))
+                    .id_salt(("srv_info", input.entry.key()))
+                    .show(ui, |ui| raw_json(ui, &s.raw_info));
+                egui::CollapsingHeader::new(RichText::new(format!("Entry list ({} slots)", s.cars.len())).font(theme::bold(13.5)))
+                    .id_salt(("srv_entries", input.entry.key()))
+                    .show(ui, |ui| raw_json(ui, &s.raw_entries));
+            }
+        });
     actions
+}
+
+/// Full-width Join / Book CTA button with active motorsport accent when enabled and crisp
+/// dark-raised disabled styling (never a muddy dimmed-orange bar) when disabled.
+fn join_cta_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let desired = vec2(ui.available_width().max(120.0), 44.0);
+    let (rect, response) = ui.allocate_exact_size(desired, sense);
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let round = CornerRadius::same(10);
+        if enabled {
+            let accent = theme::active_accent(ui.ctx());
+            let hover = ui.ctx().animate_bool_with_time(response.id, response.hovered(), 0.12);
+            let down = response.is_pointer_button_down_on();
+            painter.rect_filled(
+                rect.expand(2.5 + 1.5 * hover),
+                CornerRadius::same(12),
+                accent.gamma_multiply(0.14 + 0.12 * hover),
+            );
+            let fill = if down {
+                accent.gamma_multiply(0.85)
+            } else {
+                accent.lerp_to_gamma(Color32::WHITE, 0.10 * hover)
+            };
+            painter.rect_filled(rect, round, fill);
+            theme::paint_top_specular(painter, rect, 10.0);
+        } else {
+            painter.rect_filled(rect, round, theme::SURFACE_RAISED);
+            painter.rect_stroke(rect, round, egui::Stroke::new(1.0, theme::BORDER_STRONG), egui::StrokeKind::Inside);
+        }
+        let text_color = if enabled { theme::SURFACE_VOID } else { MUTED };
+        let galley = media::clipped(ui, &label.to_uppercase(), theme::display(16.0), text_color, (rect.width() - 24.0).max(40.0));
+        let pos = rect.center() - galley.size() * 0.5;
+        painter.galley(pos, galley, text_color);
+    }
+    if enabled {
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response
+    }
+}
+
+/// Crisp tinted status badge with a leading signal dot, used beneath a disabled Join/Book CTA.
+fn status_badge(ui: &mut egui::Ui, text: &str, color: Color32) {
+    egui::Frame::new()
+        .fill(color.gamma_multiply(0.11))
+        .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.40)))
+        .corner_radius(CornerRadius::same(7))
+        .inner_margin(egui::Margin::symmetric(8, 3))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let (dot, _) = ui.allocate_exact_size(vec2(6.0, 6.0), Sense::hover());
+                ui.painter().circle_filled(dot.center(), 3.0, color);
+                ui.add(egui::Label::new(RichText::new(text).size(12.0).color(color)).wrap_mode(egui::TextWrapMode::Wrap));
+            });
+        });
 }
 
 /// The server's track as a slim banner with its name over it.
@@ -394,57 +471,53 @@ fn car_picker(ui: &mut egui::Ui, input: &DetailIn, edit: &mut Edit, groups: &[Gr
     let columns = ((available + gap) / (112.0 + gap)).floor().max(2.0);
     let width = ((available - gap * (columns - 1.0)) / columns).floor();
     let height = (width * 9.0 / 16.0).round() + 30.0;
-    egui::ScrollArea::vertical()
-        .id_salt("srv_cars")
-        .max_height(height * 3.0 + gap * 2.0)
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing = vec2(gap, gap);
-            ui.horizontal_wrapped(|ui| {
-                for group in shown {
-                    let (model, _total, free, skins) = group;
-                    let car = local(model);
-                    let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click());
-                    let selected = edit.pick_model.as_deref() == Some(model.as_str());
-                    let hover = ui.ctx().animate_bool_with_time(response.id, response.hovered(), 0.1);
-                    ui.painter().rect_filled(rect, CornerRadius::same(9), theme::SURFACE_ELEVATED.lerp_to_gamma(theme::SURFACE_RAISED, hover));
-                    let image_rect = Rect::from_min_size(rect.min, vec2(width, height - 30.0));
-                    let first_skin = skins.iter().find(|s| s.1 > 0).or(skins.first()).map(|s| s.0.as_str());
-                    let preview = car.and_then(|c| media::car_preview(&c.path, first_skin));
-                    media::paint_image(ui, image_rect, preview.as_deref(), model, INFO, media::top_round_by(9));
-                    let title = car.map_or(model.as_str(), |c| c.name.as_str());
-                    let galley = media::clipped(ui, title, theme::bold(12.0), TEXT, width - 12.0);
-                    ui.painter().galley(rect.left_bottom() + vec2(6.0, -23.0), galley, TEXT);
-                    let (text, color) = if car.is_none() {
-                        ("not installed".to_string(), WARN)
-                    } else if *free > 0 {
-                        (format!("{free} free"), OK)
-                    } else {
-                        ("full".to_string(), FAINT)
-                    };
-                    media::chip(ui, image_rect.left_top() + vec2(5.0, 5.0), Align2::LEFT_TOP, &text, color);
-                    if car.is_none() || *free == 0 {
-                        ui.painter().rect_filled(image_rect, media::top_round_by(9), Color32::from_black_alpha(110));
-                    }
-                    let stroke = if selected { egui::Stroke::new(2.0, ACCENT) } else { egui::Stroke::new(1.0, theme::BORDER) };
-                    ui.painter().rect_stroke(rect, CornerRadius::same(9), stroke, egui::StrokeKind::Inside);
-                    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(title);
-                    if response.clicked() || response.double_clicked() {
-                        if edit.pick_model.as_deref() != Some(model.as_str()) {
-                            *edit.pick_skin = None;
-                        }
-                        *edit.pick_model = Some(model.clone());
-                    }
-                    if response.double_clicked() && car.is_some() && *free > 0 {
-                        actions.push(Action::Join(JoinRequest {
-                            entry: input.entry.clone(),
-                            model: Some(model.clone()),
-                            skin: None,
-                        }));
-                    }
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing = vec2(gap, gap);
+        ui.horizontal_wrapped(|ui| {
+            for group in shown {
+                let (model, _total, free, skins) = group;
+                let car = local(model);
+                let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+                let selected = edit.pick_model.as_deref() == Some(model.as_str());
+                let hover = ui.ctx().animate_bool_with_time(response.id, response.hovered(), 0.1);
+                ui.painter().rect_filled(rect, CornerRadius::same(9), theme::SURFACE_ELEVATED.lerp_to_gamma(theme::SURFACE_RAISED, hover));
+                let image_rect = Rect::from_min_size(rect.min, vec2(width, height - 30.0));
+                let first_skin = skins.iter().find(|s| s.1 > 0).or(skins.first()).map(|s| s.0.as_str());
+                let preview = car.and_then(|c| media::car_preview(&c.path, first_skin));
+                media::paint_image(ui, image_rect, preview.as_deref(), model, INFO, media::top_round_by(9));
+                let title = car.map_or(model.as_str(), |c| c.name.as_str());
+                let galley = media::clipped(ui, title, theme::bold(12.0), TEXT, width - 12.0);
+                ui.painter().galley(rect.left_bottom() + vec2(6.0, -23.0), galley, TEXT);
+                let (text, color) = if car.is_none() {
+                    ("not installed".to_string(), WARN)
+                } else if *free > 0 {
+                    (format!("{free} free"), OK)
+                } else {
+                    ("full".to_string(), FAINT)
+                };
+                media::chip(ui, image_rect.left_top() + vec2(5.0, 5.0), Align2::LEFT_TOP, &text, color);
+                if car.is_none() || *free == 0 {
+                    ui.painter().rect_filled(image_rect, media::top_round_by(9), Color32::from_black_alpha(110));
                 }
-            });
+                let stroke = if selected { egui::Stroke::new(2.0, ACCENT) } else { egui::Stroke::new(1.0, theme::BORDER) };
+                ui.painter().rect_stroke(rect, CornerRadius::same(9), stroke, egui::StrokeKind::Inside);
+                let response = response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(title);
+                if response.clicked() || response.double_clicked() {
+                    if edit.pick_model.as_deref() != Some(model.as_str()) {
+                        *edit.pick_skin = None;
+                    }
+                    *edit.pick_model = Some(model.clone());
+                }
+                if response.double_clicked() && car.is_some() && *free > 0 {
+                    actions.push(Action::Join(JoinRequest {
+                        entry: input.entry.clone(),
+                        model: Some(model.clone()),
+                        skin: None,
+                    }));
+                }
+            }
         });
+    });
 
     // Skins of the chosen car.
     let Some((model, _, _, skins)) = groups.iter().find(|g| edit.pick_model.as_deref() == Some(g.0.as_str())) else {

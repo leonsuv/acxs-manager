@@ -224,7 +224,7 @@ impl Tool for LiveTelemetry {
     }
 
     fn content_width(&self) -> f32 {
-        1640.0
+        f32::INFINITY
     }
 
     fn group(&self) -> &'static str {
@@ -247,55 +247,44 @@ impl Tool for LiveTelemetry {
         widgets::heading(
             ui,
             "Live Telemetry",
-            "Pit-Wall canvas reading Assetto Corsa UDP telemetry, shared memory, and ACXS Coach overlay.",
+            "Full-width Pit-Wall dashboard reading Assetto Corsa UDP telemetry, shared memory, and ACXS Coach overlay.",
         );
-        if let Some(root) = tool_ctx.ac_root.as_deref() {
-            ui.horizontal(|ui| {
-                let installed = overlay_app::is_installed(root);
-                widgets::pill(
-                    ui,
-                    if installed { "ACXS Coach Overlay: Ready" } else { "ACXS Coach Overlay: Not installed" },
-                    if installed { OK } else { MUTED },
-                );
-                if ui.button("Sync live coach state").clicked()
-                    && let Some(cfg) = settings::ac_user_cfg_dir()
-                {
-                    let best = self.laps.iter().map(|l| l.lap_time_ms).min().unwrap_or(0);
-                    let state = CoachState {
-                        target_lap_ms: best,
-                        streak_clean_laps: self.laps.len() as u32,
-                        std_dev_ms: 0,
-                        tip_corner: 0,
-                        tip_text: "Live Pit-Wall synced".into(),
-                    };
-                    match overlay_app::write_coach_state(&cfg, &state) {
-                        Ok(_) => notices.push(Notice { text: "Updated ACXS Coach overlay state.".into(), ok: true }),
-                        Err(e) => notices.push(Notice { text: format!("Could not update Coach state: {e}"), ok: false }),
-                    }
-                }
-            });
-            ui.add_space(6.0);
-        }
+
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            self.connection_card(ui, &ctx, notices);
-            ui.add_space(16.0);
-            self.web_card(ui, notices);
-            ui.add_space(16.0);
-            self.session_card(ui);
-            ui.add_space(16.0);
-            self.live_card(ui);
-            ui.add_space(16.0);
-            self.delta_card(ui);
-            ui.add_space(16.0);
-            self.shm_card(ui);
-            ui.add_space(16.0);
-            self.charts_card(ui);
-            ui.add_space(16.0);
-            self.track_card(ui);
-            ui.add_space(16.0);
-            self.friction_card(ui);
-            ui.add_space(16.0);
-            self.laps_card(ui, &ctx);
+            // Top full-width toolbar card: UDP Connection + Web Dashboard side-by-side.
+            self.top_toolbar_card(ui, &ctx, notices);
+            ui.add_space(14.0);
+
+            // Main 2-column full-width Pit-Wall grid.
+            let avail = ui.available_width();
+            if avail >= 960.0 {
+                let gap = 16.0;
+                let left_w = ((avail - gap) * 0.42).clamp(380.0, 560.0);
+                let right_w = (avail - gap - left_w).max(420.0);
+                ui.horizontal_top(|ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(left_w, 0.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_width(left_w);
+                            self.left_pitwall_column(ui, left_w);
+                        },
+                    );
+                    ui.add_space(gap);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(right_w, 0.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_width(right_w);
+                            self.right_pitwall_column(ui, &ctx, tool_ctx, notices, right_w);
+                        },
+                    );
+                });
+            } else {
+                self.left_pitwall_column(ui, avail);
+                ui.add_space(14.0);
+                self.right_pitwall_column(ui, &ctx, tool_ctx, notices, avail);
+            }
         });
     }
 }
@@ -516,74 +505,182 @@ impl LiveTelemetry {
         }
     }
 
-    fn web_card(&mut self, ui: &mut egui::Ui, notices: &mut Vec<Notice>) {
-        let running = self.web.is_some();
-        theme::card().show(ui, |ui| {
-            widgets::section_title(ui, "Web dashboard");
-            ui.label(
-                RichText::new(
-                    "Serves the latest car sample as JSON at /api/latest and as a page that \
-                     refreshes every second. Plain HTTP with no password.",
-                )
-                .color(MUTED),
-            );
-            ui.add_space(8.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("Port").color(MUTED));
-                ui.add_enabled(
-                    !running,
-                    egui::TextEdit::singleline(&mut self.web_port).desired_width(70.0),
-                );
-                ui.add_enabled_ui(!running, |ui| {
-                    ui.radio_value(
-                        &mut self.web_bind,
-                        web_dashboard::DEFAULT_BIND.to_string(),
-                        "127.0.0.1 (this computer)",
-                    );
-                    ui.add_enabled_ui(self.web_lan, |ui| {
-                        ui.radio_value(
-                            &mut self.web_bind,
-                            WEB_LAN_BIND.to_string(),
-                            "0.0.0.0 (local network)",
-                        );
-                    });
+    fn top_toolbar_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, notices: &mut Vec<Notice>) {
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let avail = ui.available_width();
+            if avail >= 920.0 {
+                let gap = 24.0;
+                let half_w = ((avail - gap) * 0.5).floor();
+                let mut left_rect = egui::Rect::NOTHING;
+                let mut right_rect = egui::Rect::NOTHING;
+                ui.horizontal_top(|ui| {
+                    left_rect = ui
+                        .allocate_ui_with_layout(
+                            egui::vec2(half_w, 0.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.set_width(half_w);
+                                self.connection_controls(ui, ctx, notices);
+                            },
+                        )
+                        .response
+                        .rect;
+                    ui.add_space(gap);
+                    right_rect = ui
+                        .allocate_ui_with_layout(
+                            egui::vec2(half_w, 0.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.set_width(half_w);
+                                self.web_controls(ui, notices);
+                            },
+                        )
+                        .response
+                        .rect;
                 });
-            });
-            ui.add_space(6.0);
-            let lan_box = egui::Checkbox::new(
-                &mut self.web_lan,
-                "Allow other devices on my local network (binds 0.0.0.0)",
-            );
-            if ui.add_enabled(!running, lan_box).changed() && !self.web_lan {
-                self.web_bind = web_dashboard::DEFAULT_BIND.to_string();
-            }
-            if self.web_lan {
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new(
-                        "Warning: this exposes live telemetry to every device on your local \
-                         network. Anyone who can reach the port can read it. There is no password \
-                         and no encryption, so enable this only on a network you trust.",
-                    )
-                    .color(WARN),
-                );
-            }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.add_enabled(!running, widgets::primary_button("Start")).clicked() {
-                    self.start_web(notices);
+                // Paint a bounded vertical hairline between the two toolbar halves (never stretches card height).
+                let mid_x = (left_rect.right() + right_rect.left()) * 0.5;
+                let top_y = left_rect.top().min(right_rect.top());
+                let bot_y = left_rect.bottom().max(right_rect.bottom());
+                if bot_y > top_y {
+                    ui.painter().line_segment(
+                        [egui::pos2(mid_x, top_y), egui::pos2(mid_x, bot_y)],
+                        egui::Stroke::new(1.0, theme::BORDER_SUBTLE),
+                    );
                 }
-                if ui.add_enabled(running, egui::Button::new("Stop")).clicked() {
-                    self.stop_web();
-                }
-                let (text, color) = if running { ("serving", OK) } else { ("stopped", MUTED) };
-                widgets::pill(ui, text, color);
-            });
-            if !self.web_status.is_empty() {
-                ui.add_space(6.0);
-                ui.label(RichText::new(&self.web_status).color(TEXT));
+            } else {
+                self.connection_controls(ui, ctx, notices);
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(10.0);
+                self.web_controls(ui, notices);
             }
         });
+    }
+
+    fn left_pitwall_column(&self, ui: &mut egui::Ui, width: f32) {
+        self.live_card(ui);
+        ui.add_space(14.0);
+        if width >= 440.0 {
+            let gap = 12.0;
+            let half_w = ((width - gap) * 0.5).floor();
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(half_w, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(half_w);
+                        self.friction_card(ui);
+                    },
+                );
+                ui.add_space(gap);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(half_w, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(half_w);
+                        self.track_card(ui);
+                    },
+                );
+            });
+        } else {
+            self.friction_card(ui);
+            ui.add_space(14.0);
+            self.track_card(ui);
+        }
+        ui.add_space(14.0);
+        self.session_card(ui);
+    }
+
+    fn right_pitwall_column(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        tool_ctx: &ToolContext,
+        notices: &mut Vec<Notice>,
+        width: f32,
+    ) {
+        self.charts_card(ui);
+        ui.add_space(14.0);
+        if width >= 620.0 {
+            let gap = 14.0;
+            let half_w = ((width - gap) * 0.5).floor();
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(half_w, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(half_w);
+                        self.delta_card(ui);
+                    },
+                );
+                ui.add_space(gap);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(half_w, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(half_w);
+                        self.shm_and_coach_card(ui, tool_ctx, notices);
+                    },
+                );
+            });
+        } else {
+            self.delta_card(ui);
+            ui.add_space(14.0);
+            self.shm_and_coach_card(ui, tool_ctx, notices);
+        }
+        ui.add_space(14.0);
+        self.laps_card(ui, ctx);
+    }
+
+    fn web_controls(&mut self, ui: &mut egui::Ui, notices: &mut Vec<Notice>) {
+        let running = self.web.is_some();
+        ui.horizontal(|ui| {
+            widgets::section_title(ui, "Web Dashboard");
+            let (text, color) = if running { ("serving", OK) } else { ("stopped", MUTED) };
+            widgets::pill(ui, text, color);
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Port").color(MUTED));
+            ui.add_enabled(
+                !running,
+                egui::TextEdit::singleline(&mut self.web_port).desired_width(64.0),
+            );
+            let lan_box = egui::Checkbox::new(&mut self.web_lan, "LAN (0.0.0.0)");
+            if ui.add_enabled(!running, lan_box).changed() {
+                self.web_bind = if self.web_lan {
+                    WEB_LAN_BIND.to_string()
+                } else {
+                    web_dashboard::DEFAULT_BIND.to_string()
+                };
+            }
+            if ui.add_enabled(!running, widgets::primary_button("Start")).clicked() {
+                self.start_web(notices);
+            }
+            if ui.add_enabled(running, egui::Button::new("Stop")).clicked() {
+                self.stop_web();
+            }
+        });
+        if self.web_lan {
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("Unencrypted HTTP exposed on local network — use on trusted LANs only.")
+                    .small()
+                    .color(WARN),
+            );
+        }
+        if !self.web_status.is_empty() {
+            ui.add_space(4.0);
+            ui.label(RichText::new(&self.web_status).small().color(TEXT));
+        } else {
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("Serves live JSON at /api/latest and an auto-refreshing pit-wall page.")
+                    .small()
+                    .color(MUTED),
+            );
+        }
     }
 
     fn link_label(&self) -> (&'static str, egui::Color32) {
@@ -595,96 +692,85 @@ impl LiveTelemetry {
         }
     }
 
-    fn connection_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, notices: &mut Vec<Notice>) {
+    fn connection_controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, notices: &mut Vec<Notice>) {
         let idle = self.link == Link::Idle;
         let running = self.link == Link::Running;
-        theme::card().show(ui, |ui| {
-            widgets::section_title(ui, "Connection");
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Host").color(MUTED));
-                ui.add_enabled(
-                    idle,
-                    egui::TextEdit::singleline(&mut self.host)
-                        .desired_width(150.0)
-                        .hint_text("IP address"),
-                );
-                ui.label(RichText::new("Port").color(MUTED));
-                ui.add_enabled(idle, egui::TextEdit::singleline(&mut self.port).desired_width(70.0));
-            });
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.add_enabled(idle, widgets::primary_button("Connect")).clicked() {
-                    self.connect(ctx, notices);
-                }
-                if ui.add_enabled(running, egui::Button::new("Disconnect")).clicked() {
-                    self.disconnect();
-                }
-                let (text, color) = self.link_label();
-                widgets::pill(ui, text, color);
-            });
-            if !self.status.is_empty() {
-                ui.add_space(6.0);
-                ui.label(RichText::new(&self.status).color(TEXT));
-            }
-            ui.add_space(10.0);
-            ui.label(
-                RichText::new(
-                    "The game must have UDP telemetry enabled, or nothing will answer. \
-                     Host must be an IP address.",
-                )
-                .color(MUTED),
-            );
-            ui.label(
-                RichText::new(
-                    "Nothing is sent to the game except one handshake request when you connect \
-                     and one dismiss request when you disconnect.",
-                )
-                .color(MUTED),
-            );
-            ui.label(
-                RichText::new(
-                    "This build does not send the car-update subscription request, because the \
-                     telemetry module does not provide one. Car updates and laps may never \
-                     arrive. Only the handshake result is expected.",
-                )
-                .color(WARN),
-            );
+        ui.horizontal(|ui| {
+            widgets::section_title(ui, "UDP Connection");
+            let (text, color) = self.link_label();
+            widgets::pill(ui, text, color);
         });
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Host").color(MUTED));
+            ui.add_enabled(
+                idle,
+                egui::TextEdit::singleline(&mut self.host)
+                    .desired_width(120.0)
+                    .hint_text("127.0.0.1"),
+            );
+            ui.label(RichText::new("Port").color(MUTED));
+            ui.add_enabled(idle, egui::TextEdit::singleline(&mut self.port).desired_width(64.0));
+            if ui.add_enabled(idle, widgets::primary_button("Connect")).clicked() {
+                self.connect(ctx, notices);
+            }
+            if ui.add_enabled(running, egui::Button::new("Disconnect")).clicked() {
+                self.disconnect();
+            }
+        });
+        if !self.status.is_empty() {
+            ui.add_space(4.0);
+            ui.label(RichText::new(&self.status).small().color(TEXT));
+        } else {
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("Assetto Corsa UDP telemetry endpoint (IP address required).")
+                    .small()
+                    .color(MUTED),
+            );
+        }
     }
 
     fn session_card(&self, ui: &mut egui::Ui) {
-        theme::card().show(ui, |ui| {
-            widgets::section_title(ui, "Session");
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section_title(ui, "Session & Counters");
             match &self.handshake {
                 Some(h) => {
-                    widgets::key_value(ui, "Car", &h.car);
-                    widgets::key_value(ui, "Driver", &h.driver);
-                    widgets::key_value(ui, "Track", &h.track);
-                    let layout = if h.track_config.is_empty() {
-                        "default"
-                    } else {
-                        h.track_config.as_str()
-                    };
-                    widgets::key_value(ui, "Layout", layout);
+                    egui::Grid::new("live_session_kv")
+                        .num_columns(2)
+                        .spacing([14.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.label(RichText::new("Car").color(MUTED));
+                            ui.label(RichText::new(&h.car).font(theme::bold(13.5)).color(TEXT));
+                            ui.end_row();
+                            ui.label(RichText::new("Driver").color(MUTED));
+                            ui.label(RichText::new(&h.driver).color(TEXT));
+                            ui.end_row();
+                            ui.label(RichText::new("Track").color(MUTED));
+                            let layout = if h.track_config.is_empty() {
+                                "default"
+                            } else {
+                                h.track_config.as_str()
+                            };
+                            ui.label(RichText::new(format!("{} ({layout})", h.track)).color(TEXT));
+                            ui.end_row();
+                        });
                 }
                 None => {
                     let text = if self.link == Link::Idle {
-                        "Not connected."
+                        "Not connected to a running session."
                     } else {
-                        "Waiting for the game to answer the handshake."
+                        "Waiting for Assetto Corsa to answer the UDP handshake."
                     };
                     ui.label(RichText::new(text).color(MUTED));
                 }
             }
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(format!(
-                    "Car updates received: {}   Ignored datagrams: {}",
-                    self.car_updates, self.ignored
-                ))
-                .small()
-                .color(MUTED),
-            );
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                widgets::stat(ui, "Car Updates", &self.car_updates.to_string(), INFO);
+                ui.add_space(12.0);
+                widgets::stat(ui, "Ignored Datagrams", &self.ignored.to_string(), MUTED);
+            });
         });
     }
 
@@ -723,19 +809,47 @@ impl LiveTelemetry {
             }
     }
 
-    fn shm_card(&mut self, ui: &mut egui::Ui) {
-        theme::card().show(ui, |ui| {
-            widgets::section_title(ui, "Live data (Windows)");
+    fn shm_and_coach_card(&mut self, ui: &mut egui::Ui, tool_ctx: &ToolContext, notices: &mut Vec<Notice>) {
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section_title(ui, "Shared Memory & ACXS Coach");
+            if let Some(root) = tool_ctx.ac_root.as_deref() {
+                ui.horizontal_wrapped(|ui| {
+                    let installed = overlay_app::is_installed(root);
+                    widgets::pill(
+                        ui,
+                        if installed { "ACXS Coach: Ready" } else { "ACXS Coach: Not installed" },
+                        if installed { OK } else { MUTED },
+                    );
+                    if ui.button("Sync live coach state").clicked()
+                        && let Some(cfg) = settings::ac_user_cfg_dir()
+                    {
+                        let best = self.laps.iter().map(|l| l.lap_time_ms).min().unwrap_or(0);
+                        let state = CoachState {
+                            target_lap_ms: best,
+                            streak_clean_laps: self.laps.len() as u32,
+                            std_dev_ms: 0,
+                            tip_corner: 0,
+                            tip_text: "Live Pit-Wall synced".into(),
+                        };
+                        match overlay_app::write_coach_state(&cfg, &state) {
+                            Ok(_) => notices.push(Notice { text: "Updated ACXS Coach overlay state.".into(), ok: true }),
+                            Err(e) => notices.push(Notice { text: format!("Could not update Coach state: {e}"), ok: false }),
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+            }
+
+            ui.label(RichText::new("Windows Shared Memory").small().color(MUTED));
             if !SHM_SUPPORTED {
-                ui.label(RichText::new(SharedMemError::Unsupported.to_string()).color(WARN));
+                ui.label(RichText::new(SharedMemError::Unsupported.to_string()).small().color(WARN));
                 return;
             }
             ui.label(
-                RichText::new(
-                    "Reads the game's shared memory pages about ten times a second while \
-                     enabled. Start Assetto Corsa first.",
-                )
-                .color(MUTED),
+                RichText::new("Reads AC shared memory pages at 10 Hz while enabled. Start Assetto Corsa first.")
+                    .small()
+                    .color(MUTED),
             );
             ui.add_space(6.0);
             let mut enabled = self.shm_stop.is_some();
@@ -764,17 +878,48 @@ impl LiveTelemetry {
     }
 
     fn live_card(&self, ui: &mut egui::Ui) {
-        theme::card().show(ui, |ui| {
-            widgets::section_title(ui, "Live car");
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section_title(ui, "Live Car Telemetry");
             if let Some(car) = &self.car {
                 ui.horizontal_wrapped(|ui| {
-                    widgets::stat(ui, "Speed", &format!("{:.0} km/h", car.speed_kmh), TEXT);
-                    widgets::stat(ui, "Gear", &gear_label(car.gear), TEXT);
+                    widgets::stat(ui, "Speed", &format!("{:.0} km/h", car.speed_kmh), theme::CH_SPEED);
+                    ui.add_space(12.0);
+                    widgets::stat(ui, "Gear", &gear_label(car.gear), theme::CH_GEAR);
+                    ui.add_space(12.0);
                     widgets::stat(ui, "RPM", &car.rpm.to_string(), TEXT);
-                    widgets::stat(ui, "Lap time", &format_lap(car.lap_time_ms), TEXT);
+                    ui.add_space(12.0);
+                    widgets::stat(ui, "Lap Time", &format_lap(car.lap_time_ms), INFO);
                 });
+                ui.add_space(10.0);
+                widgets::spec_bar_animated(
+                    ui,
+                    "live_throttle",
+                    "Throttle",
+                    &format!("{:.0}%", car.throttle * 100.0),
+                    car.throttle,
+                    theme::CH_THROTTLE,
+                );
+                widgets::spec_bar_animated(
+                    ui,
+                    "live_brake",
+                    "Brake",
+                    &format!("{:.0}%", car.brake * 100.0),
+                    car.brake,
+                    theme::CH_BRAKE,
+                );
             } else {
-                ui.label(RichText::new("No car updates yet.").color(MUTED));
+                ui.horizontal_wrapped(|ui| {
+                    widgets::stat(ui, "Speed", "-- km/h", MUTED);
+                    ui.add_space(12.0);
+                    widgets::stat(ui, "Gear", "N", MUTED);
+                    ui.add_space(12.0);
+                    widgets::stat(ui, "RPM", "----", MUTED);
+                    ui.add_space(12.0);
+                    widgets::stat(ui, "Lap Time", "-:--.---", MUTED);
+                });
+                ui.add_space(6.0);
+                ui.label(RichText::new("Connect to a running Assetto Corsa session to stream live car gauges.").small().color(MUTED));
             }
         });
     }
@@ -782,12 +927,13 @@ impl LiveTelemetry {
     /// Current lap time against the best recorded lap for this car, track and
     /// layout, with the fuel estimate line below it.
     fn delta_card(&self, ui: &mut egui::Ui) {
-        theme::card().show(ui, |ui| {
-            widgets::section_title(ui, "Best lap and fuel");
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section_title(ui, "Best Lap & Fuel");
             self.best_lap_readout(ui);
             ui.add_space(10.0);
             ui.label(RichText::new("Fuel estimate").small().color(MUTED));
-            ui.label(RichText::new(NO_FUEL_TEXT).color(MUTED));
+            ui.label(RichText::new(NO_FUEL_TEXT).small().color(MUTED));
         });
     }
 
@@ -843,14 +989,13 @@ impl LiveTelemetry {
     }
 
     fn charts_card(&self, ui: &mut egui::Ui) {
-        theme::card().show(ui, |ui| {
-            widgets::section_title(ui, "Charts");
-            ui.label(
-                RichText::new(format!("The last {PLOT_WINDOW_S:.0} seconds of samples."))
-                    .small()
-                    .color(MUTED),
-            );
-            ui.add_space(8.0);
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                widgets::section_title(ui, "Live Speed, RPM & Pedal Charts");
+                widgets::pill(ui, &format!("{PLOT_WINDOW_S:.0}s WINDOW"), INFO);
+            });
+            ui.add_space(6.0);
             let mut drawn = false;
             for channel in Channel::ALL {
                 let ring = self.charts.channels.ring(channel);
@@ -862,10 +1007,19 @@ impl LiveTelemetry {
                 drawn = true;
             }
             if !drawn {
-                ui.label(RichText::new("No samples yet.").color(MUTED));
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 140.0), egui::Sense::hover());
+                ui.painter().rect_filled(rect, 8.0, theme::SURFACE_VOID);
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "Waiting for live telemetry stream — Speed, Throttle, Brake, Steer & Gear traces appear here.",
+                    egui::FontId::proportional(13.0),
+                    MUTED,
+                );
+                ui.add_space(6.0);
             }
             ui.label(
-                RichText::new("Throttle and brake are shown as percent of pedal travel.")
+                RichText::new("Throttle and brake are plotted as percentage of pedal travel.")
                     .small()
                     .color(MUTED),
             );
@@ -873,9 +1027,10 @@ impl LiveTelemetry {
     }
 
     fn track_card(&self, ui: &mut egui::Ui) {
-        theme::card().show(ui, |ui| {
-            widgets::section_title(ui, "Track map");
-            let side = ui.available_width().clamp(160.0, 360.0);
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section_title(ui, "Track Map");
+            let side = ui.available_width().clamp(150.0, 260.0);
             let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
             let painter = ui.painter();
             painter.rect_filled(rect, 6.0, BG);
@@ -886,7 +1041,7 @@ impl LiveTelemetry {
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
                     "Drive a lap to draw the track.",
-                    egui::FontId::proportional(13.0),
+                    egui::FontId::proportional(12.5),
                     MUTED,
                 );
             } else {
@@ -913,9 +1068,10 @@ impl LiveTelemetry {
     }
 
     fn friction_card(&self, ui: &mut egui::Ui) {
-        theme::card().show(ui, |ui| {
-            widgets::section_title(ui, "Friction circle");
-            let side = ui.available_width().clamp(160.0, 360.0);
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section_title(ui, "Friction Circle");
+            let side = ui.available_width().clamp(150.0, 260.0);
             let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
             let painter = ui.painter();
             painter.rect_filled(rect, 6.0, BG);
@@ -961,26 +1117,35 @@ impl LiveTelemetry {
             }
             ui.add_space(6.0);
             ui.label(
-                RichText::new(format!(
-                    "Lateral is across, longitudinal is up. Circle radius is {FRICTION_MAX_G:.0} g."
-                ))
-                .small()
-                .color(MUTED),
+                RichText::new(format!("Radius {FRICTION_MAX_G:.0} g (lat × long)"))
+                    .small()
+                    .color(MUTED),
             );
         });
     }
 
     fn laps_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        theme::card().show(ui, |ui| {
-            widgets::section_title(ui, "Laps this session");
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                widgets::section_title(ui, "Laps This Session");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let can_export = !self.laps.is_empty() && self.export_rx.is_none();
+                    if ui.add_enabled(can_export, egui::Button::new("Export laps CSV")).clicked() {
+                        self.export_laps(ctx);
+                    }
+                });
+            });
             let summary = summarize_laps(&self.laps);
             let best = summary.best_ms.map(format_lap).unwrap_or_else(|| "-".to_string());
             let average = summary.average_ms.map(format_lap).unwrap_or_else(|| "-".to_string());
             let valid = summary.count.to_string();
             ui.horizontal_wrapped(|ui| {
                 widgets::stat(ui, "Best", &best, OK);
+                ui.add_space(12.0);
                 widgets::stat(ui, "Average", &average, TEXT);
-                widgets::stat(ui, "Valid laps", &valid, TEXT);
+                ui.add_space(12.0);
+                widgets::stat(ui, "Valid Laps", &valid, TEXT);
             });
             ui.label(
                 RichText::new(format!(
@@ -991,30 +1156,26 @@ impl LiveTelemetry {
                 .color(MUTED),
             );
             ui.add_space(8.0);
-            let can_export = !self.laps.is_empty() && self.export_rx.is_none();
-            if ui.add_enabled(can_export, egui::Button::new("Export laps CSV")).clicked() {
-                self.export_laps(ctx);
-            }
-            ui.add_space(8.0);
 
             if self.laps.is_empty() {
                 ui.label(RichText::new("No completed laps yet.").color(MUTED));
             } else {
                 egui::ScrollArea::vertical()
-                    .max_height(320.0)
+                    .max_height(280.0)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         egui::Grid::new("live_telemetry_laps")
                             .striped(true)
                             .num_columns(4)
+                            .spacing([20.0, 6.0])
                             .show(ui, |ui| {
-                                for head in ["Lap", "Time", "Car", "Driver"] {
-                                    ui.label(RichText::new(head).color(MUTED));
+                                for head in ["LAP", "TIME", "CAR", "DRIVER"] {
+                                    ui.label(RichText::new(head).font(theme::display(12.5)).color(MUTED));
                                 }
                                 ui.end_row();
                                 for lap in self.laps.iter().rev() {
-                                    ui.label(lap.laps.to_string());
-                                    ui.label(format_lap(lap.lap_time_ms));
+                                    ui.label(RichText::new(lap.laps.to_string()).font(theme::mono(13.0)));
+                                    ui.label(RichText::new(format_lap(lap.lap_time_ms)).font(theme::mono(13.0)).color(OK));
                                     ui.label(lap.car.as_str());
                                     ui.label(lap.driver.as_str());
                                     ui.end_row();

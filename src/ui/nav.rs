@@ -144,21 +144,10 @@ pub enum TelemetryTab {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum VideoView {
+pub enum GameSettingsView {
     #[default]
-    Video,
-    VrTriple,
-    Audio,
-    CameraReplay,
-    Profiles,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum ControlsView {
-    #[default]
-    Controls,
-    Ffb,
-    RigProfiles,
+    Settings,
+    GraphicsProfile,
     HudLayout,
 }
 
@@ -179,8 +168,7 @@ pub enum SystemView {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SetupTab {
-    VideoAudio(VideoView),
-    ControlsHud(ControlsView),
+    GameSettings(GameSettingsView),
     Csp(CspView),
     WeatherFx,
     System(SystemView),
@@ -189,7 +177,7 @@ pub enum SetupTab {
 
 impl Default for SetupTab {
     fn default() -> Self {
-        Self::VideoAudio(VideoView::Video)
+        Self::GameSettings(GameSettingsView::Settings)
     }
 }
 
@@ -258,10 +246,9 @@ impl Route {
             Self::Telemetry(TelemetryTab::Strategy) => "Strategy",
             Self::Telemetry(TelemetryTab::Engineer) => "Race Engineer",
             Self::Telemetry(TelemetryTab::Media) => "Screenshots",
-            Self::Setup(SetupTab::VideoAudio(VideoView::Profiles)) => "Graphics Profile",
-            Self::Setup(SetupTab::VideoAudio(_)) => "Game Settings",
-            Self::Setup(SetupTab::ControlsHud(ControlsView::HudLayout)) => "HUD Layout",
-            Self::Setup(SetupTab::ControlsHud(_)) => "Controls & FFB",
+            Self::Setup(SetupTab::GameSettings(GameSettingsView::Settings)) => "Game Settings",
+            Self::Setup(SetupTab::GameSettings(GameSettingsView::GraphicsProfile)) => "Graphics Profile",
+            Self::Setup(SetupTab::GameSettings(GameSettingsView::HudLayout)) => "HUD Layout",
             Self::Setup(SetupTab::Csp(CspView::Config)) => "CSP Config",
             Self::Setup(SetupTab::Csp(CspView::Installer)) => "CSP Lights Patch",
             Self::Setup(SetupTab::Csp(CspView::Lighting)) => "Lighting Profiles",
@@ -303,10 +290,9 @@ impl Route {
             Self::Telemetry(TelemetryTab::Strategy) => Some("Strategy"),
             Self::Telemetry(TelemetryTab::Engineer) => Some("Race Engineer"),
             Self::Telemetry(TelemetryTab::Media) => Some("Screenshots"),
-            Self::Setup(SetupTab::VideoAudio(VideoView::Profiles)) => Some("Graphics Profile"),
-            Self::Setup(SetupTab::VideoAudio(_)) => Some("Game Settings"),
-            Self::Setup(SetupTab::ControlsHud(ControlsView::HudLayout)) => Some("HUD Layout"),
-            Self::Setup(SetupTab::ControlsHud(_)) => Some("Game Settings"),
+            Self::Setup(SetupTab::GameSettings(GameSettingsView::Settings)) => Some("Game Settings"),
+            Self::Setup(SetupTab::GameSettings(GameSettingsView::GraphicsProfile)) => Some("Graphics Profile"),
+            Self::Setup(SetupTab::GameSettings(GameSettingsView::HudLayout)) => Some("HUD Layout"),
             Self::Setup(SetupTab::Csp(CspView::Config)) => Some("CSP Config"),
             Self::Setup(SetupTab::Csp(CspView::Lighting)) => Some("Lighting Profiles"),
             Self::Setup(SetupTab::WeatherFx) => Some("CSP Config"),
@@ -354,9 +340,9 @@ impl Route {
             "Strategy" => Self::Telemetry(TelemetryTab::Strategy),
             "Race Engineer" => Self::Telemetry(TelemetryTab::Engineer),
             "Screenshots" => Self::Telemetry(TelemetryTab::Media),
-            "Game Settings" => Self::Setup(SetupTab::VideoAudio(VideoView::Video)),
-            "Graphics Profile" => Self::Setup(SetupTab::VideoAudio(VideoView::Profiles)),
-            "HUD Layout" => Self::Setup(SetupTab::ControlsHud(ControlsView::HudLayout)),
+            "Game Settings" => Self::Setup(SetupTab::GameSettings(GameSettingsView::Settings)),
+            "Graphics Profile" => Self::Setup(SetupTab::GameSettings(GameSettingsView::GraphicsProfile)),
+            "HUD Layout" => Self::Setup(SetupTab::GameSettings(GameSettingsView::HudLayout)),
             "CSP Config" => Self::Setup(SetupTab::Csp(CspView::Config)),
             "Lighting Profiles" => Self::Setup(SetupTab::Csp(CspView::Lighting)),
             "Install Finder" => Self::Setup(SetupTab::System(SystemView::InstallFinder)),
@@ -402,15 +388,9 @@ impl Route {
             Self::Telemetry(TelemetryTab::Strategy),
             Self::Telemetry(TelemetryTab::Engineer),
             Self::Telemetry(TelemetryTab::Media),
-            Self::Setup(SetupTab::VideoAudio(VideoView::Video)),
-            Self::Setup(SetupTab::VideoAudio(VideoView::VrTriple)),
-            Self::Setup(SetupTab::VideoAudio(VideoView::Audio)),
-            Self::Setup(SetupTab::VideoAudio(VideoView::CameraReplay)),
-            Self::Setup(SetupTab::VideoAudio(VideoView::Profiles)),
-            Self::Setup(SetupTab::ControlsHud(ControlsView::Controls)),
-            Self::Setup(SetupTab::ControlsHud(ControlsView::Ffb)),
-            Self::Setup(SetupTab::ControlsHud(ControlsView::RigProfiles)),
-            Self::Setup(SetupTab::ControlsHud(ControlsView::HudLayout)),
+            Self::Setup(SetupTab::GameSettings(GameSettingsView::Settings)),
+            Self::Setup(SetupTab::GameSettings(GameSettingsView::GraphicsProfile)),
+            Self::Setup(SetupTab::GameSettings(GameSettingsView::HudLayout)),
             Self::Setup(SetupTab::Csp(CspView::Config)),
             Self::Setup(SetupTab::Csp(CspView::Installer)),
             Self::Setup(SetupTab::Csp(CspView::Lighting)),
@@ -439,7 +419,7 @@ impl Default for NavState {
             garage: GarageTab::Showroom,
             online: OnlineTab::Browser,
             telemetry: TelemetryTab::Sessions,
-            setup: SetupTab::VideoAudio(VideoView::Video),
+            setup: SetupTab::GameSettings(GameSettingsView::Settings),
         }
     }
 }

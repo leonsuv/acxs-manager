@@ -181,6 +181,7 @@ fn build_visuals(accent: Color32) -> egui::Visuals {
 }
 
 /// Apply the full theme (fonts, visuals, spacing, image loaders) using the default accent.
+#[allow(dead_code)]
 pub fn apply(ctx: &egui::Context) {
     apply_with_accent(ctx, AccentPreset::default());
 }

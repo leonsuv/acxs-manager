@@ -62,12 +62,44 @@ enum Action {
     SaveSelected,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum PointsPreset {
+    #[default]
+    F1,
+    Gt3,
+    Classic,
+    Custom,
+}
+
+impl PointsPreset {
+    const ALL: [Self; 4] = [Self::F1, Self::Gt3, Self::Classic, Self::Custom];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::F1 => "F1 (25-18-15)",
+            Self::Gt3 => "GT3 (15-12-10)",
+            Self::Classic => "Classic (10-6-4)",
+            Self::Custom => "Custom",
+        }
+    }
+
+    fn table(self) -> Option<&'static [u32]> {
+        match self {
+            Self::F1 => Some(&[25, 18, 15, 12, 10, 8, 6, 4, 2, 1]),
+            Self::Gt3 => Some(&[15, 12, 10, 8, 6, 4, 2, 1]),
+            Self::Classic => Some(&[10, 6, 4, 3, 2, 1]),
+            Self::Custom => None,
+        }
+    }
+}
+
 #[derive(Default)]
 struct CreateForm {
     name: String,
+    preset: PointsPreset,
     /// The points table the new championship will use, as typed or filled from a preset.
     points: String,
-    /// Staging text for a custom points table, applied by the "Use custom table" button.
+    /// Staging text for a custom points table, shown only when `PointsPreset::Custom` is active.
     custom: String,
 }
 
@@ -102,6 +134,10 @@ impl Tool for ChampionshipsPage {
         "Championships"
     }
 
+    fn content_width(&self) -> f32 {
+        f32::INFINITY
+    }
+
     fn group(&self) -> &'static str {
         "Race"
     }
@@ -129,55 +165,95 @@ impl Tool for ChampionshipsPage {
 
 impl ChampionshipsPage {
     fn draw(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let avail = ui.available_width();
+        if avail >= 900.0 {
+            let left_w = 380.0;
+            let gap = 16.0;
+            let right_w = (avail - left_w - gap).max(400.0);
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(left_w, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(left_w);
+                        self.left_column(ui, actions);
+                    },
+                );
+                ui.add_space(gap);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(right_w, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(right_w);
+                        self.right_column(ui, actions);
+                    },
+                );
+            });
+        } else {
+            self.left_column(ui, actions);
+            ui.add_space(14.0);
+            self.right_column(ui, actions);
+        }
+    }
+
+    fn left_column(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let busy = self.dialog_open;
 
-        theme::card().show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("New championship").color(MUTED));
-                ui.add(
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section_title(ui, "Create / Open Championship");
+
+            // Hero-style inline create bar.
+            ui.horizontal(|ui| {
+                let name_w = (ui.available_width() - 96.0).max(140.0);
+                let resp = ui.add(
                     TextEdit::singleline(&mut self.create.name)
-                        .hint_text("Name")
-                        .desired_width(220.0),
+                        .hint_text("Championship name (e.g. GT3 Endurance Cup)")
+                        .desired_width(name_w),
                 );
-                ui.add(
-                    TextEdit::singleline(&mut self.create.points)
-                        .hint_text("Points per position")
-                        .desired_width(260.0),
-                );
-                if ui.add(widgets::primary_button("Create")).clicked() {
+                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui.add(widgets::primary_button("Create")).clicked() || enter {
                     actions.push(Action::Create);
                 }
             });
+            ui.add_space(10.0);
+
+            // Tactile scoring preset pills.
+            ui.label(RichText::new("SCORING SYSTEM").font(theme::display(12.0)).color(MUTED));
+            ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("Preset").color(MUTED));
-                let current = parse_points(&self.create.points).ok();
-                let label = championship::preset_names()
-                    .into_iter()
-                    .find(|name| championship::points_preset(name) == current)
-                    .unwrap_or("Custom");
-                egui::ComboBox::from_id_salt("championship_points_preset")
-                    .width(220.0)
-                    .selected_text(label)
-                    .show_ui(ui, |ui| {
-                        for name in championship::preset_names() {
-                            if ui.selectable_label(label == name, name).clicked() {
-                                if let Some(table) = championship::points_preset(name) {
-                                    self.create.points = join_points(&table);
-                                }
-                            }
+                for preset in PointsPreset::ALL {
+                    let active = self.create.preset == preset;
+                    if ui.selectable_label(active, preset.label()).clicked() {
+                        self.create.preset = preset;
+                        if let Some(table) = preset.table() {
+                            self.create.points = join_points(table);
                         }
-                    });
-                ui.add(
-                    TextEdit::singleline(&mut self.create.custom)
-                        .hint_text("Custom, e.g. 12, 9, 7, 5")
-                        .desired_width(220.0),
-                );
-                if ui.button("Use custom table").clicked() {
-                    actions.push(Action::SetCustomPoints);
+                    }
                 }
             });
-            ui.horizontal(|ui| {
-                if ui.add_enabled(!busy, egui::Button::new("Open file...")).clicked() {
+
+            if self.create.preset == PointsPreset::Custom {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let custom_w = (ui.available_width() - 88.0).max(120.0);
+                    ui.add(
+                        TextEdit::singleline(&mut self.create.custom)
+                            .hint_text("e.g. 12, 9, 7, 5, 3, 1")
+                            .desired_width(custom_w),
+                    );
+                    if ui.button("Apply").clicked() {
+                        actions.push(Action::SetCustomPoints);
+                    }
+                });
+            }
+
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(8.0);
+
+            ui.horizontal_wrapped(|ui| {
+                if ui.add_enabled(!busy, egui::Button::new("Open JSON...")).clicked() {
                     actions.push(Action::OpenFile);
                 }
                 let can_save = !busy && self.selected.is_some();
@@ -186,43 +262,68 @@ impl ChampionshipsPage {
                 }
                 if busy {
                     ui.spinner();
-                    ui.label(RichText::new("Waiting for the file dialog...").color(MUTED));
+                    ui.label(RichText::new("Waiting for dialog...").small().color(MUTED));
                 }
             });
         });
 
         ui.add_space(14.0);
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.set_width(220.0);
-                widgets::section_title(ui, "Championships");
-                if self.championships.is_empty() {
-                    widgets::empty_state(ui, "None yet. Create one above or open a file.");
-                }
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                widgets::section_title(ui, "Series List");
+                widgets::pill(ui, &self.championships.len().to_string(), theme::INFO);
+            });
+            if self.championships.is_empty() {
+                widgets::empty_state(ui, "None yet. Create one above or open a JSON file.");
+                ui.add_space(16.0);
+            } else {
+                ui.add_space(4.0);
                 for (i, champ) in self.championships.iter().enumerate() {
-                    if ui.selectable_label(self.selected == Some(i), champ.name.as_str()).clicked() {
+                    let selected = self.selected == Some(i);
+                    if widgets::list_row(ui, selected, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(champ.name.as_str()).font(theme::bold(14.0)).color(theme::TEXT));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                widgets::pill(ui, &format!("{} R", champ.rounds.len()), theme::INFO);
+                                if champ.playable {
+                                    widgets::pill(ui, "AI", theme::OK);
+                                }
+                            });
+                        });
+                    }) {
                         actions.push(Action::Select(i));
                     }
+                    ui.add_space(4.0);
                 }
-            });
-            ui.add_space(16.0);
-            ui.vertical(|ui| {
-                match self.selected.and_then(|i| self.championships.get_mut(i)) {
-                    Some(champ) => detail(
-                        ui,
-                        champ,
-                        &mut self.round,
-                        &mut self.ballast_input,
-                        &mut self.player_name,
-                        &mut self.new_opp_car,
-                        &mut self.new_opp_name,
-                        &mut self.new_opp_ai,
-                        actions,
-                    ),
-                    None => widgets::empty_state(ui, "Select a championship to see its standings."),
-                }
-            });
+            }
         });
+    }
+
+    fn right_column(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        match self.selected.and_then(|i| self.championships.get_mut(i)) {
+            Some(champ) => detail(
+                ui,
+                champ,
+                &mut self.round,
+                &mut self.ballast_input,
+                &mut self.player_name,
+                &mut self.new_opp_car,
+                &mut self.new_opp_name,
+                &mut self.new_opp_ai,
+                actions,
+            ),
+            None => {
+                theme::card_elevated().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    widgets::empty_state(
+                        ui,
+                        "Select or create a championship on the left to manage standings, rounds and AI roster.",
+                    );
+                    ui.add_space(40.0);
+                });
+            }
+        }
     }
 
     fn apply(&mut self, action: Action, ctx: &egui::Context, notices: &mut Vec<Notice>) {
@@ -512,169 +613,221 @@ fn detail(
     new_opp_ai: &mut u8,
     actions: &mut Vec<Action>,
 ) {
-    ui.label(RichText::new(champ.name.as_str()).font(theme::display(22.0)));
-    let table = if champ.points_table.is_empty() {
-        "none".to_string()
-    } else {
-        join_points(&champ.points_table)
-    };
-    ui.label(RichText::new(format!("Points: {table}  ·  {} rounds", champ.rounds.len())).color(MUTED));
-
-    ui.add_space(8.0);
+    // Header & Season Rules card
     theme::card_elevated().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(champ.name.as_str()).font(theme::display(24.0)));
+            ui.add_space(8.0);
+            widgets::pill(ui, &format!("{} ROUNDS", champ.rounds.len()), theme::INFO);
+            if champ.playable {
+                widgets::pill(ui, "PLAYABLE AI SEASON", theme::OK);
+            }
+        });
+        let table = if champ.points_table.is_empty() {
+            "none".to_string()
+        } else {
+            join_points(&champ.points_table)
+        };
+        ui.label(RichText::new(format!("Points table: {table}")).small().color(MUTED));
+
+        ui.add_space(10.0);
+        ui.horizontal_wrapped(|ui| {
             widgets::toggle(ui, &mut champ.playable);
             ui.label("Playable AI Season");
-            ui.add_space(12.0);
+            ui.add_space(14.0);
             ui.label(RichText::new("Fastest lap bonus:").color(MUTED));
             ui.add(egui::DragValue::new(&mut champ.scoring.fastest_lap_bonus).range(0..=5).suffix(" pts"));
-            ui.add_space(12.0);
+            ui.add_space(14.0);
             ui.label(RichText::new("Success ballast (kg):").color(MUTED));
-            ui.add(TextEdit::singleline(ballast_input).desired_width(110.0));
+            ui.add(TextEdit::singleline(ballast_input).desired_width(120.0));
             if ui.small_button("Set").clicked() {
                 actions.push(Action::ApplyBallast);
             }
         });
-        if champ.playable {
-            ui.add_space(6.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("Driver:").color(MUTED));
-                ui.add(TextEdit::singleline(player_name).desired_width(120.0));
-                ui.label(RichText::new("Car ID:").color(MUTED));
-                ui.add(TextEdit::singleline(&mut champ.player_car).hint_text("ks_ferrari_488_gt3").desired_width(180.0));
+    });
+
+    ui.add_space(14.0);
+
+    // Standings card
+    theme::card_elevated().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        widgets::section_title(ui, "Standings");
+        let rows = championship::standings_with(champ, champ.scoring);
+        if rows.is_empty() {
+            ui.label(RichText::new("No completed rounds yet.").color(MUTED));
+        } else {
+            standings_grid(ui, &rows, &champ.success_ballast_kg);
+        }
+    });
+
+    ui.add_space(14.0);
+
+    // Rounds & Schedule card
+    theme::card_elevated().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        widgets::section_title(ui, "Round Schedule & Launch");
+        if champ.rounds.is_empty() {
+            ui.label(RichText::new("No rounds scheduled or recorded yet.").color(MUTED));
+        } else {
+            for (i, round) in champ.rounds.iter().enumerate() {
+                theme::card_flat().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    let place = match round.layout.as_deref() {
+                        Some(layout) => format!("{} ({layout})", round.track),
+                        None => round.track.clone(),
+                    };
+                    let winner = round
+                        .results
+                        .iter()
+                        .find(|r| r.position == 1 && !r.dnf)
+                        .map_or("scheduled", |r| r.driver.as_str());
+                    ui.horizontal_wrapped(|ui| {
+                        widgets::pill(ui, &format!("R{}", i + 1), theme::INFO);
+                        ui.label(RichText::new(&place).font(theme::bold(14.0)).color(theme::TEXT));
+                        ui.label(
+                            RichText::new(format!("·  {winner}  ·  {} results", round.results.len()))
+                                .font(theme::mono(12.0))
+                                .color(MUTED),
+                        );
+                        if champ.playable {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("Import race_out.json").clicked() {
+                                    actions.push(Action::ImportRaceOut(i));
+                                }
+                                if ui.add(widgets::primary_button("Launch Round")).clicked() {
+                                    actions.push(Action::LaunchRound(i));
+                                }
+                            });
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+            }
+        }
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(8.0);
+        widgets::section_title(ui, "Add or Schedule Round");
+        ui.label(
+            RichText::new("Schedule a playable round or paste CSV results (driver,position,fastest_lap,dnf).")
+                .small()
+                .color(MUTED),
+        );
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.add(
+                TextEdit::singleline(&mut form.track)
+                    .hint_text("Track id")
+                    .desired_width(210.0),
+            );
+            ui.add(
+                TextEdit::singleline(&mut form.layout)
+                    .hint_text("Layout (optional)")
+                    .desired_width(160.0),
+            );
+            ui.add(egui::DragValue::new(&mut form.laps).range(0..=200).suffix(" laps"));
+            if champ.playable && ui.button("Schedule round").clicked() {
+                actions.push(Action::AddScheduledRound);
+            }
+        });
+        ui.add_space(6.0);
+        ui.add(
+            TextEdit::multiline(&mut form.csv)
+                .hint_text("driver,position,fastest_lap,dnf\nAlice,1,yes,no\nBob,2,no,no")
+                .desired_rows(5)
+                .font(egui::TextStyle::Monospace)
+                .desired_width(f32::INFINITY),
+        );
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            if ui.add(widgets::primary_button("Add round from CSV")).clicked() {
+                actions.push(Action::AddRound);
+            }
+            if ui
+                .button("Load server result file")
+                .on_hover_text("Fills the form from a file in the results folder of a dedicated server.")
+                .clicked()
+            {
+                actions.push(Action::LoadServerResults);
+            }
+        });
+    });
+
+    if champ.playable {
+        ui.add_space(14.0);
+        theme::card_elevated().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                widgets::section_title(ui, "AI Roster");
+                widgets::pill(ui, &format!("{} AI", champ.opponents.len()), theme::INFO);
             });
-            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Player driver:").color(MUTED));
+                ui.add(TextEdit::singleline(player_name).desired_width(140.0));
+                ui.label(RichText::new("Player car ID:").color(MUTED));
+                ui.add(
+                    TextEdit::singleline(&mut champ.player_car)
+                        .hint_text("ks_ferrari_488_gt3")
+                        .desired_width(200.0),
+                );
+            });
+            ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Add AI:").color(MUTED));
-                ui.add(TextEdit::singleline(new_opp_car).hint_text("car id").desired_width(150.0));
-                ui.add(TextEdit::singleline(new_opp_name).hint_text("driver name").desired_width(110.0));
+                ui.add(TextEdit::singleline(new_opp_car).hint_text("car id").desired_width(170.0));
+                ui.add(TextEdit::singleline(new_opp_name).hint_text("driver name").desired_width(130.0));
                 ui.add(egui::DragValue::new(new_opp_ai).range(70..=100).suffix("%"));
-                if ui.small_button("+ Add").clicked() {
+                if ui.button("+ Add AI").clicked() {
                     actions.push(Action::AddOpponent);
                 }
             });
             if !champ.opponents.is_empty() {
-                ui.add_space(4.0);
+                ui.add_space(8.0);
                 for (idx, opp) in champ.opponents.iter().enumerate() {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(format!("{} · {} · AI {}%", opp.driver_name, opp.car, opp.ai_level)).font(theme::mono(12.0)));
+                        ui.label(
+                            RichText::new(format!("{}  ·  {}  ·  AI {}%", opp.driver_name, opp.car, opp.ai_level))
+                                .font(theme::mono(12.5)),
+                        );
                         if ui.small_button("×").clicked() {
                             actions.push(Action::RemoveOpponent(idx));
                         }
                     });
                 }
             }
-        }
-    });
-
-    ui.add_space(10.0);
-    widgets::section_title(ui, "Standings");
-    let rows = championship::standings_with(champ, champ.scoring);
-    if rows.is_empty() {
-        widgets::empty_state(ui, "No completed rounds yet.");
-    } else {
-        standings_grid(ui, &rows, &champ.success_ballast_kg);
-    }
-
-    ui.add_space(12.0);
-    widgets::section_title(ui, "Rounds");
-    if champ.rounds.is_empty() {
-        ui.label(RichText::new("None.").color(MUTED));
-    }
-    for (i, round) in champ.rounds.iter().enumerate() {
-        let place = match round.layout.as_deref() {
-            Some(layout) => format!("{} ({layout})", round.track),
-            None => round.track.clone(),
-        };
-        let winner = round
-            .results
-            .iter()
-            .find(|r| r.position == 1 && !r.dnf)
-            .map_or("scheduled", |r| r.driver.as_str());
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!(
-                    "R{}  {place}  ·  {winner}  ·  {} results",
-                    i + 1,
-                    round.results.len()
-                ))
-                .font(theme::mono(12.5)),
-            );
-            if champ.playable {
-                if ui.small_button("Launch Round").clicked() {
-                    actions.push(Action::LaunchRound(i));
-                }
-                if ui.small_button("Import race_out.json").clicked() {
-                    actions.push(Action::ImportRaceOut(i));
-                }
-            }
         });
     }
-
-    ui.add_space(12.0);
-    widgets::section_title(ui, "Add a round");
-    ui.label(
-        RichText::new("Schedule a playable round or paste CSV results (driver,position,fastest_lap,dnf).")
-            .small()
-            .color(MUTED),
-    );
-    ui.horizontal(|ui| {
-        ui.add(
-            TextEdit::singleline(&mut form.track)
-                .hint_text("Track")
-                .desired_width(220.0),
-        );
-        ui.add(
-            TextEdit::singleline(&mut form.layout)
-                .hint_text("Layout (optional)")
-                .desired_width(160.0),
-        );
-        ui.add(egui::DragValue::new(&mut form.laps).range(0..=200).suffix(" laps"));
-        if champ.playable && ui.button("Schedule round").clicked() {
-            actions.push(Action::AddScheduledRound);
-        }
-    });
-    ui.add(
-        TextEdit::multiline(&mut form.csv)
-            .hint_text("driver,position,fastest_lap,dnf\nAlice,1,yes,no\nBob,2,no,no")
-            .desired_rows(5)
-            .desired_width(520.0),
-    );
-    ui.horizontal(|ui| {
-        if ui.add(widgets::primary_button("Add round from CSV")).clicked() {
-            actions.push(Action::AddRound);
-        }
-        if ui
-            .button("Load server result file")
-            .on_hover_text("Fills the form from a file in the results folder of a dedicated server.")
-            .clicked()
-        {
-            actions.push(Action::LoadServerResults);
-        }
-    });
 }
 
 fn standings_grid(ui: &mut egui::Ui, rows: &[Standing], ballast: &[u32]) {
-    egui::Grid::new("championship_standings")
-        .striped(true)
-        .num_columns(8)
-        .show(ui, |ui| {
-            for header in ["Pos", "Driver", "Points", "Wins", "Fastest laps", "Best", "Rounds", "Next Ballast"] {
-                ui.label(RichText::new(header).color(MUTED));
-            }
-            ui.end_row();
-            for (i, row) in rows.iter().enumerate() {
-                ui.label(RichText::new((i + 1).to_string()).font(theme::mono(12.5)));
-                ui.label(row.driver.as_str());
-                ui.label(RichText::new(row.points.to_string()).font(theme::mono(12.5)));
-                ui.label(RichText::new(row.wins.to_string()).font(theme::mono(12.5)));
-                ui.label(RichText::new(row.fastest_laps.to_string()).font(theme::mono(12.5)));
-                ui.label(RichText::new(row.best_position.map_or("-".to_string(), |p| format!("P{p}"))).font(theme::mono(12.5)));
-                ui.label(RichText::new(row.rounds_entered.to_string()).font(theme::mono(12.5)));
-                let kg = ballast.get(i).copied().unwrap_or(0);
-                ui.label(RichText::new(if kg > 0 { format!("+{kg} kg") } else { "-".into() }).font(theme::mono(12.5)));
+    egui::ScrollArea::horizontal().auto_shrink([false, true]).show(ui, |ui| {
+        egui::Grid::new("championship_standings")
+            .striped(true)
+            .num_columns(8)
+            .spacing([18.0, 8.0])
+            .show(ui, |ui| {
+                for header in ["POS", "DRIVER", "PTS", "WINS", "FL", "BEST", "ROUNDS", "BALLAST"] {
+                    ui.label(RichText::new(header).font(theme::display(12.5)).color(MUTED));
+                }
                 ui.end_row();
-            }
-        });
+                for (i, row) in rows.iter().enumerate() {
+                    ui.label(RichText::new(format!("P{}", i + 1)).font(theme::mono(13.0)).color(if i == 0 { theme::ACCENT } else { theme::TEXT }));
+                    ui.label(RichText::new(row.driver.as_str()).font(theme::bold(13.5)).color(theme::TEXT));
+                    ui.label(RichText::new(row.points.to_string()).font(theme::mono(13.5)).color(theme::TEXT));
+                    ui.label(RichText::new(row.wins.to_string()).font(theme::mono(13.0)).color(MUTED));
+                    ui.label(RichText::new(row.fastest_laps.to_string()).font(theme::mono(13.0)).color(theme::SIGNAL_PURPLE));
+                    ui.label(RichText::new(row.best_position.map_or("—".to_string(), |p| format!("P{p}"))).font(theme::mono(13.0)).color(MUTED));
+                    ui.label(RichText::new(row.rounds_entered.to_string()).font(theme::mono(13.0)).color(MUTED));
+                    let kg = ballast.get(i).copied().unwrap_or(0);
+                    ui.label(
+                        RichText::new(if kg > 0 { format!("+{kg} kg") } else { "—".into() })
+                            .font(theme::mono(13.0))
+                            .color(if kg > 0 { theme::WARN } else { MUTED }),
+                    );
+                    ui.end_row();
+                }
+            });
+    });
 }

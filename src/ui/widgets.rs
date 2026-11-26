@@ -477,12 +477,14 @@ pub fn animated_tabs<T: Copy + PartialEq>(
             let selected = *current == *value;
             let label_font = theme::display(15.5);
             let label_galley = ui.painter().layout_no_wrap(label.to_uppercase(), label_font, Color32::WHITE);
-            let badge_galley = badge.map(|b| ui.painter().layout_no_wrap(b.to_string(), theme::mono(11.0), MUTED));
+            let badge_galley = badge.map(|b| ui.painter().layout_no_wrap(b.to_string(), theme::mono(10.0), MUTED));
 
             let pad_x = 12.0;
-            let badge_w = badge_galley.as_ref().map_or(0.0, |g| g.size().x + 14.0);
-            let width = label_galley.size().x + pad_x * 2.0 + badge_w;
-            let (rect, resp) = ui.allocate_exact_size(vec2(width, 32.0), Sense::click());
+            let badge_gap = 6.0;
+            let badge_pad_x = 5.0;
+            let badge_total_w = badge_galley.as_ref().map_or(0.0, |g| badge_gap + g.size().x + badge_pad_x * 2.0);
+            let width = label_galley.size().x + pad_x * 2.0 + badge_total_w;
+            let (rect, resp) = ui.allocate_exact_size(vec2(width, 34.0), Sense::click());
 
             let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
             if hover > 0.0 && !selected {
@@ -498,14 +500,17 @@ pub fn animated_tabs<T: Copy + PartialEq>(
             } else {
                 MUTED.lerp_to_gamma(TEXT, hover)
             };
-            let text_pos = pos2(rect.left() + pad_x, rect.center().y - label_galley.size().y * 0.5);
+            // Shift text and badge slightly upward so the bottom underline sits cleanly >= 4px below.
+            let content_y = rect.center().y - 2.0;
+            let label_w = label_galley.size().x;
+            let text_pos = pos2(rect.left() + pad_x, content_y - label_galley.size().y * 0.5);
             ui.painter().galley(text_pos, label_galley, text_color);
 
             if let Some(bg) = badge_galley {
-                let badge_rect = Rect::from_center_size(
-                    pos2(rect.right() - pad_x - bg.size().x * 0.5, rect.center().y),
-                    vec2(bg.size().x + 8.0, 17.0),
-                );
+                let badge_w = bg.size().x + badge_pad_x * 2.0;
+                let badge_h = bg.size().y + 2.0;
+                let badge_left = rect.left() + pad_x + label_w + badge_gap;
+                let badge_rect = Rect::from_min_size(pos2(badge_left, content_y - badge_h * 0.5), vec2(badge_w, badge_h));
                 ui.painter().rect_filled(
                     badge_rect,
                     CornerRadius::same(255),
@@ -532,8 +537,8 @@ pub fn animated_tabs<T: Copy + PartialEq>(
         let x = ui.ctx().animate_value_with_time(base_id.with("x"), target.left(), 0.16);
         let w = ui.ctx().animate_value_with_time(base_id.with("w"), target.width(), 0.16);
         let bar = Rect::from_min_size(pos2(x + 8.0, target.bottom() - 2.5), vec2((w - 16.0).max(8.0), 2.5));
-        // Soft glow + crisp bar.
-        ui.painter().rect_filled(bar.expand2(vec2(2.0, 1.5)), CornerRadius::same(3), accent.gamma_multiply(0.28));
+        // Soft glow + crisp bar sitting cleanly below text/pill baseline.
+        ui.painter().rect_filled(bar.expand2(vec2(2.0, 1.0)), CornerRadius::same(3), accent.gamma_multiply(0.26));
         ui.painter().rect_filled(bar, CornerRadius::same(2), accent);
     }
 

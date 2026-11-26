@@ -20,17 +20,15 @@ use acxs_manager::ipc::{self, IpcListener, IpcMessage};
 use acxs_manager::uri::JoinUri;
 use eframe::egui::{self, Align2, Color32, CornerRadius, Margin, Rect, RichText, Sense, Stroke, StrokeKind, vec2};
 use nav::{
-    CarSubView, ControlsView, CspView, DriveTab, FocusNav, GarageTab, LibraryView, NavState, OnlineTab, PaddockTab,
-    Pillar, Route, SetupTab, SetupsView, StudioView, SystemView, TelemetryTab, TrackSubView, VideoView,
+    CarSubView, CspView, DriveTab, FocusNav, GameSettingsView, GarageTab, LibraryView, NavState, OnlineTab,
+    PaddockTab, Pillar, Route, SetupTab, SetupsView, StudioView, SystemView, TelemetryTab, TrackSubView,
 };
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
-
-const MAX_NOTICES: usize = 8;
 
 /// Legacy page enum retained in sync with [`Route`] for backward compatibility with Wave 3 pages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,7 +108,6 @@ pub struct App {
     busy: bool,
     pending: usize,
     generation: u64,
-    notices: VecDeque<Notice>,
     ctx: egui::Context,
     tools: Vec<Box<dyn tools::Tool>>,
     favorites: HashSet<String>,
@@ -172,6 +169,7 @@ fn start_game_watch(tx: Sender<Msg>, ctx: egui::Context) {
 
 impl App {
     /// Standard constructor (delegates to [`App::new_with_uri`] with `None`).
+    #[allow(dead_code)]
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         Self::new_with_uri(cc, None)
     }
@@ -246,7 +244,6 @@ impl App {
             busy: false,
             pending: 0,
             generation: 0,
-            notices: VecDeque::new(),
             ctx: cc.egui_ctx.clone(),
             tools: tools::registry(),
             favorites: App::load_favorites(),
@@ -286,10 +283,7 @@ impl App {
     }
 
     fn push_notice(&mut self, text: impl Into<String>, ok: bool) {
-        let text = text.into();
-        self.toasts.push(Toast { text: text.clone(), ok, born: Instant::now() });
-        self.notices.push_front(Notice { text, ok });
-        self.notices.truncate(MAX_NOTICES);
+        self.toasts.push(Toast { text: text.into(), ok, born: Instant::now() });
     }
 
     fn spawn(&mut self, work: impl FnOnce(Option<PathBuf>, PathBuf) -> Option<Notice> + Send + 'static) {
@@ -781,56 +775,6 @@ impl App {
                             G::Library => GarageTab::Library(LibraryView::Mods),
                         }));
                     }
-                    // Secondary sub-view pills on the right when applicable.
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match tab {
-                        GarageTab::Cars(cur) => {
-                            for (v, lbl) in [(CarSubView::Tuning, "Tuning"), (CarSubView::Specs, "Specs"), (CarSubView::Browser, "Grid")] {
-                                if ui.selectable_label(cur == v, lbl).clicked() {
-                                    next = Some(Route::Garage(GarageTab::Cars(v)));
-                                }
-                            }
-                        }
-                        GarageTab::Tracks(cur) => {
-                            for (v, lbl) in [(TrackSubView::Inspector, "Inspector"), (TrackSubView::Browser, "Grid")] {
-                                if ui.selectable_label(cur == v, lbl).clicked() {
-                                    next = Some(Route::Garage(GarageTab::Tracks(v)));
-                                }
-                            }
-                        }
-                        GarageTab::Setups(cur) => {
-                            for (v, lbl) in [(SetupsView::AbTest, "A/B Test"), (SetupsView::Advice, "Advice"), (SetupsView::Editor, "Editor")] {
-                                if ui.selectable_label(cur == v, lbl).clicked() {
-                                    next = Some(Route::Garage(GarageTab::Setups(v)));
-                                }
-                            }
-                        }
-                        GarageTab::Studio(cur) => {
-                            for (v, lbl) in [
-                                (StudioView::ModelTools, "3D / AO"),
-                                (StudioView::PlateDesigner, "Plates"),
-                                (StudioView::LiveryPainter, "Livery Painter"),
-                                (StudioView::Skins, "Skins"),
-                            ] {
-                                if ui.selectable_label(cur == v, lbl).clicked() {
-                                    next = Some(Route::Garage(GarageTab::Studio(v)));
-                                }
-                            }
-                        }
-                        GarageTab::Library(cur) => {
-                            for (v, lbl) in [
-                                (LibraryView::Exports, "Exports"),
-                                (LibraryView::Metadata, "Metadata"),
-                                (LibraryView::Collections, "Collections"),
-                                (LibraryView::Installer, "Installer"),
-                                (LibraryView::Mods, "Mods"),
-                            ] {
-                                if ui.selectable_label(cur == v, lbl).clicked() {
-                                    next = Some(Route::Garage(GarageTab::Library(v)));
-                                }
-                            }
-                        }
-                        GarageTab::Showroom => {}
-                    });
                 }
                 Route::Online(mut tab) => {
                     let tabs = [
@@ -859,18 +803,16 @@ impl App {
                 }
                 Route::Setup(tab) => {
                     #[derive(Clone, Copy, PartialEq, Eq)]
-                    enum S { VideoAudio, ControlsHud, Csp, WeatherFx, System, App }
+                    enum S { GameSettings, Csp, WeatherFx, System, App }
                     let mut s = match tab {
-                        SetupTab::VideoAudio(_) => S::VideoAudio,
-                        SetupTab::ControlsHud(_) => S::ControlsHud,
+                        SetupTab::GameSettings(_) => S::GameSettings,
                         SetupTab::Csp(_) => S::Csp,
                         SetupTab::WeatherFx => S::WeatherFx,
                         SetupTab::System(_) => S::System,
                         SetupTab::App => S::App,
                     };
                     let tabs = [
-                        (S::VideoAudio, "Video & Audio", None),
-                        (S::ControlsHud, "Controls & HUD", None),
+                        (S::GameSettings, "Game Settings", None),
                         (S::Csp, "CSP & Lights", None),
                         (S::WeatherFx, "WeatherFX", None),
                         (S::System, "System", None),
@@ -878,63 +820,83 @@ impl App {
                     ];
                     if widgets::animated_tabs(ui, "sub_setup", &mut s, &tabs) {
                         next = Some(Route::Setup(match s {
-                            S::VideoAudio => SetupTab::VideoAudio(VideoView::Video),
-                            S::ControlsHud => SetupTab::ControlsHud(ControlsView::Controls),
+                            S::GameSettings => SetupTab::GameSettings(GameSettingsView::Settings),
                             S::Csp => SetupTab::Csp(CspView::Config),
                             S::WeatherFx => SetupTab::WeatherFx,
                             S::System => SetupTab::System(SystemView::InstallFinder),
                             S::App => SetupTab::App,
                         }));
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match tab {
-                        SetupTab::VideoAudio(cur) => {
-                            for (v, lbl) in [
-                                (VideoView::Profiles, "Profiles"),
-                                (VideoView::CameraReplay, "Camera & Replay"),
-                                (VideoView::Audio, "Audio"),
-                                (VideoView::VrTriple, "VR & Triple"),
-                                (VideoView::Video, "Video"),
-                            ] {
-                                if ui.selectable_label(cur == v, lbl).clicked() {
-                                    next = Some(Route::Setup(SetupTab::VideoAudio(v)));
-                                }
-                            }
-                        }
-                        SetupTab::ControlsHud(cur) => {
-                            for (v, lbl) in [
-                                (ControlsView::HudLayout, "HUD Layout"),
-                                (ControlsView::RigProfiles, "Rig Profiles"),
-                                (ControlsView::Ffb, "FFB"),
-                                (ControlsView::Controls, "Controls"),
-                            ] {
-                                if ui.selectable_label(cur == v, lbl).clicked() {
-                                    next = Some(Route::Setup(SetupTab::ControlsHud(v)));
-                                }
-                            }
-                        }
-                        SetupTab::Csp(cur) => {
-                            for (v, lbl) in [
-                                (CspView::Lighting, "Lighting"),
-                                (CspView::Installer, "Lights Patch"),
-                                (CspView::Config, "CSP Config"),
-                            ] {
-                                if ui.selectable_label(cur == v, lbl).clicked() {
-                                    next = Some(Route::Setup(SetupTab::Csp(v)));
-                                }
-                            }
-                        }
-                        SetupTab::System(cur) => {
-                            for (v, lbl) in [(SystemView::Logs, "Logs"), (SystemView::InstallFinder, "Installs")] {
-                                if ui.selectable_label(cur == v, lbl).clicked() {
-                                    next = Some(Route::Setup(SetupTab::System(v)));
-                                }
-                            }
-                        }
-                        SetupTab::WeatherFx | SetupTab::App => {}
-                    });
                 }
             }
         });
+
+        if let Some(route) = next {
+            self.set_route(route);
+        }
+    }
+
+    /// Inline segmented tool selector rendered inside the page canvas ONLY for
+    /// multi-tool workspaces (`Studio`, `Library`, `CSP & Lights`, `System`) — never a 3rd top bar.
+    fn workspace_switcher(&mut self, ui: &mut egui::Ui) {
+        let mut next: Option<Route> = None;
+        let items: Vec<(Route, &'static str)> = match self.route {
+            Route::Garage(GarageTab::Studio(_)) => vec![
+                (Route::Garage(GarageTab::Studio(StudioView::Skins)), "Skins"),
+                (Route::Garage(GarageTab::Studio(StudioView::LiveryPainter)), "Livery Painter"),
+                (Route::Garage(GarageTab::Studio(StudioView::PlateDesigner)), "Plates"),
+                (Route::Garage(GarageTab::Studio(StudioView::ModelTools)), "3D / AO"),
+            ],
+            Route::Garage(GarageTab::Library(_)) => vec![
+                (Route::Garage(GarageTab::Library(LibraryView::Mods)), "Mods"),
+                (Route::Garage(GarageTab::Library(LibraryView::Installer)), "Installer"),
+                (Route::Garage(GarageTab::Library(LibraryView::Collections)), "Collections"),
+                (Route::Garage(GarageTab::Library(LibraryView::Metadata)), "Metadata"),
+                (Route::Garage(GarageTab::Library(LibraryView::Exports)), "Exports"),
+            ],
+            Route::Setup(SetupTab::Csp(_)) => vec![
+                (Route::Setup(SetupTab::Csp(CspView::Config)), "CSP Config"),
+                (Route::Setup(SetupTab::Csp(CspView::Installer)), "Lights Patch"),
+                (Route::Setup(SetupTab::Csp(CspView::Lighting)), "Lighting"),
+            ],
+            Route::Setup(SetupTab::System(_)) => vec![
+                (Route::Setup(SetupTab::System(SystemView::InstallFinder)), "Installs"),
+                (Route::Setup(SetupTab::System(SystemView::Logs)), "Logs"),
+            ],
+            _ => return,
+        };
+
+        let accent = theme::active_accent(ui.ctx());
+        egui::Frame::new()
+            .fill(theme::SURFACE_ELEVATED)
+            .stroke(Stroke::new(1.0, theme::BORDER_SUBTLE))
+            .corner_radius(CornerRadius::same(8))
+            .inner_margin(Margin::same(3))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    for (route, label) in items {
+                        let active = self.route == route;
+                        let btn = egui::Button::new(
+                            RichText::new(label)
+                                .font(if active { theme::bold(12.5) } else { egui::FontId::proportional(12.5) })
+                                .color(if active { Color32::WHITE } else { theme::MUTED }),
+                        )
+                        .fill(if active { accent.gamma_multiply(0.24) } else { Color32::TRANSPARENT })
+                        .stroke(if active {
+                            Stroke::new(1.0, accent.gamma_multiply(0.65))
+                        } else {
+                            Stroke::NONE
+                        })
+                        .corner_radius(CornerRadius::same(6))
+                        .min_size(vec2(0.0, 26.0));
+                        if ui.add(btn).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !active {
+                            next = Some(route);
+                        }
+                    }
+                });
+            });
+        ui.add_space(10.0);
 
         if let Some(route) = next {
             self.set_route(route);
@@ -1014,17 +976,23 @@ impl App {
                 goto = Some(Route::Drive(DriveTab::QuickRace));
             }
 
-            widgets::pill(ui, mode_label, theme::INFO);
+            egui::Frame::new()
+                .fill(theme::SURFACE_RAISED)
+                .stroke(Stroke::new(1.0, theme::BORDER_ACTIVE))
+                .corner_radius(CornerRadius::same(6))
+                .inner_margin(Margin::symmetric(10, 4))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(mode_label.to_uppercase())
+                            .font(theme::mono(11.0))
+                            .color(theme::MUTED),
+                    );
+                });
 
-            // Compact live status / last notice readout.
+            // Compact live busy indicator (notices live solely in toasts to prevent duplicates).
             if self.busy {
                 ui.add(egui::Spinner::new().size(14.0));
                 ui.label(RichText::new("Working…").size(12.5).color(theme::MUTED));
-            } else if let Some(notice) = self.notices.front().cloned() {
-                let color = if notice.ok { theme::OK } else { theme::DANGER };
-                let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
-                ui.painter().circle_filled(dot.center(), 3.5, color);
-                ui.add(egui::Label::new(RichText::new(notice.text).size(12.5).color(theme::MUTED)).truncate());
             }
 
             // Right: Single unambiguous DRIVE ▶ CTA.
@@ -1062,7 +1030,7 @@ impl App {
         };
         let mut notices = Vec::new();
         if let Some(tool) = self.tools.get_mut(index) {
-            let full = ui.max_rect();
+            let full = ui.available_rect_before_wrap();
             let width = full.width().min(tool.content_width());
             let rect = Rect::from_center_size(full.center(), vec2(width, full.height()));
             ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| tool.ui(ui, &ctx, &mut notices));
@@ -1430,15 +1398,18 @@ impl eframe::App for App {
                     .fill(theme::SURFACE_BASE)
                     .inner_margin(Margin { left: 24, right: 24, top: 18, bottom: 14 }),
             )
-            .show(ui, |ui| match self.page {
-                Page::Home => pages::home(self, ui),
-                Page::Showroom => showroom::showroom(self, ui),
-                Page::Servers => servers::page(self, ui),
-                Page::Cars => pages::cars(self, ui),
-                Page::Tracks => pages::tracks(self, ui),
-                Page::Patches => pages::patches(self, ui),
-                Page::Settings => pages::settings(self, ui),
-                Page::Tool(i) => self.tool_page(ui, i),
+            .show(ui, |ui| {
+                self.workspace_switcher(ui);
+                match self.page {
+                    Page::Home => pages::home(self, ui),
+                    Page::Showroom => showroom::showroom(self, ui),
+                    Page::Servers => servers::page(self, ui),
+                    Page::Cars => pages::cars(self, ui),
+                    Page::Tracks => pages::tracks(self, ui),
+                    Page::Patches => pages::patches(self, ui),
+                    Page::Settings => pages::settings(self, ui),
+                    Page::Tool(i) => self.tool_page(ui, i),
+                }
             });
 
         // Sync if a legacy page (`pages.rs` / `showroom.rs`) mutated `self.page` directly.
