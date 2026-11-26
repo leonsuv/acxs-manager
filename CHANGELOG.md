@@ -1,6 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — Tauri v2 Rebuild & Content Manager Parity (Unreleased)
+
+### Architecture & UI
+- **Full Tauri v2 + React 19 + TypeScript + Tailwind CSS v4 + Three.js desktop rebuild** (`src-tauri/` + `ui/`), wired to the `acxs_manager` Rust library via **106 `#[tauri::command]` IPC handlers** (`1,221` core Rust unit tests passing).
+- **Clean 2-level navigation:** Left-aligned `Barlow Condensed` top bar (`Paddock | Drive | Garage | Online | Server | Telemetry | Setup`) with full-bleed `Paddock`, `Online`, and `Server` pages and an icon-led grouped Left Rail for multi-page sections.
+- **Persistent Bottom Paddock Dock** showing the armed car, track, mode badge, and primary `DRIVE` button, plus a `⌘K`/`Ctrl+K` Command Palette and Quick Switches / Motorsport Accent Theme switcher.
+
+### New Features
+- **Drive & Offline:** Mode-adaptive Drive Cockpit (`Weekend` with combinable Practice + Qualifying + Race toggles, `Track Day` + CSP AI Flood traffic, `Hotlap` + Ghost Car lead offset, `Drift`, `Drag` 1v1, `Time Attack`), interactive SVG Solar Arc time-of-day dial, Sol/Pure WeatherFX & dynamic track grip presets, multi-class AI Grid Builder + Adaptive AI ("Match My Pace"), Event medal tracking, and playable AI Championships with `race_out.json` import & success ballast.
+- **Online & Dedicated Server:** Full-bleed `Servers` browser (`Online | Watchlist | Recent | LAN`), `100% Joinable` smart filter, `acmanager://` & `acxs://` URI protocol + single-instance Named Pipe IPC, CSP minimum-build verification, `/SUB` booking, streaming missing-content auto-installer, slot-watch auto-join, full `server_cfg.ini` + CSP `extra_cfg` editor, AC Server UDP RCON live admin, and SSE `/spectator` web dashboard.
+- **Garage, Content & Standalone 3D Tools:** Interactive Three.js **3D Showroom**, `query.rs` search & multi-select batch ops on Cars/Tracks, **Track & Map 2D/3D Inspector** (`fast_lane.ai`, `surfaces.ini`, DRS, cameras, `ai_hints.ini`, `map.png` generator), car-aware **Setups** (`setup.ini` schema sliders, 3-way merge, Stint A/B testing), **Universal Drag-and-Drop Installer** (`.zip`/`.7z`/`.tar.gz`/`.rar`/folders/PP filters), **JSGME `MODS/`** overlay manager with conflict detection, opt-in **`data.acd` unpack/repack** & Dyno/Aero/Tyre curves, **SFX Sound Swapper**, crisp **TrueType HTML5 Canvas License Plates**, 2D/3D Livery Painter (DXT1/DXT5), and 2M-triangle BVH UV AO / **CSP `.vao-patch`** baker.
+- **Telemetry & Setup:** **Standalone 2D/3D Multi-Car Replay Viewer** + `.acreplay` binary clipper/trimmer, **Trajectory & Racing-Line Studio**, **Corner Coach**, tactile **Race Strategy** solver + **Broadcast Timing Tower**, **VR & Triple Screen** config, **Controls / FFB LUT / Per-Car FFB**, atomic **1-Click VR/Triple/Flat Rig Switcher**, and a full **CSP INI Config Editor** (module sidebar, header enable toggle, live sliders/toggles/enum chips, raw INI mode, online catalog & GitHub config sync).
+
+## Earlier Unreleased (0.3.x)
 
 New:
 

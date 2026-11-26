@@ -1,10 +1,41 @@
 # Building ACXS Manager
 
-ACXS Manager is a Rust project using edition 2024. It needs Rust 1.88 or newer,
-because the code uses let-chains, which were stabilized in 1.88. Use a current
-stable toolchain from rustup. The release output is a single `.exe` for Windows.
+ACXS Manager uses **Rust (Edition 2024, Rust 1.88+)** for the core library (`acxs_manager`) and **Tauri v2 + React 19 + TypeScript + Tailwind CSS v4 + Three.js** for the desktop application (`src-tauri/` + `ui/`).
 
-## Build the Windows executable on macOS
+## Build the Tauri v2 Desktop App on Windows (Recommended)
+
+### Prerequisites
+- **Rust (MSVC toolchain)** via `rustup` + Visual Studio Build Tools ("Desktop development with C++")
+- **Node.js 20+** (`npm`)
+- **WebView2 Runtime** (pre-installed on Windows 10/11)
+
+### Release Build (`.exe`)
+```bat
+cd ui
+npm install
+npm run build
+cd ..\src-tauri
+cargo build --release
+```
+Output: `src-tauri\target\release\acxs-tauri.exe`.
+
+### Development Mode (Live Reload)
+```bat
+npm --prefix ui run dev -- --port 1420 --strictPort
+```
+In a second terminal:
+```bat
+cargo run --manifest-path src-tauri\Cargo.toml
+```
+
+### Tests
+```bat
+cargo test --lib
+```
+
+---
+
+## Legacy egui Binary — Build on macOS / Windows
 
 One-time setup:
 

@@ -1,13 +1,15 @@
 # ACXS Manager
 
-ACXS Manager is one Rust desktop program for Assetto Corsa. It brings several
-separate management jobs into a single window: browsing installed content,
-editing content metadata and CSP settings, managing setups, lap records and
-replays, dedicated server files, graphics injectors, and a live telemetry view.
+ACXS Manager is a desktop manager for Assetto Corsa built on a pure-Rust core
+library (`acxs_manager`, 118 modules, 1,221 unit tests) paired with a modern
+**Tauri v2 + React 19 + TypeScript + Tailwind CSS v4 + Three.js** desktop UI
+(`src-tauri/` + `ui/`). It brings content management, racing & online server
+joining, dedicated server hosting/RCON, CSP & VR/Controls configuration,
+standalone 3D Showroom/Replay/Track/Trajectory tools, and live telemetry into
+one fast native window — without needing Content Manager.
 
-It is a Windows program. The user interface is built with egui/eframe. The core
-logic is a library (`acxs_manager`) with no UI code, so it can be tested on the
-host and cross-compiled for Windows.
+*(The legacy `egui`/`eframe` binary remains buildable from the root crate; the
+primary v0.4.0 desktop app is `src-tauri/` + `ui/`.)*
 
 ## A look at it
 
@@ -68,24 +70,24 @@ not built, is in [ROADMAP.md](ROADMAP.md).
 
 ## Building
 
-See [BUILD.md](BUILD.md) for the full steps. In short:
+See [BUILD.md](BUILD.md) for full Windows and macOS steps. In short:
 
-- Windows release binary from macOS: `./scripts/build-windows.sh`
-  (needs Homebrew `llvm` and `lld`, `cargo-xwin` and the
-  `x86_64-pc-windows-msvc` target). Output: `dist/ACXS-Manager.exe`.
-- Windows native: `cargo build --release` with the MSVC toolchain.
-
-## Tests
-
-```sh
-cargo test --lib
-```
-
-This runs the unit tests of the core library modules. The user interface is in the
-binary and has no automated tests.
-
-Last run: 907 tests, all passed (macOS host, `cargo test --lib --locked`). The
-Windows CI workflow listed in ROADMAP.md is not in the repository yet.
+- **Tauri v2 Desktop App (v0.4.0, Windows native):**
+  ```bat
+  cd ui && npm install && npm run build
+  cd ..\src-tauri && cargo build --release
+  ```
+  Output: `src-tauri\target\release\acxs-tauri.exe` (or run `npx tauri build` for a Windows NSIS/MSI installer).
+- **Tauri v2 Dev Mode (macOS / Windows):**
+  ```sh
+  npm --prefix ui run dev -- --port 1420 --strictPort
+  cargo run --manifest-path src-tauri/Cargo.toml
+  ```
+- **Core library tests (host):**
+  ```sh
+  cargo test --lib
+  ```
+  Last run: **1,221 tests passed, 0 failed** (macOS host).
 
 ## Project layout
 

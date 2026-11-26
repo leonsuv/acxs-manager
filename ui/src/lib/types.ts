@@ -7,6 +7,7 @@ export type Pillar =
   | "drive"
   | "garage"
   | "online"
+  | "server"
   | "telemetry"
   | "setup";
 

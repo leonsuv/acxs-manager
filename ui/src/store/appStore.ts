@@ -73,10 +73,12 @@ export const PILLAR_NAV: PillarDefinition[] = [
   {
     id: "online",
     label: "Online",
-    subTabs: [
-      { id: "servers", label: "Server Browser", group: "Multiplayer" },
-      { id: "dedicated", label: "Dedicated Server", group: "Multiplayer" },
-    ],
+    subTabs: [],
+  },
+  {
+    id: "server",
+    label: "Server",
+    subTabs: [],
   },
   {
     id: "telemetry",

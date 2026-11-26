@@ -232,13 +232,9 @@ function ActiveView() {
           return <ShowroomPage />;
       }
     case "online":
-      switch (subTab) {
-        case "dedicated":
-          return <DedicatedServerPage />;
-        case "servers":
-        default:
-          return <ServersPage />;
-      }
+      return <ServersPage />;
+    case "server":
+      return <DedicatedServerPage />;
     case "telemetry":
       switch (subTab) {
         case "live":
