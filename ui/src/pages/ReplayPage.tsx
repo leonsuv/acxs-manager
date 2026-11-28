@@ -25,44 +25,17 @@ import {
 } from "../components/Primitives";
 import { Viewport3D } from "../components/Viewport3D";
 
-const DEMO_REPLAYS: ReplaySummary[] = [
-  {
-    filename: "spa_gt3_endurance_final_lap.acreplay",
-    path: "/Documents/Assetto Corsa/replay/spa_gt3_endurance_final_lap.acreplay",
-    sizeBytes: 48_200_000,
-    modifiedAt: "Today · 21:35",
-    carId: "ks_porsche_911_gt3_r_2016",
-    trackId: "spa",
-    durationSec: 284,
-  },
-  {
-    filename: "monza_quali_pb_1_48_4.acreplay",
-    path: "/Documents/Assetto Corsa/replay/monza_quali_pb_1_48_4.acreplay",
-    sizeBytes: 24_600_000,
-    modifiedAt: "Yesterday · 19:52",
-    carId: "ks_ferrari_488_gt3",
-    trackId: "monza",
-    durationSec: 132,
-  },
-  {
-    filename: "nordschleife_touristenfahrten_clean.acreplay",
-    path: "/Documents/Assetto Corsa/replay/nordschleife_touristenfahrten_clean.acreplay",
-    sizeBytes: 118_400_000,
-    modifiedAt: "3 days ago · 22:18",
-    carId: "ks_mclaren_p1_gtr",
-    trackId: "ks_nordschleife",
-    durationSec: 428,
-  },
-];
-
 function formatTime(sec: number): string {
   const m = Math.floor(sec / 60);
   const s = Math.floor(sec % 60);
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
-function formatSize(bytes: number): string {
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+function formatSize(bytes?: number | null): string {
+  const n = typeof bytes === "number" && Number.isFinite(bytes) ? bytes : 0;
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${n} B`;
 }
 
 export default function ReplayPage() {
@@ -70,7 +43,6 @@ export default function ReplayPage() {
   const [replays, setReplays] = useState<ReplaySummary[]>([]);
   const [selectedName, setSelectedName] = useState("");
   const [loading, setLoading] = useState(true);
-  const [usingDemo, setUsingDemo] = useState(false);
 
   const [viewMode, setViewMode] = useState<"2d" | "3d">("2d");
   const [cameraMode, setCameraMode] = useState<"chase" | "freefly" | "tv">("chase");
@@ -89,17 +61,15 @@ export default function ReplayPage() {
       const list = await api.listReplays();
       if (list && list.length > 0) {
         setReplays(list);
-        setUsingDemo(false);
         setSelectedName((prev) => prev || list[0].filename);
       } else {
-        setReplays(DEMO_REPLAYS);
-        setUsingDemo(true);
-        setSelectedName((prev) => prev || DEMO_REPLAYS[0].filename);
+        setReplays([]);
+        setSelectedName("");
       }
-    } catch {
-      setReplays(DEMO_REPLAYS);
-      setUsingDemo(true);
-      setSelectedName(DEMO_REPLAYS[0].filename);
+    } catch (err) {
+      setReplays([]);
+      setSelectedName("");
+      notify("Failed to load replays", "error", String(err));
     } finally {
       setLoading(false);
     }
@@ -188,7 +158,6 @@ export default function ReplayPage() {
         subtitle="Inspect multi-car track telemetry in 2D or 3D, trim .acreplay highlights, and launch directly into Assetto Corsa."
         actions={
           <>
-            {usingDemo && <Badge variant="info" dot>Sample Replays</Badge>}
             <Button
               variant="secondary"
               size="sm"
@@ -239,8 +208,11 @@ export default function ReplayPage() {
                     {r.filename}
                   </div>
                   <div className="flex items-center justify-between mt-1.5 text-[11px] font-mono text-[var(--text-secondary)]">
-                    <span>{r.trackId ?? "circuit"} · {formatTime(r.durationSec ?? 180)}</span>
-                    <span>{formatSize(r.sizeBytes)}</span>
+                    <span className="truncate">
+                      {r.trackId ?? r.place ?? "Replay"}
+                      {r.durationSec ? ` · ${formatTime(r.durationSec)}` : ""}
+                    </span>
+                    <span className="shrink-0 ml-2">{formatSize(r.sizeBytes)}</span>
                   </div>
                   <div className="text-[10px] text-[var(--text-muted)] mt-1">
                     {r.modifiedAt}

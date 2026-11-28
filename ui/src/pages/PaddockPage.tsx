@@ -32,8 +32,9 @@ const SURPRISE_MODES: SessionMode[] = [
   "Drift",
 ];
 
-function formatNumber(n: number, decimals = 0): string {
-  return n.toLocaleString("en-US", {
+function formatNumber(n: number | undefined | null, decimals = 0): string {
+  const safe = typeof n === "number" && Number.isFinite(n) ? n : 0;
+  return safe.toLocaleString("en-US", {
     minimumFractionDigits: decimals,
     maximumFractionDigits: decimals,
   });
@@ -215,7 +216,7 @@ export function PaddockPage() {
   ];
 
   return (
-    <div className="h-full overflow-y-auto px-6 py-6 space-y-6 animate-fade-in">
+    <div className="h-full overflow-y-auto px-6 py-6 pb-10 space-y-6 animate-fade-in">
       {/* First-Run AC Folder Onboarding Banner */}
       {!settings.acRoot && (
         <div className="glass-panel rounded-2xl p-4 sm:p-5 border border-[var(--accent-border)] relative overflow-hidden">
@@ -252,13 +253,13 @@ export function PaddockPage() {
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <div className="flex flex-wrap items-center gap-2 flex-1 lg:max-w-xl">
               <input
                 type="text"
                 value={acPathInput}
                 onChange={(e) => setAcPathInput(e.target.value)}
                 placeholder="/path/to/steamapps/common/assettocorsa"
-                className="h-9 w-64 sm:w-72 px-3 rounded-lg bg-black/50 border border-white/[0.1] text-xs font-mono text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent-border)] outline-none"
+                className="h-9 flex-1 min-w-[260px] max-w-md px-3 rounded-lg bg-black/50 border border-white/[0.1] text-xs font-mono text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent-border)] outline-none"
               />
               <Button
                 variant="secondary"
@@ -439,8 +440,17 @@ export function PaddockPage() {
 
           {/* Armed Circuit Glass Pill Card */}
           <div
+            role="button"
+            tabIndex={0}
+            aria-label={`Armed circuit: ${armedTrack?.name ?? armedSession.trackName}. Activate to change circuit`}
             onClick={() => navigate("drive", "quick-race")}
-            className="glass-panel rounded-xl p-3.5 w-full xl:w-[320px] shrink-0 cursor-pointer group hover:border-white/[0.18] transition-all"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                navigate("drive", "quick-race");
+              }
+            }}
+            className="glass-panel rounded-xl p-3.5 w-full xl:w-[360px] shrink-0 cursor-pointer group hover:border-white/[0.18] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
           >
             <div className="flex items-center gap-3.5">
               <div className="w-20 h-14 rounded-lg overflow-hidden bg-black/50 border border-white/[0.08] shrink-0 relative">
@@ -463,18 +473,18 @@ export function PaddockPage() {
                 <div className="text-sm font-semibold text-[var(--text-primary)] truncate">
                   {armedTrack?.name ?? armedSession.trackName}
                 </div>
-                <div className="flex items-center gap-2 text-[11px] font-mono text-[var(--text-muted)] mt-0.5 tabular-nums">
-                  <span>{armedTrack?.country ?? "International"}</span>
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] font-mono text-[var(--text-muted)] mt-0.5 tabular-nums">
+                  <span className="whitespace-nowrap">{armedTrack?.country ?? "International"}</span>
                   {armedTrack?.length && (
                     <>
                       <span>·</span>
-                      <span>{armedTrack.length}</span>
+                      <span className="whitespace-nowrap">{armedTrack.length}</span>
                     </>
                   )}
                   {armedTrack?.pitboxes && (
                     <>
                       <span>·</span>
-                      <span>{armedTrack.pitboxes} pits</span>
+                      <span className="whitespace-nowrap">{armedTrack.pitboxes} pits</span>
                     </>
                   )}
                 </div>

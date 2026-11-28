@@ -316,12 +316,163 @@ impl CarScene {
         if let Some(bytes) = self.skin_overrides.get(&key) {
             return Some(bytes.as_slice());
         }
+        // Also match by file stem in case a skin provides `.png` for an embedded `.dds` (or vice versa).
+        if let Some(stem) = Path::new(&key).file_stem().and_then(|s| s.to_str()) {
+            for (ov_name, bytes) in &self.skin_overrides {
+                if Path::new(ov_name)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s == stem)
+                {
+                    return Some(bytes.as_slice());
+                }
+            }
+        }
         self.scene
             .textures
             .iter()
             .find(|t| t.name.eq_ignore_ascii_case(name))
             .map(|t| t.bytes.as_slice())
     }
+}
+
+fn encode_base64(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = u32::from(chunk[0]);
+        let b1 = if chunk.len() > 1 { u32::from(chunk[1]) } else { 0 };
+        let b2 = if chunk.len() > 2 { u32::from(chunk[2]) } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 { TABLE[((n >> 6) & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { TABLE[(n & 63) as usize] as char } else { '=' });
+    }
+    out
+}
+
+fn decode_to_dynamic_image(bytes: &[u8]) -> Option<image::DynamicImage> {
+    if bytes.is_empty() {
+        return None;
+    }
+    if bytes.len() >= 4 && &bytes[..4] == b"DDS " {
+        let rgba = crate::dds::decode(bytes).ok()?;
+        let buf = image::RgbaImage::from_raw(rgba.width, rgba.height, rgba.pixels)?;
+        Some(image::DynamicImage::ImageRgba8(buf))
+    } else {
+        image::load_from_memory(bytes).ok()
+    }
+}
+
+fn encode_dynamic_image_data_url(
+    resized: &image::DynamicImage,
+    keep_alpha: bool,
+) -> Option<String> {
+    let has_translucent_alpha = if keep_alpha {
+        let rgba = resized.to_rgba8();
+        rgba.pixels().any(|p| p.0[3] < 250)
+    } else {
+        false
+    };
+
+    let mut encoded = Vec::new();
+    let mime = if has_translucent_alpha {
+        let mut cursor = io::Cursor::new(&mut encoded);
+        resized.write_to(&mut cursor, image::ImageFormat::Png).ok()?;
+        "image/png"
+    } else {
+        let rgb = resized.to_rgb8();
+        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, 86);
+        enc.encode_image(&rgb).ok()?;
+        "image/jpeg"
+    };
+
+    Some(format!("data:{mime};base64,{}", encode_base64(&encoded)))
+}
+
+/// Decodes raw DDS/PNG/JPEG texture bytes, optionally downscales to `max_side`,
+/// and returns a browser-ready `data:image/...;base64,...` URL.
+pub fn encode_texture_data_url(bytes: &[u8], max_side: u32, keep_alpha: bool) -> Option<String> {
+    let dyn_img = decode_to_dynamic_image(bytes)?;
+    let resized = if dyn_img.width() > max_side || dyn_img.height() > max_side {
+        dyn_img.resize(max_side, max_side, image::imageops::FilterType::Triangle)
+    } else {
+        dyn_img
+    };
+    encode_dynamic_image_data_url(&resized, keep_alpha)
+}
+
+fn composite_car_paint_rgba(
+    diff_rgba: &mut image::RgbaImage,
+    det_rgba: &image::RgbaImage,
+    detail_uv_multiplier: f32,
+    keep_alpha: bool,
+) -> bool {
+    let (w, h) = diff_rgba.dimensions();
+    let (dw, dh) = det_rgba.dimensions();
+    if w == 0 || h == 0 || dw == 0 || dh == 0 {
+        return false;
+    }
+
+    let mult = if detail_uv_multiplier.is_finite() && detail_uv_multiplier > 0.01 {
+        detail_uv_multiplier
+    } else {
+        1.0
+    };
+    let w_f = w as f32;
+    let h_f = h as f32;
+    let dw_f = dw as f32;
+    let dh_f = dh as f32;
+
+    for (x, y, px) in diff_rgba.enumerate_pixels_mut() {
+        let u = (x as f32 + 0.5) / w_f;
+        let v = (y as f32 + 0.5) / h_f;
+        let dx = (((u * mult).rem_euclid(1.0)) * dw_f) as u32 % dw;
+        let dy = (((v * mult).rem_euclid(1.0)) * dh_f) as u32 % dh;
+        let det = det_rgba.get_pixel(dx, dy);
+
+        // diffuse.a == 0 -> full detail tint (e.g. carpaint body); diffuse.a == 255 -> keep diffuse decal.
+        let alpha_mask = f32::from(px.0[3]) / 255.0;
+        let one_minus_a = 1.0 - alpha_mask;
+        for c in 0..3 {
+            let det_factor = (f32::from(det.0[c]) / 255.0) * one_minus_a + alpha_mask;
+            px.0[c] = (f32::from(px.0[c]) * det_factor).round().clamp(0.0, 255.0) as u8;
+        }
+        if !keep_alpha {
+            px.0[3] = 255;
+        }
+    }
+    true
+}
+
+/// Composites Assetto Corsa `ksPerPixelMultiMap*` car-paint textures where
+/// `txDiffuse` (often `skin_00.dds`) holds AO/decals and its alpha channel
+/// masks `txDetail` (often `metal_detail.dds` tiled by `detail_uv_multiplier`):
+/// `rgb = diffuse.rgb * lerp(detail.rgb, 1.0, diffuse.a)`.
+pub fn encode_composited_car_paint_data_url(
+    diffuse_bytes: &[u8],
+    detail_bytes: &[u8],
+    detail_uv_multiplier: f32,
+    max_side: u32,
+    keep_alpha: bool,
+) -> Option<String> {
+    let diffuse_dyn = decode_to_dynamic_image(diffuse_bytes)?;
+    let detail_dyn = decode_to_dynamic_image(detail_bytes)?;
+
+    let resized_diffuse = if diffuse_dyn.width() > max_side || diffuse_dyn.height() > max_side {
+        diffuse_dyn.resize(max_side, max_side, image::imageops::FilterType::Triangle)
+    } else {
+        diffuse_dyn
+    };
+
+    let mut diff_rgba = resized_diffuse.to_rgba8();
+    let det_rgba = detail_dyn.to_rgba8();
+    if !composite_car_paint_rgba(&mut diff_rgba, &det_rgba, detail_uv_multiplier, keep_alpha) {
+        return None;
+    }
+
+    encode_dynamic_image_data_url(&image::DynamicImage::ImageRgba8(diff_rgba), keep_alpha)
 }
 
 // ---------------------------------------------------------------------------
@@ -1047,5 +1198,41 @@ mod tests {
         assert_eq!(car.texture_bytes("road.png"), Some(fake_png.as_slice()));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn composites_detail_paint_over_diffuse_alpha_mask() {
+        use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
+
+        let encode_png = |img: &RgbaImage| -> Vec<u8> {
+            let mut out = Vec::new();
+            DynamicImage::ImageRgba8(img.clone())
+                .write_to(&mut io::Cursor::new(&mut out), ImageFormat::Png)
+                .unwrap();
+            out
+        };
+
+        // Left pixel has alpha=0 (tinted by detail); right pixel has alpha=255 (keeps decal).
+        let mut diff = RgbaImage::new(2, 1);
+        diff.put_pixel(0, 0, Rgba([200, 200, 200, 0]));
+        diff.put_pixel(1, 0, Rgba([240, 240, 240, 255]));
+
+        let mut det = RgbaImage::new(1, 1);
+        det.put_pixel(0, 0, Rgba([255, 102, 0, 64]));
+
+        let url = encode_composited_car_paint_data_url(
+            &encode_png(&diff),
+            &encode_png(&det),
+            35.0,
+            256,
+            false,
+        )
+        .expect("composited image");
+        assert!(url.starts_with("data:image/jpeg;base64,") || url.starts_with("data:image/png;base64,"));
+
+        // Verify production pixel compositor directly as well as end-to-end PNG/JPEG data URL.
+        assert!(composite_car_paint_rgba(&mut diff, &det, 35.0, false));
+        assert_eq!(diff.get_pixel(0, 0).0, [200, 80, 0, 255]);
+        assert_eq!(diff.get_pixel(1, 0).0, [240, 240, 240, 255]);
     }
 }

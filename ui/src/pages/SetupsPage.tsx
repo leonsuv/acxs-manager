@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckCircle2,
   FileCode2,
@@ -12,7 +12,7 @@ import {
   Trophy,
   Wrench,
 } from "lucide-react";
-import { api, assetUrl } from "../lib/api";
+import { api, assetUrl, isTauri } from "../lib/api";
 import type {
   CarEntry,
   SetupDiffEntry,
@@ -107,8 +107,9 @@ export function SetupsPage() {
   const [doc, setDoc] = useState<SetupDocument | null>(null);
   const [values, setValues] = useState<Record<string, number>>({});
   const [initialValues, setInitialValues] = useState<Record<string, number>>({});
-  const [activeSection, setActiveSection] = useState<string>("Tyres");
+  const [activeSection, setActiveSection] = useState<string>("all");
   const [saving, setSaving] = useState(false);
+  const localSetupDocsRef = useRef<Record<string, SetupDocument>>({});
 
   // Diff & 3-Way Merge state
   const [diffLeftPath, setDiffLeftPath] = useState<string>("");
@@ -227,6 +228,18 @@ export function SetupsPage() {
       ? "endurance"
       : "base";
 
+    const cachedLocal = localSetupDocsRef.current[activeSetup.path];
+    if (!isTauri() && cachedLocal) {
+      setDoc(cachedLocal);
+      const map: Record<string, number> = {};
+      cachedLocal.parameters.forEach((p) => {
+        map[p.key] = p.value;
+      });
+      setValues(map);
+      setInitialValues(map);
+      return;
+    }
+
     api
       .readSetup(activeSetup.path, selectedCar.path)
       .then((loaded) => {
@@ -234,7 +247,7 @@ export function SetupsPage() {
         const resolved: SetupDocument =
           loaded && loaded.parameters?.length
             ? loaded
-            : {
+            : cachedLocal ?? {
                 path: activeSetup.path,
                 carId: activeSetup.carId,
                 trackId: activeSetup.trackId,
@@ -247,15 +260,15 @@ export function SetupsPage() {
         });
         setValues(map);
         setInitialValues(map);
-        const sections = Array.from(new Set(resolved.parameters.map((p) => p.section)));
-        if (sections.length > 0 && !sections.includes(activeSection)) {
-          setActiveSection(sections[0]);
-        }
+        const secs = Array.from(new Set(resolved.parameters.map((p) => p.section)));
+        setActiveSection((prev) =>
+          prev !== "all" && secs.length > 0 && !secs.includes(prev) ? "all" : prev
+        );
       })
       .catch(() => {
         if (cancelled) return;
         const fallbackParams = buildDefaultParameters(variant);
-        const resolved: SetupDocument = {
+        const resolved: SetupDocument = cachedLocal ?? {
           path: activeSetup.path,
           carId: activeSetup.carId,
           trackId: activeSetup.trackId,
@@ -263,7 +276,7 @@ export function SetupsPage() {
         };
         setDoc(resolved);
         const map: Record<string, number> = {};
-        fallbackParams.forEach((p) => (map[p.key] = p.value));
+        resolved.parameters.forEach((p) => (map[p.key] = p.value));
         setValues(map);
         setInitialValues(map);
       });
@@ -325,15 +338,65 @@ export function SetupsPage() {
     return Array.from(new Set(doc.parameters.map((p) => p.section)));
   }, [doc]);
 
+  const modifiedBySection = useMemo(() => {
+    const counts: Record<string, number> = {};
+    if (!doc) return counts;
+    for (const p of doc.parameters) {
+      if (values[p.key] !== initialValues[p.key]) {
+        counts[p.section] = (counts[p.section] ?? 0) + 1;
+      }
+    }
+    return counts;
+  }, [doc, values, initialValues]);
+
   const dirtyCount = useMemo(() => {
     return Object.keys(values).filter((k) => values[k] !== initialValues[k]).length;
   }, [values, initialValues]);
+
+  const resolveSetupPath = (carId: string, trackId: string, name: string): string => {
+    const sameDirExample = setups.find(
+      (s) =>
+        s.carId === carId &&
+        s.trackId === trackId &&
+        s.path &&
+        !s.path.startsWith("/setups/")
+    );
+    if (sameDirExample) {
+      const sepIdx = Math.max(
+        sameDirExample.path.lastIndexOf("/"),
+        sameDirExample.path.lastIndexOf("\\")
+      );
+      if (sepIdx >= 0) {
+        return `${sameDirExample.path.slice(0, sepIdx + 1)}${name}`;
+      }
+    }
+    const realExample = setups.find(
+      (s) => s.path && !s.path.startsWith("/setups/")
+    );
+    if (realExample) {
+      const m = realExample.path.match(/^(.*?[/\\]setups)[/\\]/i);
+      if (m) {
+        const sep = realExample.path.includes("\\") ? "\\" : "/";
+        return `${m[1]}${sep}${carId}${sep}${trackId}${sep}${name}`;
+      }
+    }
+    return `/setups/${carId}/${trackId}/${name}`;
+  };
 
   const handleSaveSetup = async () => {
     if (!activeSetup) return;
     setSaving(true);
     try {
       await api.saveSetup(activeSetup.path, values);
+      if (doc) {
+        localSetupDocsRef.current[activeSetup.path] = {
+          ...doc,
+          parameters: doc.parameters.map((p) => ({
+            ...p,
+            value: values[p.key] ?? p.value,
+          })),
+        };
+      }
       setInitialValues({ ...values });
       notify("Setup Saved", "success", activeSetup.name);
     } catch (err) {
@@ -343,37 +406,205 @@ export function SetupsPage() {
     }
   };
 
-  const handleCreateSetup = () => {
+  const handleCreateSetup = async () => {
     if (!selectedCar) return;
-    const trackId = selectedTrackFilter === "all" ? tracks[0]?.id ?? "spa" : selectedTrackFilter;
-    const name = `${trackId}_custom_${setups.length + 1}.ini`;
+    const trackId =
+      selectedTrackFilter === "all" ? tracks[0]?.id ?? "spa" : selectedTrackFilter;
+    const safeTrackId = trackId.replace(/[/\\:]/g, "_");
+    const name = `${safeTrackId}_custom_${setups.length + 1}.ini`;
+    const targetPath = resolveSetupPath(selectedCar.id, safeTrackId, name);
+    const variant =
+      trackId.includes("endurance") || trackId.includes("24h")
+        ? "endurance"
+        : "base";
+    const baseParams = doc?.parameters?.length
+      ? doc.parameters.map((p) => ({ ...p, value: values[p.key] ?? p.value }))
+      : buildDefaultParameters(variant);
+    const paramValues: Record<string, number> = {};
+    baseParams.forEach((p) => {
+      paramValues[p.key] = p.value;
+    });
+
+    let finalPath = targetPath;
+    try {
+      await api.saveSetup(targetPath, paramValues);
+      if (isTauri() && targetPath.startsWith("/setups/")) {
+        const refreshed = await api.listSetups().catch(() => []);
+        const stem = name.replace(/\.ini$/i, "").toLowerCase();
+        const created = refreshed.find(
+          (s) =>
+            s.carId === selectedCar.id &&
+            s.name.replace(/\.ini$/i, "").toLowerCase() === stem
+        );
+        if (created?.path) {
+          finalPath = created.path;
+        }
+      }
+    } catch (err) {
+      if (isTauri()) {
+        notify("Failed to create setup", "error", String(err));
+        return;
+      }
+    }
+
+    const newDoc: SetupDocument = {
+      path: finalPath,
+      carId: selectedCar.id,
+      trackId: safeTrackId,
+      parameters: baseParams,
+    };
     const newItem: SetupFileSummary = {
       name,
       carId: selectedCar.id,
-      trackId,
-      path: `/setups/${selectedCar.id}/${trackId}/${name}`,
+      trackId: safeTrackId,
+      path: finalPath,
       modifiedAt: "Just now",
     };
-    setSetups((prev) => [newItem, ...prev]);
-    setSelectedSetupPath(newItem.path);
+
+    localSetupDocsRef.current[finalPath] = newDoc;
+    setSetups((prev) => [newItem, ...prev.filter((s) => s.path !== finalPath)]);
+    setSelectedSetupPath(finalPath);
+    setDoc(newDoc);
+    setValues(paramValues);
+    setInitialValues(paramValues);
     notify("Created new setup", "success", name);
   };
 
-  const handleSaveMerged = () => {
+  const handleSaveMerged = async () => {
     if (!selectedCar) return;
     const name = `merged_${Date.now().toString().slice(-4)}.ini`;
-    const trackId = tracks[0]?.id ?? "spa";
+    const leftSetup = carSetups.find((s) => s.path === diffLeftPath);
+    const rawTrackId =
+      leftSetup?.trackId ??
+      (selectedTrackFilter !== "all" ? selectedTrackFilter : tracks[0]?.id ?? "spa");
+    const trackId = rawTrackId.replace(/[/\\:]/g, "_");
+    const targetPath = resolveSetupPath(selectedCar.id, trackId, name);
+
+    let baseParams: SetupParameter[] | null = null;
+    if (diffLeftPath) {
+      if (!isTauri() && localSetupDocsRef.current[diffLeftPath]) {
+        baseParams = localSetupDocsRef.current[diffLeftPath].parameters;
+      } else {
+        try {
+          const loaded = await api.readSetup(diffLeftPath, selectedCar.path);
+          if (loaded?.parameters?.length) baseParams = loaded.parameters;
+        } catch {
+          // fallback below
+        }
+      }
+    }
+    if (!baseParams || baseParams.length === 0) {
+      baseParams = buildDefaultParameters(
+        diffLeftPath.includes("quali") ? "quali" : "base"
+      );
+    }
+
+    const resolveTargetParamKey = (diffKey: string): string => {
+      const upper = diffKey.toUpperCase();
+      const exact = baseParams!.find((p) => p.key.toUpperCase() === upper);
+      if (exact) return exact.key;
+      const dot = diffKey.indexOf(".");
+      if (dot > 0) {
+        const stemUpper = diffKey.slice(0, dot).toUpperCase();
+        const byStem = baseParams!.find(
+          (p) => !p.key.includes(".") && p.key.toUpperCase() === stemUpper
+        );
+        if (byStem) return byStem.key;
+      } else {
+        const withValueUpper = `${upper}.VALUE`;
+        const byValue = baseParams!.find(
+          (p) => p.key.toUpperCase() === withValueUpper
+        );
+        if (byValue) return byValue.key;
+      }
+      return diffKey;
+    };
+
+    const mergedValues: Record<string, number> = {};
+    baseParams.forEach((p) => {
+      mergedValues[p.key] = p.value;
+    });
+
+    const diffByKey = new Map<string, number>();
+    for (const row of diffEntries) {
+      const pick = mergeChoice[row.key] ?? "right";
+      const leftNum = Number(row.leftValue);
+      const rightNum = Number(row.rightValue);
+      let resolvedVal: number | null = null;
+      if (pick === "left" && Number.isFinite(leftNum)) {
+        resolvedVal = leftNum;
+      } else if (pick === "right" && Number.isFinite(rightNum)) {
+        resolvedVal = rightNum;
+      } else if (
+        pick === "avg" &&
+        Number.isFinite(leftNum) &&
+        Number.isFinite(rightNum)
+      ) {
+        resolvedVal = Number(((leftNum + rightNum) / 2).toFixed(2));
+      } else if (Number.isFinite(rightNum)) {
+        resolvedVal = rightNum;
+      } else if (Number.isFinite(leftNum)) {
+        resolvedVal = leftNum;
+      }
+      if (resolvedVal !== null) {
+        const normalizedKey = resolveTargetParamKey(row.key);
+        mergedValues[normalizedKey] = resolvedVal;
+        diffByKey.set(normalizedKey, resolvedVal);
+      }
+    }
+
+    const mergedParams = baseParams.map((p) => ({
+      ...p,
+      value: diffByKey.get(p.key) ?? p.value,
+    }));
+
+    let finalPath = targetPath;
+    try {
+      await api.saveSetup(targetPath, mergedValues);
+      if (isTauri() && targetPath.startsWith("/setups/")) {
+        const refreshed = await api.listSetups().catch(() => []);
+        const stem = name.replace(/\.ini$/i, "").toLowerCase();
+        const created = refreshed.find(
+          (s) =>
+            s.carId === selectedCar.id &&
+            s.name.replace(/\.ini$/i, "").toLowerCase() === stem
+        );
+        if (created?.path) {
+          finalPath = created.path;
+        }
+      }
+    } catch (err) {
+      if (isTauri()) {
+        notify("Failed to save merged setup", "error", String(err));
+        return;
+      }
+    }
+
+    const mergedDoc: SetupDocument = {
+      path: finalPath,
+      carId: selectedCar.id,
+      trackId,
+      parameters: mergedParams,
+    };
+    localSetupDocsRef.current[finalPath] = mergedDoc;
     const mergedItem: SetupFileSummary = {
       name,
       carId: selectedCar.id,
       trackId,
-      path: `/setups/${selectedCar.id}/${trackId}/${name}`,
+      path: finalPath,
       modifiedAt: "Just now",
     };
-    setSetups((prev) => [mergedItem, ...prev]);
-    setSelectedSetupPath(mergedItem.path);
+    setSetups((prev) => [mergedItem, ...prev.filter((s) => s.path !== finalPath)]);
+    setSelectedSetupPath(finalPath);
+    setDoc(mergedDoc);
+    setValues(mergedValues);
+    setInitialValues(mergedValues);
     setModeTab("editor");
-    notify("3-Way Merge Saved", "success", `Created ${name} with ${diffEntries.length} resolved parameters`);
+    notify(
+      "3-Way Merge Saved",
+      "success",
+      `Created ${name} with ${diffEntries.length} resolved parameters`
+    );
   };
 
   const stintStats = (s: StintRecord) => {
@@ -608,62 +839,108 @@ export function SetupsPage() {
                     </div>
                   </div>
 
-                  {/* Section Filter Pills */}
+                  {/* Section Filter Pills ("All" stacked view + quick filters with per-section modified badges) */}
                   <div className="flex flex-wrap items-center gap-1.5 py-3 shrink-0">
-                    {sections.map((sec) => (
-                      <button
-                        key={sec}
-                        type="button"
-                        onClick={() => setActiveSection(sec)}
-                        className={`h-8 px-3 rounded-lg text-xs font-medium border transition-colors cursor-pointer ${
-                          activeSection === sec
-                            ? "bg-[var(--accent-soft)] text-[var(--accent)] border-[var(--accent-border)]"
-                            : "bg-white/[0.03] text-[var(--text-secondary)] border-white/[0.08] hover:text-white"
-                        }`}
-                      >
-                        {sec}
-                      </button>
-                    ))}
+                    <button
+                      type="button"
+                      onClick={() => setActiveSection("all")}
+                      className={`h-8 px-3 rounded-lg text-xs font-medium border transition-colors cursor-pointer flex items-center gap-1.5 ${
+                        activeSection === "all"
+                          ? "bg-[var(--accent-soft)] text-[var(--accent)] border-[var(--accent-border)]"
+                          : "bg-white/[0.03] text-[var(--text-secondary)] border-white/[0.08] hover:text-white"
+                      }`}
+                    >
+                      <span>All Sections</span>
+                      {dirtyCount > 0 && (
+                        <span className="px-1.5 py-0.2 rounded-full bg-amber-500/20 text-amber-300 font-mono text-[10px]">
+                          {dirtyCount}
+                        </span>
+                      )}
+                    </button>
+                    {sections.map((sec) => {
+                      const secDirty = modifiedBySection[sec] ?? 0;
+                      return (
+                        <button
+                          key={sec}
+                          type="button"
+                          onClick={() => setActiveSection(sec)}
+                          className={`h-8 px-3 rounded-lg text-xs font-medium border transition-colors cursor-pointer flex items-center gap-1.5 ${
+                            activeSection === sec
+                              ? "bg-[var(--accent-soft)] text-[var(--accent)] border-[var(--accent-border)]"
+                              : "bg-white/[0.03] text-[var(--text-secondary)] border-white/[0.08] hover:text-white"
+                          }`}
+                        >
+                          <span>{sec}</span>
+                          {secDirty > 0 && (
+                            <span className="px-1.5 py-0.2 rounded-full bg-amber-500/20 text-amber-300 font-mono text-[10px]">
+                              {secDirty}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
                   </div>
 
-                  {/* Tactile Parameter Sliders Grid */}
-                  <div className="flex-1 overflow-y-auto pr-1">
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      {doc.parameters
-                        .filter((p) => p.section === activeSection)
-                        .map((param) => {
-                          const currentVal = values[param.key] ?? param.value;
-                          const changed = currentVal !== initialValues[param.key];
-                          return (
-                            <div
-                              key={param.key}
-                              className={`p-3.5 rounded-xl border transition-colors ${
-                                changed
-                                  ? "bg-[var(--accent-soft)]/30 border-[var(--accent-border)]"
-                                  : "bg-white/[0.02] border-white/[0.06]"
-                              }`}
-                            >
-                              <Slider
-                                label={param.label}
-                                value={currentVal}
-                                min={param.min}
-                                max={param.max}
-                                step={param.step}
-                                unit={param.unit ?? ""}
-                                onChange={(v) =>
-                                  setValues((prev) => ({ ...prev, [param.key]: v }))
-                                }
-                              />
-                              <div className="flex items-center justify-between text-[10px] font-mono text-[var(--text-muted)] mt-1">
-                                <span>{param.key}</span>
-                                <span>
-                                  Range: {param.min} – {param.max}
-                                </span>
-                              </div>
+                  {/* Tactile Parameter Sliders Grid (Stacked Sections when "all" is active) */}
+                  <div className="flex-1 overflow-y-auto pr-1 space-y-5">
+                    {(activeSection === "all" ? sections : [activeSection]).map((sec) => {
+                      const secParams = doc.parameters.filter((p) => p.section === sec);
+                      if (secParams.length === 0) return null;
+                      const secDirty = modifiedBySection[sec] ?? 0;
+                      return (
+                        <div key={sec} className="space-y-2.5">
+                          <div className="flex items-center justify-between px-1 pb-1 border-b border-white/[0.06]">
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono text-xs font-semibold text-[var(--accent)]">
+                                [{sec}]
+                              </span>
+                              <span className="text-[11px] font-mono text-[var(--text-muted)]">
+                                {secParams.length} parameter{secParams.length === 1 ? "" : "s"}
+                              </span>
                             </div>
-                          );
-                        })}
-                    </div>
+                            {secDirty > 0 && (
+                              <Badge variant="warning" dot>
+                                {secDirty} modified
+                              </Badge>
+                            )}
+                          </div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                            {secParams.map((param) => {
+                              const currentVal = values[param.key] ?? param.value;
+                              const changed = currentVal !== initialValues[param.key];
+                              return (
+                                <div
+                                  key={param.key}
+                                  className={`p-3.5 rounded-xl border transition-colors ${
+                                    changed
+                                      ? "bg-[var(--accent-soft)]/30 border-[var(--accent-border)]"
+                                      : "bg-white/[0.02] border-white/[0.06]"
+                                  }`}
+                                >
+                                  <Slider
+                                    label={param.label}
+                                    value={currentVal}
+                                    min={param.min}
+                                    max={param.max}
+                                    step={param.step}
+                                    unit={param.unit ?? ""}
+                                    onChange={(v) =>
+                                      setValues((prev) => ({ ...prev, [param.key]: v }))
+                                    }
+                                  />
+                                  <div className="flex items-center justify-between text-[10px] font-mono text-[var(--text-muted)] mt-1">
+                                    <span>{param.key}</span>
+                                    <span>
+                                      Range: {param.min} – {param.max}
+                                    </span>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </>
               )}

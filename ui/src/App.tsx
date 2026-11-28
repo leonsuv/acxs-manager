@@ -32,6 +32,7 @@ import { AppProvider, PILLAR_NAV, useAppStore } from "./store/appStore";
 import { TopBar } from "./components/TopBar";
 import { BottomDock } from "./components/BottomDock";
 import { CommandPalette } from "./components/CommandPalette";
+import { ContextMenuProvider } from "./components/ContextMenu";
 import { ToastContainer } from "./components/ToastContainer";
 import { Button, Card, Skeleton } from "./components/Primitives";
 import type { SubTab } from "./lib/types";
@@ -293,7 +294,7 @@ function MainContent() {
   );
 
   return (
-    <div className="flex-1 min-h-0 flex overflow-hidden">
+    <div className="flex-1 min-h-0 min-w-0 w-full flex overflow-hidden">
       {/* Premium Unified Left Rail — grouped, icon-led, glassmorphic active pill */}
       {subTabs.length > 0 && (
         <aside className="w-[222px] shrink-0 border-r border-white/[0.06] bg-gradient-to-b from-[#0A0E16]/95 to-[#07090F]/95 px-3 py-4 flex flex-col gap-5 select-none overflow-y-auto">
@@ -357,13 +358,15 @@ function MainContent() {
 export default function App() {
   return (
     <AppProvider>
-      <div className="h-screen w-screen flex flex-col overflow-hidden acxs-atmosphere text-[var(--text-primary)]">
-        <TopBar />
-        <MainContent />
-        <BottomDock />
-        <CommandPalette />
-        <ToastContainer />
-      </div>
+      <ContextMenuProvider>
+        <div className="h-screen w-full max-w-full flex flex-col overflow-hidden overflow-x-hidden acxs-atmosphere text-[var(--text-primary)]">
+          <TopBar />
+          <MainContent />
+          <BottomDock />
+          <CommandPalette />
+          <ToastContainer />
+        </div>
+      </ContextMenuProvider>
     </AppProvider>
   );
 }

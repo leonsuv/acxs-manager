@@ -47,127 +47,6 @@ interface CspModuleSpec {
   entries: CspEntry[];
 }
 
-const BUILTIN_CSP_MODULES: CspModuleSpec[] = [
-  {
-    file: "lighting_fx.ini",
-    title: "Lighting FX",
-    category: "Graphics",
-    description: "Dynamic car headlights, track lights, bounce lighting, and headlight shadows.",
-    entries: [
-      { section: "BASIC", key: "ENABLED", label: "Enable Lighting FX", kind: "bool", value: "1", defaultValue: "1" },
-      { section: "LIGHTING", key: "BRIGHTNESS_MULT", label: "Brightness Multiplier", description: "Overall intensity of dynamic track & car lights", kind: "number", value: "1.00", defaultValue: "1.00", min: 0.2, max: 3.0, step: 0.05, unit: "×" },
-      { section: "LIGHTING", key: "BOUNCED_LIGHT_MULT", label: "Bounced Light Intensity", kind: "number", value: "1.00", defaultValue: "1.00", min: 0.0, max: 2.5, step: 0.05, unit: "×" },
-      { section: "SHADOWS", key: "HEADLIGHTS_SHADOWS", label: "Dynamic Headlight Shadows", kind: "bool", value: "1", defaultValue: "0" },
-      { section: "SHADOWS", key: "SHADOW_RESOLUTION", label: "Shadow Map Resolution", kind: "enum", value: "1024", defaultValue: "512", options: ["256", "512", "1024", "2048"] },
-      { section: "DISTANCE", key: "MAX_DISTANCE", label: "Max Light Distance", kind: "number", value: "600", defaultValue: "500", min: 150, max: 1500, step: 50, unit: " m" },
-    ],
-  },
-  {
-    file: "extra_fx.ini",
-    title: "Extra FX",
-    category: "Graphics",
-    description: "Deferred rendering pass: SSLR, TAA, SSAO/HBAO, volumetric fog, and motion blur.",
-    entries: [
-      { section: "BASIC", key: "ENABLED", label: "Enable Extra FX", kind: "bool", value: "1", defaultValue: "0" },
-      { section: "LOCAL_REFLECTIONS", key: "ENABLED", label: "Screen-Space Local Reflections (SSLR)", kind: "bool", value: "1", defaultValue: "0" },
-      { section: "LOCAL_REFLECTIONS", key: "QUALITY", label: "SSLR Quality", kind: "enum", value: "High", defaultValue: "Medium", options: ["Low", "Medium", "High", "Ultra"] },
-      { section: "TEMPORAL_AA", key: "ENABLED", label: "Temporal Anti-Aliasing (TAA)", kind: "bool", value: "0", defaultValue: "0" },
-      { section: "AMBIENT_OCCLUSION", key: "ENABLED", label: "Screen-Space Ambient Occlusion (SSAO)", kind: "bool", value: "1", defaultValue: "1" },
-      { section: "AMBIENT_OCCLUSION", key: "OPACITY", label: "SSAO Strength", kind: "number", value: "0.75", defaultValue: "0.75", min: 0.1, max: 1.5, step: 0.05, unit: "×" },
-      { section: "MOTION_BLUR", key: "QUALITY", label: "Motion Blur Samples", kind: "number", value: "12", defaultValue: "8", min: 0, max: 32, step: 2 },
-    ],
-  },
-  {
-    file: "grass_fx.ini",
-    title: "Grass FX",
-    category: "Track",
-    description: "Procedural 3D grass blades, flowers, and trackside foliage.",
-    entries: [
-      { section: "BASIC", key: "ENABLED", label: "Enable Grass FX", kind: "bool", value: "1", defaultValue: "1" },
-      { section: "BASIC", key: "DENSITY", label: "Grass Density", kind: "number", value: "1.0", defaultValue: "1.0", min: 0.2, max: 2.0, step: 0.1, unit: "×" },
-      { section: "BASIC", key: "VIEW_DISTANCE", label: "Render Distance", kind: "number", value: "120", defaultValue: "100", min: 30, max: 250, step: 10, unit: " m" },
-      { section: "BASIC", key: "CAST_SHADOWS", label: "Grass Self-Shadowing", kind: "bool", value: "1", defaultValue: "0" },
-    ],
-  },
-  {
-    file: "weather_fx.ini",
-    title: "Weather FX",
-    category: "Environment",
-    description: "Dynamic sky, Sol / Pure controller integration, and seasonal foliage.",
-    entries: [
-      { section: "BASIC", key: "ENABLED", label: "Enable Weather FX", kind: "bool", value: "1", defaultValue: "1" },
-      { section: "BASIC", key: "CONTROLLER", label: "Active Controller", kind: "enum", value: "pure", defaultValue: "base", options: ["pure", "sol2", "base"] },
-      { section: "BASIC", key: "USE_SEASONAL_ADJUSTMENTS", label: "Seasonal Track Foliage", kind: "bool", value: "1", defaultValue: "1" },
-      { section: "CLOUDS", key: "CLOUD_SHADOWS", label: "Dynamic Cloud Shadows", kind: "bool", value: "1", defaultValue: "1" },
-    ],
-  },
-  {
-    file: "rain_fx.ini",
-    title: "Rain FX",
-    category: "Environment",
-    description: "Wet track reflections, puddles, wiper streaks, and spray particles.",
-    entries: [
-      { section: "BASIC", key: "ENABLED", label: "Enable Rain FX", kind: "bool", value: "1", defaultValue: "1" },
-      { section: "PUDDLES", key: "PUDDLE_REFLECTIONS", label: "Real-Time Puddle Reflections", kind: "bool", value: "1", defaultValue: "1" },
-      { section: "WINDSCREEN", key: "WIPER_STREAKS", label: "Wiper Water Streaks", kind: "bool", value: "1", defaultValue: "1" },
-      { section: "SPRAY", key: "SPRAY_INTENSITY", label: "Tyre Spray Density", kind: "number", value: "1.0", defaultValue: "1.0", min: 0.0, max: 2.0, step: 0.1, unit: "×" },
-    ],
-  },
-  {
-    file: "neck.ini",
-    title: "Neck FX",
-    category: "Camera",
-    description: "Helmet look-to-apex, horizon lock, G-force head lean, and VR tilt smoothing.",
-    entries: [
-      { section: "BASIC", key: "ENABLED", label: "Enable Neck FX", kind: "bool", value: "1", defaultValue: "0" },
-      { section: "LOOK_AHEAD", key: "ANGLE_DEG", label: "Look-to-Apex Angle", kind: "number", value: "18", defaultValue: "15", min: 0, max: 45, step: 1, unit: "°" },
-      { section: "G_FORCE", key: "LATERAL_LEAN", label: "Lateral G-Force Lean", kind: "number", value: "0.45", defaultValue: "0.50", min: 0.0, max: 1.5, step: 0.05, unit: "×" },
-      { section: "HORIZON", key: "LOCK_TO_HORIZON", label: "Horizon Lock Strength", kind: "number", value: "0.60", defaultValue: "0.00", min: 0.0, max: 1.0, step: 0.05 },
-    ],
-  },
-  {
-    file: "ffb_tweaks.ini",
-    title: "FFB Tweaks",
-    category: "Physics",
-    description: "More physically accurate gyro, MacPherson strut FFB, and range compression.",
-    entries: [
-      { section: "BASIC", key: "ENABLED", label: "Enable FFB Tweaks", kind: "bool", value: "1", defaultValue: "1" },
-      { section: "GYRO", key: "ENABLED", label: "Physically Accurate Gyro", kind: "bool", value: "1", defaultValue: "1" },
-      { section: "GYRO", key: "STRENGTH", label: "Gyro Strength", kind: "number", value: "0.25", defaultValue: "0.25", min: 0.0, max: 1.0, step: 0.05 },
-      { section: "RANGE_COMPRESSION", key: "GAIN", label: "Range Compression", kind: "number", value: "1.00", defaultValue: "1.00", min: 1.0, max: 2.5, step: 0.05, unit: "×" },
-    ],
-  },
-  {
-    file: "smart_mirror.ini",
-    title: "Smart Mirrors",
-    category: "Camera",
-    description: "Real 3D cockpit mirror reflections, self-car reflection, and per-mirror angle adjust.",
-    entries: [
-      { section: "BASIC", key: "ENABLED", label: "Enable Smart Mirrors", kind: "bool", value: "1", defaultValue: "1" },
-      { section: "REAL_MIRRORS", key: "ENABLED", label: "Real 3D Mirrors", kind: "bool", value: "1", defaultValue: "0" },
-      { section: "REAL_MIRRORS", key: "SHOW_OWN_CAR", label: "Render Own Car in Mirrors", kind: "bool", value: "1", defaultValue: "1" },
-      { section: "QUALITY", key: "RESOLUTION", label: "Mirror Texture Width", kind: "enum", value: "1024", defaultValue: "512", options: ["256", "512", "1024", "2048"] },
-    ],
-  },
-  {
-    file: "tyres_fx.ini",
-    title: "Tyres FX",
-    category: "Visuals",
-    description: "Sidewall flex, dynamic dirt/marbles buildup, and brake disc glow.",
-    entries: [
-      { section: "BASIC", key: "ENABLED", label: "Enable Tyres FX", kind: "bool", value: "1", defaultValue: "1" },
-      { section: "FLEX", key: "SIDEWALL_FLEX", label: "Dynamic Sidewall Flex", kind: "bool", value: "1", defaultValue: "1" },
-      { section: "DIRT", key: "DIRT_MULT", label: "Dirt & Grass Buildup", kind: "number", value: "1.0", defaultValue: "1.0", min: 0.0, max: 2.0, step: 0.1, unit: "×" },
-    ],
-  },
-];
-
-const DEMO_PATCHES: CspPatchInfo[] = [
-  { name: "0.2.5-preview1", version: "0.2.5-preview1", buildNumber: 3281, installed: true, recommended: true, notes: "Latest RainFX + Lights Patch with improved VR single-pass stereo." },
-  { name: "0.2.4", version: "0.2.4", buildNumber: 3112, installed: false, notes: "Stable public release with updated ExtraFX & Smart Mirrors." },
-  { name: "0.2.3", version: "0.2.3", buildNumber: 2948, installed: false, notes: "Legacy compatibility build for older league servers." },
-];
-
 function inferKind(val: string): CspEntry["kind"] {
   const t = val.trim();
   if (t === "0" || t === "1") return "bool";
@@ -205,8 +84,8 @@ export default function CspPage({
   const [busyPatch, setBusyPatch] = useState<string | null>(null);
 
   // Real CSP Config Editor state
-  const [modules, setModules] = useState<CspModuleSpec[]>(BUILTIN_CSP_MODULES);
-  const [selectedFile, setSelectedFile] = useState<string>(BUILTIN_CSP_MODULES[0].file);
+  const [modules, setModules] = useState<CspModuleSpec[]>([]);
+  const [selectedFile, setSelectedFile] = useState<string>("");
   const [fileSearch, setFileSearch] = useState("");
   const [keySearch, setKeySearch] = useState("");
   const [editorMode, setEditorMode] = useState<"structured" | "raw">("structured");
@@ -225,22 +104,14 @@ export default function CspPage({
       api.listWeatherControllers().catch(() => []),
       api.listCspConfigFiles().catch(() => []),
     ]).then(([patchList, weatherList, configFiles]) => {
-      setPatches(patchList && patchList.length > 0 ? patchList : DEMO_PATCHES);
-      setControllers(
-        weatherList && weatherList.length > 0
-          ? weatherList
-          : [
-              { id: "pure", name: "Pure 0.254", author: "Peter Boese", version: "0.254" },
-              { id: "sol", name: "Sol 2.2.9", author: "Peter Boese", version: "2.2.9" },
-              { id: "default", name: "Kunos Default", author: "Kunos Simulazioni" },
-            ]
-      );
+      setPatches(patchList ?? []);
+      setControllers(weatherList ?? []);
       if (Array.isArray(configFiles) && configFiles.length > 0) {
-        const merged = [...BUILTIN_CSP_MODULES];
+        const loaded: CspModuleSpec[] = [];
         for (const f of configFiles) {
           const fname = typeof f === "string" ? f : String((f as { file?: string; name?: string }).file ?? (f as { name?: string }).name ?? "");
-          if (fname && !merged.some((m) => m.file === fname)) {
-            merged.push({
+          if (fname && !loaded.some((m) => m.file === fname)) {
+            loaded.push({
               file: fname,
               title: fname.replace(/\.ini$/i, "").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
               category: "CSP Module",
@@ -249,50 +120,88 @@ export default function CspPage({
             });
           }
         }
-        setModules(merged);
+        setModules(loaded);
+        if (loaded.length > 0) {
+          setSelectedFile((prev) => prev || loaded[0].file);
+        }
+      } else {
+        setModules([]);
       }
     });
   }, []);
 
   // Load real INI keys from backend whenever selectedFile changes
   useEffect(() => {
+    if (!selectedFile) return;
     let cancelled = false;
     void api
       .readCspConfig(selectedFile)
       .then((res) => {
         if (cancelled || !res) return;
-        const raw = res as unknown as {
-          sections?: Array<{ name: string; entries: Array<{ key: string; value: string; defaultValue?: string; description?: string }> }>;
+        const loadedEntries: CspEntry[] = [];
+        const pushEntry = (
+          section: string,
+          key: string,
+          value: string,
+          defaultValue?: string,
+          description?: string
+        ) => {
+          const kind = inferKind(value);
+          const numVal = Number(value);
+          loadedEntries.push({
+            section,
+            key,
+            label: key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+            description,
+            kind,
+            value,
+            defaultValue: defaultValue ?? value,
+            min: kind === "number" ? Math.min(0, Math.floor(numVal * 0.5)) : undefined,
+            max: kind === "number" ? Math.max(2, Math.ceil(numVal * 2.5)) : undefined,
+            step: kind === "number" ? (Number.isInteger(numVal) ? 1 : 0.05) : undefined,
+          });
         };
-        if (Array.isArray(raw.sections) && raw.sections.length > 0) {
-          const loadedEntries: CspEntry[] = [];
-          for (const sec of raw.sections) {
-            for (const entry of sec.entries ?? []) {
-              const kind = inferKind(entry.value);
-              const numVal = Number(entry.value);
-              loadedEntries.push({
-                section: sec.name,
-                key: entry.key,
-                label: entry.key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
-                description: entry.description,
-                kind,
-                value: entry.value,
-                defaultValue: entry.defaultValue ?? entry.value,
-                min: kind === "number" ? Math.min(0, Math.floor(numVal * 0.5)) : undefined,
-                max: kind === "number" ? Math.max(2, Math.ceil(numVal * 2.5)) : undefined,
-                step: kind === "number" ? (Number.isInteger(numVal) ? 1 : 0.05) : undefined,
-              });
-            }
-          }
-          if (loadedEntries.length > 0) {
-            setModules((prev) =>
-              prev.map((m) => (m.file === selectedFile ? { ...m, entries: loadedEntries } : m))
+
+        if (Array.isArray(res)) {
+          for (const item of res as Array<{
+            section?: string;
+            key?: string;
+            value?: string;
+            doc?: string;
+          }>) {
+            if (!item?.key) continue;
+            pushEntry(
+              item.section ?? "BASIC",
+              item.key,
+              item.value ?? "",
+              item.value,
+              item.doc
             );
           }
+        } else {
+          const raw = res as unknown as {
+            sections?: Array<{
+              name: string;
+              entries: Array<{ key: string; value: string; defaultValue?: string; description?: string }>;
+            }>;
+          };
+          for (const sec of raw.sections ?? []) {
+            for (const entry of sec.entries ?? []) {
+              pushEntry(sec.name, entry.key, entry.value, entry.defaultValue, entry.description);
+            }
+          }
+        }
+
+        if (loadedEntries.length > 0) {
+          setModules((prev) =>
+            prev.map((m) => (m.file === selectedFile ? { ...m, entries: loadedEntries } : m))
+          );
         }
       })
-      .catch(() => {
-        // fallback to built-in module schema
+      .catch((err) => {
+        if (!cancelled) {
+          notify("Failed to read CSP config", "error", String(err));
+        }
       });
     return () => {
       cancelled = true;
@@ -323,7 +232,7 @@ export default function CspPage({
 
   const masterEnableEntry = useMemo(
     () =>
-      activeModule.entries.find(
+      (activeModule?.entries ?? []).find(
         (e) =>
           e.section.toUpperCase() === "BASIC" &&
           (e.key.toUpperCase() === "ENABLED" || e.key.toUpperCase() === "ACTIVE") &&
@@ -334,7 +243,7 @@ export default function CspPage({
 
   const groupedEntries = useMemo(() => {
     const q = keySearch.trim().toLowerCase();
-    const list = activeModule.entries.filter((e) => {
+    const list = (activeModule?.entries ?? []).filter((e) => {
       if (
         masterEnableEntry &&
         e.section === masterEnableEntry.section &&
@@ -359,7 +268,7 @@ export default function CspPage({
   }, [activeModule, keySearch, masterEnableEntry]);
 
   const changedInActive = useMemo(
-    () => activeModule.entries.filter((e) => e.value !== e.defaultValue).length,
+    () => (activeModule?.entries ?? []).filter((e) => e.value !== e.defaultValue).length,
     [activeModule]
   );
 
@@ -479,8 +388,13 @@ export default function CspPage({
             </div>
 
             <div className="space-y-1 max-h-[620px] overflow-y-auto pr-0.5">
-              {filteredModules.map((mod) => {
-                const active = mod.file === activeModule.file;
+              {filteredModules.length === 0 ? (
+                <div className="px-3 py-6 text-center text-xs text-[var(--text-muted)]">
+                  No CSP configuration files found.
+                </div>
+              ) : (
+                filteredModules.map((mod) => {
+                  const active = mod.file === activeModule?.file;
                 const modChanges = mod.entries.filter((e) => e.value !== e.defaultValue).length;
                 return (
                   <button
@@ -499,17 +413,24 @@ export default function CspPage({
                         {mod.file}
                       </div>
                     </div>
-                    {modChanges > 0 && (
+                  {modChanges > 0 && (
                       <Badge variant="warning">{modChanges}</Badge>
                     )}
                   </button>
                 );
-              })}
+              })
+              )}
             </div>
           </Card>
 
           {/* Right Full Section & Key Editor */}
           <div className="space-y-4 min-w-0">
+            {!activeModule ? (
+              <Card padding="lg" className="text-center text-sm text-[var(--text-muted)]">
+                No CSP modules found.
+              </Card>
+            ) : (
+              <>
             <Card padding="md" className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-4 min-w-0">
                 {masterEnableEntry && (
@@ -705,6 +626,8 @@ export default function CspPage({
                 />
               </Card>
             )}
+              </>
+            )}
           </div>
         </div>
       )}
@@ -749,8 +672,15 @@ export default function CspPage({
             </div>
           </Card>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {patches.map((p) => (
+          {patches.length === 0 ? (
+            <Card variant="elevated" padding="md">
+              <div className="text-xs text-[var(--text-muted)] text-center py-6">
+                No CSP patches available from backend.
+              </div>
+            </Card>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {patches.map((p) => (
               <Card
                 key={p.name}
                 variant="elevated"
@@ -789,7 +719,8 @@ export default function CspPage({
                 </div>
               </Card>
             ))}
-          </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -807,7 +738,12 @@ export default function CspPage({
             </div>
 
             <div className="space-y-2">
-              {controllers.map((c) => {
+              {controllers.length === 0 ? (
+                <div className="p-4 rounded-xl border border-white/[0.07] bg-white/[0.02] text-xs text-[var(--text-muted)] text-center">
+                  No WeatherFX controllers detected.
+                </div>
+              ) : (
+                controllers.map((c) => {
                 const active = activeController === c.id;
                 return (
                   <button
@@ -832,7 +768,8 @@ export default function CspPage({
                     {active && <Badge variant="accent" dot>Active</Badge>}
                   </button>
                 );
-              })}
+              })
+              )}
             </div>
           </Card>
 

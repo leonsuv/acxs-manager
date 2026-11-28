@@ -10,7 +10,9 @@ import {
   PaintBucket,
   RotateCcw,
   Save,
+  Search,
   Sun,
+  X,
 } from "lucide-react";
 import { api, assetUrl } from "../lib/api";
 import { ACCENT_PRESETS } from "../lib/types";
@@ -320,9 +322,22 @@ export function StudioPage({
   );
 
   const tab = view;
+  const [carSearch, setCarSearch] = useState("");
   const [selectedCarId, setSelectedCarId] = useState<string>(
     armedSession.carId || cars[0]?.id || ""
   );
+
+  const filteredCars = useMemo(() => {
+    const q = carSearch.trim().toLowerCase();
+    if (!q) return cars;
+    return cars.filter(
+      (c) =>
+        c.name.toLowerCase().includes(q) ||
+        c.brand.toLowerCase().includes(q) ||
+        c.class.toLowerCase().includes(q) ||
+        c.id.toLowerCase().includes(q)
+    );
+  }, [cars, carSearch]);
 
   const selectedCar = useMemo(
     () => cars.find((c) => c.id === selectedCarId) ?? cars[0],
@@ -569,27 +584,93 @@ export function StudioPage({
           }
         />
 
-        {/* Visual Car Strip Selector */}
-        <div className="flex items-center gap-2 overflow-x-auto pb-1">
-          {cars.slice(0, 12).map((car) => {
-            const active = car.id === selectedCar?.id;
-            return (
+        {/* Searchable Full Car Strip Selector */}
+        <div className="flex items-center gap-2.5">
+          <div className="relative w-52 shrink-0">
+            <Search className="w-3.5 h-3.5 text-[var(--text-muted)] absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              type="text"
+              value={carSearch}
+              onChange={(e) => setCarSearch(e.target.value)}
+              aria-label="Search installed cars"
+              placeholder={`Search ${cars.length} cars...`}
+              className="w-full h-8 pl-8 pr-7 rounded-lg bg-black/45 border border-white/[0.1] text-xs text-white placeholder:text-[var(--text-muted)] outline-none focus:border-[var(--accent-border)]"
+            />
+            {carSearch && (
               <button
-                key={car.id}
                 type="button"
-                onClick={() => setSelectedCarId(car.id)}
-                className={`h-8 px-3 rounded-lg text-xs font-medium border shrink-0 transition-all cursor-pointer flex items-center gap-2 ${
-                  active
-                    ? "bg-[var(--accent-soft)] text-[var(--accent)] border-[var(--accent-border)]"
-                    : "bg-white/[0.03] text-[var(--text-secondary)] border-white/[0.08] hover:text-white"
-                }`}
+                onClick={() => setCarSearch("")}
+                aria-label="Clear car search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-white cursor-pointer"
               >
-                <span className="font-mono text-[10px] opacity-70">{car.brand}</span>
-                <span>{car.name}</span>
+                <X className="w-3 h-3" />
               </button>
-            );
-          })}
+            )}
+          </div>
+
+          <div className="flex-1 flex items-center gap-2 overflow-x-auto pb-1 min-w-0">
+            {filteredCars.length === 0 ? (
+              <span className="text-xs text-[var(--text-muted)] px-2">
+                No cars match &quot;{carSearch}&quot;
+              </span>
+            ) : (
+              filteredCars.map((car) => {
+                const active = car.id === selectedCar?.id;
+                return (
+                  <button
+                    key={car.id}
+                    type="button"
+                    onClick={() => setSelectedCarId(car.id)}
+                    className={`h-8 px-3 rounded-lg text-xs font-medium border shrink-0 transition-all cursor-pointer flex items-center gap-2 ${
+                      active
+                        ? "bg-[var(--accent-soft)] text-[var(--accent)] border-[var(--accent-border)]"
+                        : "bg-white/[0.03] text-[var(--text-secondary)] border-white/[0.08] hover:text-white"
+                    }`}
+                  >
+                    <span className="font-mono text-[10px] opacity-70">{car.brand}</span>
+                    <span>{car.name}</span>
+                  </button>
+                );
+              })
+            )}
+          </div>
         </div>
+
+        {/* Inline Livery / Skin Selector Strip on Painter & Models Views */}
+        {(tab === "painter" || tab === "models") && skins.length > 0 && (
+          <div className="flex items-center gap-2 overflow-x-auto pb-0.5">
+            <span className="text-[10px] font-mono uppercase tracking-[0.12em] text-[var(--text-muted)] shrink-0">
+              Livery ({skins.length}):
+            </span>
+            {skins.map((s) => {
+              const active = s.id === activeSkinId;
+              return (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => {
+                    setActiveSkinId(s.id);
+                    setSkinForm({
+                      name: s.name,
+                      driverName: s.driverName ?? "",
+                      team: s.team ?? "",
+                      number: s.number ?? "",
+                      country: s.country ?? "",
+                    });
+                  }}
+                  className={`h-7 px-2.5 rounded-lg text-[11px] border shrink-0 transition-colors cursor-pointer ${
+                    active
+                      ? "bg-[var(--accent-soft)] text-[var(--accent)] border-[var(--accent-border)] font-semibold"
+                      : "bg-white/[0.03] text-[var(--text-secondary)] border-white/[0.07] hover:text-white"
+                  }`}
+                >
+                  {s.number ? `#${s.number} ` : ""}
+                  {s.name}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Main Studio Content */}
@@ -697,13 +778,28 @@ export function StudioPage({
               <Button
                 variant="primary"
                 icon={<Save className="w-4 h-4" />}
-                onClick={() => {
+                onClick={async () => {
+                  const target = skins.find((s) => s.id === activeSkinId);
+                  if (target?.path) {
+                    try {
+                      await api.saveSkinMeta(target.path, {
+                        skinname: skinForm.name,
+                        drivername: skinForm.driverName,
+                        team: skinForm.team,
+                        number: skinForm.number,
+                        country: skinForm.country,
+                      });
+                    } catch (err) {
+                      notify("Failed to save ui_skin.json", "error", String(err));
+                      return;
+                    }
+                  }
                   setSkins((prev) =>
                     prev.map((s) =>
                       s.id === activeSkinId ? { ...s, ...skinForm } : s
                     )
                   );
-                  notify("Skin Metadata Updated", "success", skinForm.name || activeSkinId);
+                  notify("Skin Metadata Saved", "success", skinForm.name || activeSkinId);
                 }}
               >
                 Save ui_skin.json

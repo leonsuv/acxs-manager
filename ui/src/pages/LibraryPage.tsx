@@ -7,11 +7,13 @@ import {
   FolderInput,
   Lock,
   RefreshCw,
+  Search,
   Sparkles,
   Unlock,
   Upload,
   Volume2,
   Wrench,
+  X,
 } from "lucide-react";
 import { api, assetUrl } from "../lib/api";
 import type {
@@ -33,68 +35,6 @@ import {
 } from "../components/Primitives";
 
 type LibraryTab = "installer" | "jsgme" | "health" | "tuning" | "sfx";
-
-const DEMO_PACKAGES: PackageEntry[] = [
-  {
-    id: "pkg-car-1",
-    kind: "car",
-    name: "Porsche 992 GT3 R (2024)",
-    targetPath: "content/cars/acxs_porsche_992_gt3r",
-    sizeBytes: 184_500_000,
-    selected: true,
-  },
-  {
-    id: "pkg-skin-1",
-    kind: "skin",
-    name: "Manthey EMA #911 Grello Livery",
-    targetPath: "content/cars/acxs_porsche_992_gt3r/skins/911_grello",
-    sizeBytes: 24_200_000,
-    selected: true,
-  },
-  {
-    id: "pkg-pp-1",
-    kind: "csp",
-    name: "ACXS_Natural_Mod_v2.ini (PP Filter)",
-    targetPath: "system/cfg/ppfilters/ACXS_Natural_Mod_v2.ini",
-    sizeBytes: 18_400,
-    selected: true,
-  },
-];
-
-const DEMO_JSGME: JsgmeModEntry[] = [
-  { name: "Pure 0.254 HighRes Skydomes", enabled: true, filesCount: 412, conflictsWith: [] },
-  { name: "CSP GrassFX Enhanced Pack", enabled: true, filesCount: 88, conflictsWith: ["NaturalMod PP + Shaders"] },
-  { name: "NaturalMod PP + Shaders", enabled: false, filesCount: 34, conflictsWith: ["CSP GrassFX Enhanced Pack"] },
-  { name: "F1 2025 Broadcast HUD", enabled: false, filesCount: 61, conflictsWith: [] },
-  { name: "Spa 2024 Grandstand & Trees", enabled: false, filesCount: 194, conflictsWith: [] },
-];
-
-const DEMO_HEALTH: ContentHealthIssue[] = [
-  {
-    id: "h1",
-    severity: "warning",
-    kind: "missing-preview",
-    target: "content/cars/bmw_m3_e30_dtm/skins/04_jager",
-    message: "Skin missing preview.jpg (auto-generatable via Showroom)",
-    autoFixable: true,
-  },
-  {
-    id: "h2",
-    severity: "error",
-    kind: "broken-sfx",
-    target: "content/cars/mod_gt4_cayman/sfx/GUIDs.txt",
-    message: "Missing GUIDs.txt bank manifest — engine audio will be silent",
-    autoFixable: true,
-  },
-  {
-    id: "h3",
-    severity: "info",
-    kind: "unpacked-data",
-    target: "content/cars/ks_ferrari_488_gt3/data",
-    message: "Unpacked data/ folder coexists with data.acd (may trigger online checksum mismatch)",
-    autoFixable: false,
-  },
-];
 
 const DEFAULT_TUNING: CarTuningValues = {
   powerMultiplier: 1.0,
@@ -124,7 +64,7 @@ export function LibraryPage({
   // 1. Universal Installer
   const [dragActive, setDragActive] = useState(false);
   const [packagePath, setPackagePath] = useState("");
-  const [packages, setPackages] = useState<PackageEntry[]>(DEMO_PACKAGES);
+  const [packages, setPackages] = useState<PackageEntry[]>([]);
   const [installing, setInstalling] = useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
@@ -138,17 +78,45 @@ export function LibraryPage({
   const [repairing, setRepairing] = useState(false);
 
   // 4. Car Tuning & ACD
+  const [tuningCarSearch, setTuningCarSearch] = useState("");
   const [tuningCarId, setTuningCarId] = useState<string>(armedSession.carId || cars[0]?.id || "");
   const [tuning, setTuning] = useState<CarTuningValues>(DEFAULT_TUNING);
   const [carPhysics, setCarPhysics] = useState<CarPhysicsData | null>(null);
   const [acdBusy, setAcdBusy] = useState(false);
 
   // 5. SFX Sound Swapper
+  const [sfxTargetSearch, setSfxTargetSearch] = useState("");
+  const [sfxDonorSearch, setSfxDonorSearch] = useState("");
   const [sfxTargetId, setSfxTargetId] = useState<string>(armedSession.carId || cars[0]?.id || "");
   const [sfxDonorId, setSfxDonorId] = useState<string>(cars[1]?.id ?? cars[0]?.id ?? "");
   const [targetSfx, setTargetSfx] = useState<CarSfxInfo | null>(null);
   const [donorSfx, setDonorSfx] = useState<CarSfxInfo | null>(null);
   const [swappingSfx, setSwappingSfx] = useState(false);
+
+  const filterCarList = (q: string) => {
+    const trimmed = q.trim().toLowerCase();
+    if (!trimmed) return cars;
+    return cars.filter(
+      (c) =>
+        c.name.toLowerCase().includes(trimmed) ||
+        c.brand.toLowerCase().includes(trimmed) ||
+        c.class.toLowerCase().includes(trimmed) ||
+        c.id.toLowerCase().includes(trimmed)
+    );
+  };
+
+  const filteredTuningCars = useMemo(
+    () => filterCarList(tuningCarSearch),
+    [cars, tuningCarSearch]
+  );
+  const filteredSfxTargetCars = useMemo(
+    () => filterCarList(sfxTargetSearch),
+    [cars, sfxTargetSearch]
+  );
+  const filteredSfxDonorCars = useMemo(
+    () => filterCarList(sfxDonorSearch),
+    [cars, sfxDonorSearch]
+  );
 
   const tuningCar = useMemo(
     () => cars.find((c) => c.id === tuningCarId) ?? cars[0],
@@ -170,10 +138,13 @@ export function LibraryPage({
     api
       .listJsgmeMods()
       .then((res) => {
-        if (!cancelled) setMods(res && res.length > 0 ? res : DEMO_JSGME);
+        if (!cancelled) setMods(res ?? []);
       })
-      .catch(() => {
-        if (!cancelled) setMods(DEMO_JSGME);
+      .catch((err) => {
+        if (!cancelled) {
+          setMods([]);
+          notify("Failed to load JSGME mods", "error", String(err));
+        }
       });
     return () => {
       cancelled = true;
@@ -185,9 +156,10 @@ export function LibraryPage({
     setScanningHealth(true);
     try {
       const res = await api.runContentHealth();
-      setIssues(res && res.length > 0 ? res : DEMO_HEALTH);
-    } catch {
-      setIssues(DEMO_HEALTH);
+      setIssues(res ?? []);
+    } catch (err) {
+      setIssues([]);
+      notify("Content health scan failed", "error", String(err));
     } finally {
       setScanningHealth(false);
     }
@@ -209,19 +181,7 @@ export function LibraryPage({
     ]).then(([t, p]) => {
       if (cancelled) return;
       setTuning(t ?? DEFAULT_TUNING);
-      setCarPhysics(
-        p ?? {
-          rpmCurve: [],
-          torqueNm: [],
-          powerHp: [],
-          gearRatios: [],
-          gearTopSpeedsKmh: [],
-          redlineRpm: 8500,
-          massKg: 1250,
-          hasPackedAcd: true,
-          hasUnpackedData: false,
-        }
-      );
+      setCarPhysics(p ?? null);
     });
     return () => {
       cancelled = true;
@@ -237,34 +197,24 @@ export function LibraryPage({
         .inspectCarSfx(sfxTargetCar.path)
         .then((res) => {
           if (!cancelled) {
-            setTargetSfx(
-              res ?? {
-                carId: sfxTargetCar.id,
-                bankPath: `${sfxTargetCar.path}/sfx/${sfxTargetCar.id}.bank`,
-                bankSizeBytes: 14_820_000,
-                guidsPresent: true,
-              }
-            );
+            setTargetSfx(res ?? null);
           }
         })
-        .catch(() => {});
+        .catch(() => {
+          if (!cancelled) setTargetSfx(null);
+        });
     }
     if (sfxDonorCar) {
       api
         .inspectCarSfx(sfxDonorCar.path)
         .then((res) => {
           if (!cancelled) {
-            setDonorSfx(
-              res ?? {
-                carId: sfxDonorCar.id,
-                bankPath: `${sfxDonorCar.path}/sfx/${sfxDonorCar.id}.bank`,
-                bankSizeBytes: 18_410_000,
-                guidsPresent: true,
-              }
-            );
+            setDonorSfx(res ?? null);
           }
         })
-        .catch(() => {});
+        .catch(() => {
+          if (!cancelled) setDonorSfx(null);
+        });
     }
     return () => {
       cancelled = true;
@@ -816,22 +766,52 @@ export function LibraryPage({
         {/* TAB 4: CAR TUNING & ACD */}
         {tab === "tuning" && (
           <div className="space-y-5 max-w-5xl">
-            {/* Visual Car Picker Strip */}
-            <div className="flex items-center gap-2 overflow-x-auto pb-1">
-              {cars.map((car) => (
-                <button
-                  key={car.id}
-                  type="button"
-                  onClick={() => setTuningCarId(car.id)}
-                  className={`h-9 px-3 rounded-xl text-xs font-medium border shrink-0 transition-colors cursor-pointer ${
-                    car.id === tuningCar?.id
-                      ? "bg-[var(--accent-soft)] text-[var(--accent)] border-[var(--accent-border)]"
-                      : "bg-white/[0.03] text-[var(--text-secondary)] border-white/[0.08] hover:text-white"
-                  }`}
-                >
-                  {car.brand} {car.name}
-                </button>
-              ))}
+            {/* Searchable Visual Car Picker Strip */}
+            <div className="space-y-2">
+              <div className="relative max-w-xs">
+                <Search className="w-3.5 h-3.5 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={tuningCarSearch}
+                  onChange={(e) => setTuningCarSearch(e.target.value)}
+                  aria-label="Search cars for tuning"
+                  placeholder={`Search ${cars.length} cars...`}
+                  className="w-full h-8 pl-8 pr-7 rounded-lg bg-black/45 border border-white/[0.1] text-xs text-white placeholder:text-[var(--text-muted)] outline-none focus:border-[var(--accent-border)]"
+                />
+                {tuningCarSearch && (
+                  <button
+                    type="button"
+                    onClick={() => setTuningCarSearch("")}
+                    aria-label="Clear car search"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-white cursor-pointer"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                {filteredTuningCars.length === 0 ? (
+                  <span className="text-xs text-[var(--text-muted)] px-1">
+                    No cars match &quot;{tuningCarSearch}&quot;
+                  </span>
+                ) : (
+                  filteredTuningCars.map((car) => (
+                    <button
+                      key={car.id}
+                      type="button"
+                      onClick={() => setTuningCarId(car.id)}
+                      className={`h-9 px-3 rounded-xl text-xs font-medium border shrink-0 transition-colors cursor-pointer ${
+                        car.id === tuningCar?.id
+                          ? "bg-[var(--accent-soft)] text-[var(--accent)] border-[var(--accent-border)]"
+                          : "bg-white/[0.03] text-[var(--text-secondary)] border-white/[0.08] hover:text-white"
+                      }`}
+                    >
+                      {car.brand} {car.name}
+                    </button>
+                  ))
+                )}
+              </div>
             </div>
 
             {/* data.acd Opt-In Unpack / Repack Banner */}
@@ -1036,48 +1016,86 @@ export function LibraryPage({
                   title: "1. Select Target Car",
                   selectedId: sfxTargetCar?.id,
                   onPick: setSfxTargetId,
+                  search: sfxTargetSearch,
+                  onSearch: setSfxTargetSearch,
+                  list: filteredSfxTargetCars,
                 },
                 {
                   title: "2. Select Donor Audio Car",
                   selectedId: sfxDonorCar?.id,
                   onPick: setSfxDonorId,
+                  search: sfxDonorSearch,
+                  onSearch: setSfxDonorSearch,
+                  list: filteredSfxDonorCars,
                 },
               ].map((col) => (
                 <div key={col.title} className="glass-panel rounded-2xl p-4 space-y-3">
-                  <div className="text-xs font-semibold text-white">{col.title}</div>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-xs font-semibold text-white">{col.title}</div>
+                    <span className="text-[10px] font-mono text-[var(--text-muted)]">
+                      {col.list.length}/{cars.length}
+                    </span>
+                  </div>
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-[var(--text-muted)] absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      type="text"
+                      value={col.search}
+                      onChange={(e) => col.onSearch(e.target.value)}
+                      aria-label={`Search ${col.title}`}
+                      placeholder="Filter cars by name or brand..."
+                      className="w-full h-8 pl-8 pr-7 rounded-lg bg-black/45 border border-white/[0.1] text-xs text-white placeholder:text-[var(--text-muted)] outline-none focus:border-[var(--accent-border)]"
+                    />
+                    {col.search && (
+                      <button
+                        type="button"
+                        onClick={() => col.onSearch("")}
+                        aria-label="Clear search"
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-white cursor-pointer"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    )}
+                  </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-72 overflow-y-auto pr-1">
-                    {cars.map((car: CarEntry) => {
-                      const active = car.id === col.selectedId;
-                      const thumb = assetUrl(car.previewPath);
-                      return (
-                        <button
-                          key={car.id}
-                          type="button"
-                          onClick={() => col.onPick(car.id)}
-                          className={`p-2 rounded-xl border text-left flex items-center gap-2.5 transition-all cursor-pointer ${
-                            active
-                              ? "bg-[var(--accent-soft)] border-[var(--accent-border)]"
-                              : "bg-white/[0.02] border-white/[0.06] hover:bg-white/[0.05]"
-                          }`}
-                        >
-                          <div className="w-12 h-8 rounded-lg overflow-hidden bg-[#080B12] border border-white/[0.08] shrink-0 flex items-center justify-center">
-                            {thumb ? (
-                              <img src={thumb} alt={car.name} className="w-full h-full object-cover" />
-                            ) : (
-                              <Volume2 className="w-3.5 h-3.5 text-[var(--text-muted)]" />
-                            )}
-                          </div>
-                          <div className="min-w-0">
-                            <div className="text-xs font-medium text-white truncate">
-                              {car.name}
+                    {col.list.length === 0 ? (
+                      <div className="col-span-full py-6 text-center text-xs text-[var(--text-muted)]">
+                        No cars match &quot;{col.search}&quot;
+                      </div>
+                    ) : (
+                      col.list.map((car: CarEntry) => {
+                        const active = car.id === col.selectedId;
+                        const thumb = assetUrl(car.previewPath);
+                        return (
+                          <button
+                            key={car.id}
+                            type="button"
+                            onClick={() => col.onPick(car.id)}
+                            className={`p-2 rounded-xl border text-left flex items-center gap-2.5 transition-all cursor-pointer ${
+                              active
+                                ? "bg-[var(--accent-soft)] border-[var(--accent-border)]"
+                                : "bg-white/[0.02] border-white/[0.06] hover:bg-white/[0.05]"
+                            }`}
+                          >
+                            <div className="w-12 h-8 rounded-lg overflow-hidden bg-[#080B12] border border-white/[0.08] shrink-0 flex items-center justify-center">
+                              {thumb ? (
+                                <img src={thumb} alt={car.name} className="w-full h-full object-cover" />
+                              ) : (
+                                <Volume2 className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+                              )}
                             </div>
-                            <div className="text-[10px] font-mono text-[var(--text-muted)]">
-                              {car.brand}
+                            <div className="min-w-0">
+                              <div className="text-xs font-medium text-white truncate">
+                                {car.name}
+                              </div>
+                              <div className="text-[10px] font-mono text-[var(--text-muted)]">
+                                {car.brand}
+                              </div>
                             </div>
-                          </div>
-                        </button>
-                      );
-                    })}
+                          </button>
+                        );
+                      })
+                    )}
                   </div>
                 </div>
               ))}

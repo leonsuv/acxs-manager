@@ -12,6 +12,7 @@ import {
   Search,
   SlidersHorizontal,
   Sparkles,
+  Star,
   Tag,
   X,
   Zap,
@@ -19,8 +20,9 @@ import {
   Disc,
 } from "lucide-react";
 import { api, assetUrl, isTauri } from "../lib/api";
-import type { CarEntry, CarPhysicsData } from "../lib/types";
+import type { CarEntry, CarPhysicsData, SkinEntry } from "../lib/types";
 import { useAppStore } from "../store/appStore";
+import { useContextMenu } from "../components/ContextMenu";
 import {
   Badge,
   Button,
@@ -36,9 +38,10 @@ type SortKey = "name" | "bhp" | "weight" | "pw" | "year";
 const FAVORITES_KEY = "acxs_favorite_cars_v1";
 const CUSTOM_TAGS_KEY = "acxs_custom_car_tags_v1";
 
-function parseNum(v?: string | null): number {
-  if (!v) return 0;
-  const m = v.replace(/,/g, "").match(/[\d.]+/);
+function parseNum(v?: string | number | null): number {
+  if (v == null) return 0;
+  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+  const m = String(v).replace(/,/g, "").match(/[\d.]+/);
   return m ? parseFloat(m[0]) : 0;
 }
 
@@ -247,6 +250,7 @@ function DynoChart({ physics }: { physics: CarPhysicsData }) {
 
 export function CarsPage() {
   const { cars, armedSession, armCar, navigate, notify, rescan } = useAppStore();
+  const { openContextMenu } = useContextMenu();
 
   const [query, setQuery] = useState("");
   const [serverResults, setServerResults] = useState<CarEntry[] | null>(null);
@@ -259,6 +263,8 @@ export function CarsPage() {
   const [activeCar, setActiveCar] = useState<CarEntry | null>(null);
   const [physics, setPhysics] = useState<CarPhysicsData | null>(null);
   const [loadingPhysics, setLoadingPhysics] = useState(false);
+  const [skins, setSkins] = useState<SkinEntry[]>([]);
+  const [selectedSkinId, setSelectedSkinId] = useState<string>("");
 
   // Query backend search_cars in Tauri mode
   useEffect(() => {
@@ -284,14 +290,31 @@ export function CarsPage() {
     };
   }, [query]);
 
-  // Load physics when detail drawer opens
+  // Close inspector on Escape
+  useEffect(() => {
+    if (!activeCar) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setActiveCar(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activeCar]);
+
+  // Load physics & skins when inspector opens or switches car
   useEffect(() => {
     if (!activeCar) {
       setPhysics(null);
+      setSkins([]);
+      setSelectedSkinId("");
       return;
     }
     let cancelled = false;
     setLoadingPhysics(true);
+    setSelectedSkinId(
+      armedSession.carId === activeCar.id ? armedSession.skinId : ""
+    );
     api
       .getCarPhysics(activeCar.path)
       .then((res) => {
@@ -305,10 +328,30 @@ export function CarsPage() {
       .finally(() => {
         if (!cancelled) setLoadingPhysics(false);
       });
+
+    api
+      .getCarSkins(activeCar.path)
+      .then((list) => {
+        if (cancelled) return;
+        const resolved = list ?? [];
+        setSkins(resolved);
+        setSelectedSkinId((prev) =>
+          prev && resolved.some((s) => s.id === prev)
+            ? prev
+            : resolved[0]?.id ?? ""
+        );
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSkins([]);
+          setSelectedSkinId("");
+        }
+      });
+
     return () => {
       cancelled = true;
     };
-  }, [activeCar]);
+  }, [activeCar, armedSession.carId, armedSession.skinId]);
 
   const toggleFavorite = (id: string) => {
     setFavorites((prev) => {
@@ -397,8 +440,10 @@ export function CarsPage() {
   ];
 
   return (
-    <div className="h-full flex flex-col overflow-hidden relative animate-fade-in">
-      <div className="p-6 pb-4 space-y-4 shrink-0">
+    <div className="h-full flex flex-col lg:flex-row overflow-hidden animate-fade-in">
+      {/* Main Car Grid Pane */}
+      <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden relative">
+        <div className="p-6 pb-4 space-y-4 shrink-0">
         <PageHeader
           eyebrow="Garage · Fleet Index"
           title="Cars"
@@ -487,10 +532,17 @@ export function CarsPage() {
             }
           />
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+          <div
+            className={`grid gap-4 ${
+              activeCar
+                ? "grid-cols-1 xl:grid-cols-2"
+                : "grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
+            }`}
+          >
             {filteredCars.map((car) => {
               const img = assetUrl(car.previewPath);
               const isSelected = selectedIds.has(car.id);
+              const isInspecting = activeCar?.id === car.id;
               const isFav = favorites.has(car.id);
               const isArmed = armedSession.carId === car.id;
               const tags = [...car.tags, ...(customTags[car.id] ?? [])];
@@ -499,8 +551,43 @@ export function CarsPage() {
                 <div
                   key={car.id}
                   onClick={() => setActiveCar(car)}
+                  onContextMenu={(e) => {
+                    openContextMenu(e, [
+                      {
+                        id: "car-arm",
+                        label: "Arm Car for Drive",
+                        icon: <Check className="w-3.5 h-3.5" />,
+                        onSelect: () => {
+                          armCar(car);
+                          notify("Armed Car", "success", car.name);
+                        },
+                      },
+                      {
+                        id: "car-showroom",
+                        label: "Open in 3D Showroom",
+                        icon: <Sparkles className="w-3.5 h-3.5" />,
+                        onSelect: () => {
+                          armCar(car);
+                          navigate("garage", "showroom");
+                        },
+                      },
+                      {
+                        id: "car-favorite",
+                        label: isFav ? "Remove from Favorites" : "Add to Favorites",
+                        icon: <Star className="w-3.5 h-3.5" />,
+                        divider: true,
+                        onSelect: () => toggleFavorite(car.id),
+                      },
+                      {
+                        id: "car-folder",
+                        label: "Open Car Folder",
+                        icon: <FolderOpen className="w-3.5 h-3.5" />,
+                        onSelect: () => void api.openPathInExplorer(car.path),
+                      },
+                    ]);
+                  }}
                   className={`group glass-panel rounded-2xl overflow-hidden transition-all duration-150 cursor-pointer flex flex-col ${
-                    isSelected
+                    isInspecting || isSelected
                       ? "ring-2 ring-[var(--accent)] border-[var(--accent)]"
                       : isArmed
                       ? "border-[var(--accent-border)]"
@@ -622,271 +709,331 @@ export function CarsPage() {
 
       {/* Multi-Select Floating Batch Action Bar */}
       {selectedIds.size > 0 && (
-        <div className="absolute bottom-5 left-1/2 -translate-x-1/2 z-30 glass-panel rounded-2xl px-4 py-2.5 border border-white/[0.15] shadow-2xl flex flex-wrap items-center gap-3 animate-scale-in">
-          <div className="flex items-center gap-2 pr-2 border-r border-white/[0.1]">
-            <CheckSquare className="w-4 h-4 text-[var(--accent)]" />
-            <span className="text-xs font-mono font-semibold text-white">
-              {selectedIds.size} selected
-            </span>
-          </div>
+        <div className="absolute inset-x-4 bottom-5 z-30 flex justify-center pointer-events-none">
+          <div className="pointer-events-auto w-max max-w-full glass-panel rounded-2xl px-3.5 py-2 border border-white/[0.15] shadow-2xl flex flex-wrap items-center justify-center gap-2.5 animate-scale-in">
+            <div className="flex items-center gap-2 pr-2 border-r border-white/[0.1]">
+              <CheckSquare className="w-4 h-4 text-[var(--accent)]" />
+              <span className="text-xs font-mono font-semibold text-white">
+                {selectedIds.size} selected
+              </span>
+            </div>
 
-          <Button
-            variant="danger"
-            size="sm"
-            icon={<PowerOff className="w-3.5 h-3.5" />}
-            onClick={() => void handleBatchDisable(false)}
-          >
-            Disable
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => void handleBatchDisable(true)}
-          >
-            Enable
-          </Button>
-
-          <div className="flex items-center gap-1.5 pl-1 border-l border-white/[0.1]">
-            <input
-              type="text"
-              value={batchTagInput}
-              onChange={(e) => setBatchTagInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleBatchAddTag()}
-              placeholder="#endurance"
-              className="h-8 w-28 px-2.5 rounded-lg bg-black/40 border border-white/[0.1] text-xs font-mono text-white placeholder:text-[var(--text-muted)] outline-none focus:border-[var(--accent-border)]"
-            />
+            <Button
+              variant="danger"
+              size="sm"
+              icon={<PowerOff className="w-3.5 h-3.5" />}
+              onClick={() => void handleBatchDisable(false)}
+            >
+              Disable
+            </Button>
             <Button
               variant="secondary"
               size="sm"
-              icon={<Tag className="w-3.5 h-3.5" />}
-              onClick={handleBatchAddTag}
+              onClick={() => void handleBatchDisable(true)}
             >
-              Add Tag
+              Enable
             </Button>
-          </div>
 
-          <button
-            type="button"
-            onClick={() => setSelectedIds(new Set())}
-            className="text-xs text-[var(--text-muted)] hover:text-white px-1.5 cursor-pointer"
-          >
-            Clear
-          </button>
-        </div>
-      )}
-
-      {/* Sleek Slide-Over Car Detail Drawer */}
-      {activeCar && (
-        <div className="fixed inset-0 z-40 flex justify-end bg-black/55 backdrop-blur-sm animate-fade-in">
-          <div className="flex-1" onClick={() => setActiveCar(null)} />
-          <div className="w-full max-w-[540px] h-full bg-[#0A0E15] border-l border-white/[0.1] shadow-2xl flex flex-col overflow-hidden">
-            {/* Drawer Hero */}
-            <div className="relative h-52 shrink-0 bg-[#070A10] overflow-hidden border-b border-white/[0.08]">
-              {assetUrl(activeCar.previewPath) ? (
-                <img
-                  src={assetUrl(activeCar.previewPath)!}
-                  alt={activeCar.name}
-                  className="w-full h-full object-cover"
-                />
-              ) : (
-                <div className="w-full h-full flex items-center justify-center bg-[radial-gradient(ellipse_at_50%_30%,rgba(var(--accent-rgb),0.22),#070A10_75%)]">
-                  <Sparkles className="w-10 h-10 text-[var(--accent)] opacity-70" />
-                </div>
-              )}
-              <div className="absolute inset-0 bg-gradient-to-t from-[#0A0E15] via-[#0A0E15]/30 to-black/40" />
-
-              <button
-                type="button"
-                onClick={() => setActiveCar(null)}
-                className="absolute top-3.5 right-3.5 h-8 w-8 rounded-lg bg-black/60 border border-white/[0.12] flex items-center justify-center text-white/80 hover:text-white cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-
-              <div className="absolute bottom-3.5 left-5 right-5 flex items-end justify-between gap-3">
-                <div>
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-[11px] font-mono uppercase tracking-[0.14em] text-[var(--accent)]">
-                      {activeCar.brand}
-                    </span>
-                    {activeCar.year && <Badge variant="neutral">{activeCar.year}</Badge>}
-                    <Badge variant="accent" className="uppercase">
-                      {activeCar.class}
-                    </Badge>
-                  </div>
-                  <h2 className="font-display text-3xl font-bold uppercase tracking-wide text-white leading-none">
-                    {activeCar.name}
-                  </h2>
-                </div>
-              </div>
-            </div>
-
-            {/* Action Bar */}
-            <div className="px-5 py-3 border-b border-white/[0.06] flex items-center gap-2 shrink-0 bg-white/[0.015]">
-              <Button
-                variant="primary"
-                size="sm"
-                icon={<Play className="w-3.5 h-3.5 fill-current" />}
-                onClick={() => {
-                  armCar(activeCar);
-                  notify("Armed for Drive", "success", activeCar.name);
-                  navigate("drive", "quick-race");
-                }}
-              >
-                Arm for Drive
-              </Button>
+            <div className="flex items-center gap-1.5 pl-1 border-l border-white/[0.1]">
+              <input
+                type="text"
+                value={batchTagInput}
+                onChange={(e) => setBatchTagInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleBatchAddTag()}
+                placeholder="#endurance"
+                className="h-8 w-28 px-2.5 rounded-lg bg-black/40 border border-white/[0.1] text-xs font-mono text-white placeholder:text-[var(--text-muted)] outline-none focus:border-[var(--accent-border)]"
+              />
               <Button
                 variant="secondary"
                 size="sm"
-                icon={<Eye className="w-3.5 h-3.5" />}
-                onClick={() => {
-                  armCar(activeCar);
-                  setActiveCar(null);
-                  navigate("garage", "showroom");
-                }}
+                icon={<Tag className="w-3.5 h-3.5" />}
+                onClick={handleBatchAddTag}
               >
-                Showroom
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                icon={<FolderOpen className="w-3.5 h-3.5" />}
-                onClick={() => void api.openPathInExplorer(activeCar.path)}
-              >
-                Folder
+                Add Tag
               </Button>
             </div>
 
-            {/* Scrollable Telemetry & Physics Content */}
-            <div className="flex-1 overflow-y-auto p-5 space-y-5">
-              {/* Specs Grid */}
-              <div className="grid grid-cols-3 gap-2.5">
-                <KpiTile label="Power" value={activeCar.bhp || "—"} accent />
-                <KpiTile label="Torque" value={activeCar.torque || "—"} />
-                <KpiTile label="Weight" value={activeCar.weight || "—"} />
-                <KpiTile label="Top Speed" value={activeCar.topSpeed || "—"} />
-                <KpiTile label="P/W Ratio" value={activeCar.pwRatio || "—"} />
-                <KpiTile label="Liveries" value={activeCar.skinsCount ?? 0} />
+            <button
+              type="button"
+              onClick={() => setSelectedIds(new Set())}
+              className="text-xs text-[var(--text-muted)] hover:text-white px-1.5 cursor-pointer"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+      )}
+      </div>
+
+      {/* Non-Blocking Split Side Car Inspector */}
+      {activeCar && (
+        <aside className="w-full lg:w-[420px] xl:w-[480px] max-h-[50vh] lg:max-h-none shrink-0 lg:h-full bg-[#0A0E15] border-t lg:border-t-0 lg:border-l border-white/[0.09] flex flex-col overflow-hidden animate-fade-in">
+          {/* Inspector Hero */}
+          <div className="relative h-44 shrink-0 bg-[#070A10] overflow-hidden border-b border-white/[0.08]">
+            {assetUrl(activeCar.previewPath) ? (
+              <img
+                src={assetUrl(activeCar.previewPath)!}
+                alt={activeCar.name}
+                className="w-full h-full object-cover"
+              />
+            ) : (
+              <div className="w-full h-full flex items-center justify-center bg-[radial-gradient(ellipse_at_50%_30%,rgba(var(--accent-rgb),0.22),#070A10_75%)]">
+                <Sparkles className="w-10 h-10 text-[var(--accent)] opacity-70" />
               </div>
+            )}
+            <div className="absolute inset-0 bg-gradient-to-t from-[#0A0E15] via-[#0A0E15]/30 to-black/40" />
 
-              {/* Physics Dyno Preview */}
-              <div className="glass-panel rounded-2xl p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Gauge className="w-4 h-4 text-[var(--accent)]" />
-                    <span className="text-xs font-semibold uppercase tracking-wider">
-                      Engine Dyno Curve
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-3 text-[10px] font-mono">
-                    <span className="flex items-center gap-1 text-[var(--accent)]">
-                      <span className="w-2 h-0.5 bg-[var(--accent)]" /> HP
-                    </span>
-                    <span className="flex items-center gap-1 text-cyan-400">
-                      <span className="w-2 h-0.5 bg-cyan-400" /> Nm
-                    </span>
-                  </div>
-                </div>
-                {loadingPhysics || !physics ? (
-                  <div className="h-36 rounded-xl acxs-skeleton" />
-                ) : (
-                  <DynoChart physics={physics} />
-                )}
-              </div>
+            <button
+              type="button"
+              onClick={() => setActiveCar(null)}
+              aria-label="Close car inspector"
+              className="absolute top-3 right-3 h-8 w-8 rounded-lg bg-black/60 border border-white/[0.12] flex items-center justify-center text-white/80 hover:text-white cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
 
-              {/* Aero, Tyres & Drivetrain */}
-              {physics && (
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="glass-panel rounded-xl p-3.5 space-y-2">
-                    <div className="flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-wider text-[var(--text-muted)]">
-                      <Wind className="w-3.5 h-3.5 text-cyan-400" />
-                      Aero Profile
-                    </div>
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="text-[var(--text-secondary)]">Drag (Cd)</span>
-                      <span className="font-mono font-semibold text-white">
-                        {physics.aeroCd?.toFixed(2) ?? "—"}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="text-[var(--text-secondary)]">Downforce (Cl)</span>
-                      <span className="font-mono font-semibold text-white">
-                        {physics.aeroCl?.toFixed(2) ?? "—"}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="text-[var(--text-secondary)]">Data ACD</span>
-                      <Badge variant={physics.hasUnpackedData ? "warning" : "success"}>
-                        {physics.hasUnpackedData ? "Unpacked" : "Packed"}
-                      </Badge>
-                    </div>
-                  </div>
-
-                  <div className="glass-panel rounded-xl p-3.5 space-y-2">
-                    <div className="flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-wider text-[var(--text-muted)]">
-                      <Disc className="w-3.5 h-3.5 text-[var(--accent)]" />
-                      Tyre Compounds
-                    </div>
-                    <div className="flex flex-wrap gap-1.5">
-                      {(physics.tyreCompounds ?? ["Default"]).map((comp) => (
-                        <Badge key={comp} variant="neutral">
-                          {comp}
-                        </Badge>
-                      ))}
-                    </div>
-                  </div>
+            <div className="absolute bottom-3 left-5 right-5 flex items-end justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-[11px] font-mono uppercase tracking-[0.14em] text-[var(--accent)]">
+                    {activeCar.brand}
+                  </span>
+                  {activeCar.year && <Badge variant="neutral">{activeCar.year}</Badge>}
+                  <Badge variant="accent" className="uppercase">
+                    {activeCar.class}
+                  </Badge>
                 </div>
-              )}
-
-              {/* Gear Top Speeds */}
-              {physics && physics.gearTopSpeedsKmh.length > 0 && (
-                <div className="glass-panel rounded-xl p-3.5 space-y-2.5">
-                  <div className="flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-wider text-[var(--text-muted)]">
-                    <Zap className="w-3.5 h-3.5 text-amber-400" />
-                    Gearbox V-Max Projection
-                  </div>
-                  <div className="space-y-1.5">
-                    {physics.gearTopSpeedsKmh.map((kmh, i) => {
-                      const maxKmh = Math.max(...physics.gearTopSpeedsKmh, 300);
-                      return (
-                        <div key={i} className="flex items-center gap-2.5 text-xs font-mono">
-                          <span className="w-7 text-[var(--text-muted)]">G{i + 1}</span>
-                          <div className="flex-1 h-2 rounded-full bg-white/[0.06] overflow-hidden">
-                            <div
-                              className="h-full rounded-full bg-gradient-to-r from-cyan-500/70 to-[var(--accent)]"
-                              style={{ width: `${(kmh / maxKmh) * 100}%` }}
-                            />
-                          </div>
-                          <span className="w-16 text-right text-[var(--text-primary)] tabular-nums">
-                            {kmh} km/h
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {/* Tags */}
-              <div className="space-y-1.5">
-                <div className="flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-wider text-[var(--text-muted)]">
-                  <Layers className="w-3.5 h-3.5" />
-                  Tags & Path
-                </div>
-                <div className="flex flex-wrap gap-1.5">
-                  {[...activeCar.tags, ...(customTags[activeCar.id] ?? [])].map((t) => (
-                    <Badge key={t} variant="neutral">
-                      {t}
-                    </Badge>
-                  ))}
-                </div>
-                <div className="text-[11px] font-mono text-[var(--text-muted)] break-all pt-1">
-                  {activeCar.path}
-                </div>
+                <h2 className="font-display text-2xl xl:text-3xl font-bold uppercase tracking-wide text-white leading-none truncate">
+                  {activeCar.name}
+                </h2>
               </div>
             </div>
           </div>
-        </div>
+
+          {/* Action Bar */}
+          <div className="px-5 py-3 border-b border-white/[0.06] flex items-center gap-2 shrink-0 bg-white/[0.015]">
+            <Button
+              variant="primary"
+              size="sm"
+              icon={<Play className="w-3.5 h-3.5 fill-current" />}
+              onClick={() => {
+                armCar(activeCar, selectedSkinId || undefined);
+                notify("Armed for Drive", "success", activeCar.name);
+                navigate("drive", "quick-race");
+              }}
+            >
+              Arm for Drive
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<Eye className="w-3.5 h-3.5" />}
+              onClick={() => {
+                armCar(activeCar, selectedSkinId || undefined);
+                navigate("garage", "showroom");
+              }}
+            >
+              Showroom
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<FolderOpen className="w-3.5 h-3.5" />}
+              onClick={() => void api.openPathInExplorer(activeCar.path)}
+            >
+              Folder
+            </Button>
+          </div>
+
+          {/* Scrollable Telemetry, Liveries & Physics Content */}
+          <div className="flex-1 overflow-y-auto p-5 space-y-5">
+            {/* Clickable Livery Selector */}
+            <div className="glass-panel rounded-xl p-3.5 space-y-2">
+              <div className="flex items-center justify-between text-[11px] font-mono uppercase tracking-wider text-[var(--text-muted)]">
+                <span>Livery Selection ({skins.length})</span>
+                {selectedSkinId && (
+                  <span className="text-[var(--accent)] truncate max-w-[160px]">
+                    {skins.find((s) => s.id === selectedSkinId)?.name ?? selectedSkinId}
+                  </span>
+                )}
+              </div>
+              {skins.length === 0 ? (
+                <div className="text-xs text-[var(--text-muted)]">
+                  Default factory livery
+                </div>
+              ) : (
+                <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto">
+                  {skins.map((skin) => {
+                    const active = selectedSkinId === skin.id;
+                    return (
+                      <button
+                        key={skin.id}
+                        type="button"
+                        onClick={() => setSelectedSkinId(skin.id)}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] border transition-colors cursor-pointer ${
+                          active
+                            ? "bg-[var(--accent-soft)] text-[var(--accent)] border-[var(--accent-border)] font-semibold"
+                            : "bg-white/[0.03] text-[var(--text-secondary)] border-white/[0.08] hover:text-white"
+                        }`}
+                      >
+                        {skin.number ? `#${skin.number} ` : ""}
+                        {skin.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Specs Grid */}
+            <div className="grid grid-cols-3 gap-2.5">
+              <KpiTile label="Power" value={activeCar.bhp || "—"} accent />
+              <KpiTile
+                label="Torque"
+                value={
+                  activeCar.torque ||
+                  (physics && physics.torqueNm.length > 0
+                    ? `${Math.round(Math.max(...physics.torqueNm))} Nm`
+                    : "—")
+                }
+              />
+              <KpiTile
+                label="Weight"
+                value={
+                  activeCar.weight ||
+                  (physics && physics.massKg > 0 ? `${physics.massKg} kg` : "—")
+                }
+              />
+              <KpiTile
+                label="Top Speed"
+                value={
+                  activeCar.topSpeed ||
+                  (physics && physics.gearTopSpeedsKmh.length > 0
+                    ? `${Math.round(Math.max(...physics.gearTopSpeedsKmh))} km/h`
+                    : "—")
+                }
+              />
+              <KpiTile label="P/W Ratio" value={activeCar.pwRatio || "—"} />
+              <KpiTile label="Liveries" value={activeCar.skinsCount ?? skins.length} />
+            </div>
+
+            {/* Physics Dyno Preview */}
+            <div className="glass-panel rounded-2xl p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Gauge className="w-4 h-4 text-[var(--accent)]" />
+                  <span className="text-xs font-semibold uppercase tracking-wider">
+                    Engine Dyno Curve
+                  </span>
+                </div>
+                <div className="flex items-center gap-3 text-[10px] font-mono">
+                  <span className="flex items-center gap-1 text-[var(--accent)]">
+                    <span className="w-2 h-0.5 bg-[var(--accent)]" /> HP
+                  </span>
+                  <span className="flex items-center gap-1 text-cyan-400">
+                    <span className="w-2 h-0.5 bg-cyan-400" /> Nm
+                  </span>
+                </div>
+              </div>
+              {loadingPhysics || !physics ? (
+                <div className="h-36 rounded-xl acxs-skeleton" />
+              ) : (
+                <DynoChart physics={physics} />
+              )}
+            </div>
+
+            {/* Aero, Tyres & Drivetrain */}
+            {physics && (
+              <div className="grid grid-cols-2 gap-3">
+                <div className="glass-panel rounded-xl p-3.5 space-y-2">
+                  <div className="flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-wider text-[var(--text-muted)]">
+                    <Wind className="w-3.5 h-3.5 text-cyan-400" />
+                    Aero Profile
+                  </div>
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-[var(--text-secondary)]">Drag (Cd)</span>
+                    <span className="font-mono font-semibold text-white">
+                      {physics.aeroCd?.toFixed(2) ?? "—"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-[var(--text-secondary)]">Downforce (Cl)</span>
+                    <span className="font-mono font-semibold text-white">
+                      {physics.aeroCl?.toFixed(2) ?? "—"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-[var(--text-secondary)]">Data ACD</span>
+                    <Badge variant={physics.hasUnpackedData ? "warning" : "success"}>
+                      {physics.hasUnpackedData ? "Unpacked" : "Packed"}
+                    </Badge>
+                  </div>
+                </div>
+
+                <div className="glass-panel rounded-xl p-3.5 space-y-2">
+                  <div className="flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-wider text-[var(--text-muted)]">
+                    <Disc className="w-3.5 h-3.5 text-[var(--accent)]" />
+                    Tyre Compounds
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {(physics.tyreCompounds ?? ["Default"]).map((comp) => (
+                      <Badge key={comp} variant="neutral">
+                        {comp}
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Gear Top Speeds */}
+            {physics && physics.gearTopSpeedsKmh.length > 0 && (
+              <div className="glass-panel rounded-xl p-3.5 space-y-2.5">
+                <div className="flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-wider text-[var(--text-muted)]">
+                  <Zap className="w-3.5 h-3.5 text-amber-400" />
+                  Gearbox V-Max Projection
+                </div>
+                <div className="space-y-1.5">
+                  {physics.gearTopSpeedsKmh.map((kmh, i) => {
+                    const maxKmh = Math.max(...physics.gearTopSpeedsKmh, 300);
+                    return (
+                      <div key={i} className="flex items-center gap-2.5 text-xs font-mono">
+                        <span className="w-7 text-[var(--text-muted)]">G{i + 1}</span>
+                        <div className="flex-1 h-2 rounded-full bg-white/[0.06] overflow-hidden">
+                          <div
+                            className="h-full rounded-full bg-gradient-to-r from-cyan-500/70 to-[var(--accent)]"
+                            style={{ width: `${(kmh / maxKmh) * 100}%` }}
+                          />
+                        </div>
+                        <span className="w-20 text-right text-[var(--text-primary)] tabular-nums whitespace-nowrap shrink-0">
+                          {Math.round(kmh)} km/h
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Tags */}
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-wider text-[var(--text-muted)]">
+                <Layers className="w-3.5 h-3.5" />
+                Tags &amp; Path
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {[...activeCar.tags, ...(customTags[activeCar.id] ?? [])].map((t) => (
+                  <Badge key={t} variant="neutral">
+                    {t}
+                  </Badge>
+                ))}
+              </div>
+              <div className="text-[11px] font-mono text-[var(--text-muted)] break-all pt-1">
+                {activeCar.path}
+              </div>
+            </div>
+          </div>
+        </aside>
       )}
     </div>
   );

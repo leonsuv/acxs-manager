@@ -32,6 +32,7 @@ pub struct CarDto {
     pub bhp: Option<f64>,
     pub weight_kg: Option<f64>,
     pub pwratio: Option<f64>,
+    pub skins_count: usize,
     pub path: String,
     pub preview_path: Option<String>,
     pub badge_path: Option<String>,
@@ -91,6 +92,7 @@ pub struct WeeklyHoursDto {
 #[serde(rename_all = "camelCase")]
 pub struct DrivingStatsSummaryDto {
     pub sessions: usize,
+    pub total_laps: usize,
     pub seconds: f64,
     pub distance_km: f64,
     pub crashes: u32,
@@ -131,34 +133,41 @@ fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-/// Finds the first available `preview.jpg` or `preview.png` for a car folder.
-fn resolve_car_preview(car_dir: &Path) -> Option<String> {
+/// Finds the first available `preview.jpg` or `preview.png` and counts skins for a car folder.
+fn resolve_car_preview_and_skins(car_dir: &Path) -> (Option<String>, usize) {
     let skins_dir = car_dir.join("skins");
+    let mut skins_count = 0usize;
+    let mut preview_path = None;
     if let Ok(read) = fs::read_dir(&skins_dir) {
         let mut dirs: Vec<PathBuf> = read
             .flatten()
             .map(|e| e.path())
             .filter(|p| p.is_dir())
             .collect();
+        skins_count = dirs.len();
         dirs.sort();
         for skin_dir in dirs {
             if let Some(preview) = skins::preview_for(&skin_dir) {
-                return Some(path_to_string(&preview));
+                preview_path = Some(path_to_string(&preview));
+                break;
             }
         }
     }
-    for rel in [
-        "ui/preview.jpg",
-        "ui/preview.png",
-        "preview.jpg",
-        "preview.png",
-    ] {
-        let candidate = car_dir.join(rel);
-        if candidate.is_file() {
-            return Some(path_to_string(&candidate));
+    if preview_path.is_none() {
+        for rel in [
+            "ui/preview.jpg",
+            "ui/preview.png",
+            "preview.jpg",
+            "preview.png",
+        ] {
+            let candidate = car_dir.join(rel);
+            if candidate.is_file() {
+                preview_path = Some(path_to_string(&candidate));
+                break;
+            }
         }
     }
-    None
+    (preview_path, skins_count)
 }
 
 fn resolve_car_badge(car_dir: &Path) -> Option<String> {
@@ -185,6 +194,7 @@ fn resolve_track_image(track_dir: &Path, layouts: &[String], file_name: &str) ->
 }
 
 fn car_to_dto(car: &CarEntry) -> CarDto {
+    let (preview_path, skins_count) = resolve_car_preview_and_skins(&car.path);
     CarDto {
         id: car.id.clone(),
         name: car.name.clone(),
@@ -198,7 +208,8 @@ fn car_to_dto(car: &CarEntry) -> CarDto {
         bhp: car.bhp,
         weight_kg: car.weight_kg,
         pwratio: car.pwratio,
-        preview_path: resolve_car_preview(&car.path),
+        skins_count,
+        preview_path,
         badge_path: resolve_car_badge(&car.path),
         path: path_to_string(&car.path),
     }
@@ -221,9 +232,10 @@ fn track_to_dto(track: &TrackEntry) -> TrackDto {
     }
 }
 
-fn stats_to_dto(stats: &DrivingStats) -> DrivingStatsSummaryDto {
+fn stats_to_dto(stats: &DrivingStats, total_laps: usize) -> DrivingStatsSummaryDto {
     DrivingStatsSummaryDto {
         sessions: stats.sessions,
+        total_laps,
         seconds: stats.seconds,
         distance_km: stats.distance_km,
         crashes: stats.crashes,
@@ -333,6 +345,13 @@ pub fn scan_content(state: State<'_, AppState>) -> Result<ContentScanResult, Str
         .map(|p| driving_stats::load_profile(&p))
         .unwrap_or_default();
     let stats = driving_stats::summarize(&sessions);
+    let acxs_laps: usize = acxs_manager::session_recorder::load_all(
+        &acxs_manager::session_recorder::sessions_dir(),
+    )
+    .iter()
+    .map(|s| s.laps.len())
+    .sum();
+    let total_laps = acxs_laps + driving_stats::load_cm_laps().len();
 
     Ok(ContentScanResult {
         ac_root: path_to_string(&ac_root),
@@ -341,7 +360,7 @@ pub fn scan_content(state: State<'_, AppState>) -> Result<ContentScanResult, Str
         game_running,
         csp_build,
         csp_version,
-        driving_stats: stats_to_dto(&stats),
+        driving_stats: stats_to_dto(&stats, total_laps),
     })
 }
 

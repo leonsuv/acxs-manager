@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  Box,
   Camera,
+  Check,
   Compass,
   Download,
   Flag,
@@ -19,17 +21,15 @@ import { api, assetUrl, isTauri } from "../lib/api";
 import { ACCENT_PRESETS } from "../lib/types";
 import type { Track3DSceneData, TrackEntry } from "../lib/types";
 import { useAppStore } from "../store/appStore";
+import { useContextMenu } from "../components/ContextMenu";
 import {
   Badge,
   Button,
   EmptyState,
   KpiTile,
   PageHeader,
-  SegmentedControl,
 } from "../components/Primitives";
 import { Viewport3D } from "../components/Viewport3D";
-
-type InspectorTab = "overview" | "surfaces" | "drs" | "ai-hints";
 
 const SURFACE_PRESETS = [
   { name: "ROAD (Asphalt)", grip: 1.0, damping: 0.0, vibration: "Low", valid: true },
@@ -170,6 +170,7 @@ function generateTrackMapPng(
 
 export function TracksPage() {
   const { tracks, armedSession, accent, armTrack, navigate, notify } = useAppStore();
+  const { openContextMenu } = useContextMenu();
 
   const accentHex = useMemo(
     () => ACCENT_PRESETS.find((p) => p.id === accent)?.hex ?? "#FF4D2E",
@@ -181,7 +182,6 @@ export function TracksPage() {
   const [serverTracks, setServerTracks] = useState<TrackEntry[] | null>(null);
   const [selectedLayouts, setSelectedLayouts] = useState<Record<string, string>>({});
   const [inspectTrack, setInspectTrack] = useState<TrackEntry | null>(null);
-  const [inspectorTab, setInspectorTab] = useState<InspectorTab>("overview");
   const [trackScene, setTrackScene] = useState<Track3DSceneData | null>(null);
   const [loadingScene, setLoadingScene] = useState(false);
   const [generatedMapUrl, setGeneratedMapUrl] = useState<string | null>(null);
@@ -292,9 +292,9 @@ export function TracksPage() {
       ];
 
   return (
-    <div className="h-full flex overflow-hidden animate-fade-in">
+    <div className="h-full flex flex-col lg:flex-row overflow-hidden animate-fade-in">
       {/* Main Track Grid Pane */}
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+      <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
         <div className="p-6 pb-4 space-y-4 shrink-0">
           <PageHeader
             eyebrow="Garage · Circuits & Stages"
@@ -392,6 +392,32 @@ export function TracksPage() {
                   <div
                     key={track.id}
                     onClick={() => setInspectTrack(track)}
+                    onContextMenu={(e) => {
+                      openContextMenu(e, [
+                        {
+                          id: "track-arm",
+                          label: "Arm Track for Drive",
+                          icon: <Check className="w-3.5 h-3.5" />,
+                          onSelect: () => {
+                            armTrack(track);
+                            notify("Armed Track", "success", track.name);
+                          },
+                        },
+                        {
+                          id: "track-inspect",
+                          label: "Inspect 3D Corridor",
+                          icon: <Box className="w-3.5 h-3.5" />,
+                          onSelect: () => setInspectTrack(track),
+                        },
+                        {
+                          id: "track-folder",
+                          label: "Open Track Folder",
+                          icon: <FolderOpen className="w-3.5 h-3.5" />,
+                          divider: true,
+                          onSelect: () => void api.openPathInExplorer(track.path),
+                        },
+                      ]);
+                    }}
                     className={`group glass-panel rounded-2xl overflow-hidden transition-all duration-150 cursor-pointer flex flex-col ${
                       isInspecting
                         ? "ring-2 ring-[var(--accent)] border-[var(--accent)]"
@@ -514,7 +540,7 @@ export function TracksPage() {
 
       {/* Integrated Track & Map Inspector Split Panel */}
       {inspectTrack && (
-        <div className="w-[480px] xl:w-[540px] shrink-0 h-full bg-[#0A0E15] border-l border-white/[0.09] flex flex-col overflow-hidden animate-fade-in">
+        <aside className="w-full lg:w-[420px] xl:w-[520px] max-h-[48vh] lg:max-h-none shrink-0 lg:h-full bg-[#0A0E15] border-t lg:border-t-0 lg:border-l border-white/[0.09] flex flex-col overflow-hidden animate-fade-in">
           {/* Inspector Header */}
           <div className="px-5 py-4 border-b border-white/[0.07] flex items-start justify-between gap-3 shrink-0">
             <div className="min-w-0">
@@ -589,7 +615,7 @@ export function TracksPage() {
           {/* Scrollable Inspector Body */}
           <div className="flex-1 overflow-y-auto p-5 space-y-4">
             {/* 3D Track Corridor Viewport */}
-            <div className="h-[240px] relative">
+            <div className="h-[260px] relative overflow-hidden rounded-2xl shrink-0">
               <Viewport3D
                 mode="track"
                 trackData={trackScene}
@@ -651,135 +677,115 @@ export function TracksPage() {
               </div>
             )}
 
-            {/* Inspector Sub-Sections */}
-            <SegmentedControl
-              size="sm"
-              value={inspectorTab}
-              onChange={setInspectorTab}
-              className="w-full grid grid-cols-4"
-              options={[
-                { value: "overview", label: "AI Spline" },
-                { value: "surfaces", label: "Surfaces" },
-                { value: "drs", label: "DRS & Cams" },
-                { value: "ai-hints", label: "ai_hints.ini" },
-              ]}
-            />
+            {/* 1. AI Spline & Telemetry KPIs */}
+            <div className="grid grid-cols-2 gap-2.5">
+              <KpiTile
+                label="AI Spline Nodes"
+                value={trackScene ? trackScene.centerline.length : "—"}
+                sublabel="fast_lane.ai parsed"
+                icon={<Navigation className="w-3.5 h-3.5" />}
+                accent
+              />
+              <KpiTile
+                label="TV Cameras"
+                value={trackScene ? (trackScene.camerasCount ?? 0) : "—"}
+                sublabel="cameras.ini sets"
+                icon={<Camera className="w-3.5 h-3.5" />}
+              />
+              <KpiTile
+                label="Track Sections"
+                value={trackScene ? (trackScene.sectionsCount ?? 0) : "—"}
+                sublabel="sections.ini sectors"
+                icon={<Layers className="w-3.5 h-3.5" />}
+              />
+              <KpiTile
+                label="AI Hints"
+                value={trackScene ? (trackScene.aiHintsCount ?? 0) : "—"}
+                sublabel="ai_hints.ini rules"
+                icon={<Compass className="w-3.5 h-3.5" />}
+              />
+            </div>
 
-            {inspectorTab === "overview" && (
-              <div className="grid grid-cols-2 gap-2.5">
-                <KpiTile
-                  label="AI Spline Nodes"
-                  value={trackScene?.centerline?.length ?? 480}
-                  sublabel="fast_lane.ai parsed"
-                  icon={<Navigation className="w-3.5 h-3.5" />}
-                  accent
-                />
-                <KpiTile
-                  label="TV Cameras"
-                  value={trackScene?.camerasCount ?? 18}
-                  sublabel="cameras.ini sets"
-                  icon={<Camera className="w-3.5 h-3.5" />}
-                />
-                <KpiTile
-                  label="Track Sections"
-                  value={trackScene?.sectionsCount ?? 14}
-                  sublabel="sections.ini sectors"
-                  icon={<Layers className="w-3.5 h-3.5" />}
-                />
-                <KpiTile
-                  label="AI Hints"
-                  value={trackScene?.aiHintsCount ?? DEMO_AI_HINTS.length}
-                  sublabel="ai_hints.ini rules"
-                  icon={<Compass className="w-3.5 h-3.5" />}
-                />
-              </div>
-            )}
-
-            {inspectorTab === "surfaces" && (
-              <div className="glass-panel rounded-xl overflow-hidden">
-                <div className="px-3.5 py-2 border-b border-white/[0.06] text-[11px] font-mono uppercase tracking-wider text-[var(--text-muted)]">
-                  surfaces.ini · Grip & Damping Matrix
+            {/* 2. DRS Activation Zones & Replay Cams */}
+            <div className="space-y-3">
+              <div className="glass-panel rounded-xl p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="flex items-center gap-1.5 text-xs font-semibold text-white">
+                    <Wind className="w-3.5 h-3.5 text-emerald-400" />
+                    DRS Activation Zones ({drsZones.length})
+                  </span>
+                  <Badge variant="success">drs_zones.ini</Badge>
                 </div>
-                <div className="divide-y divide-white/[0.05]">
-                  {SURFACE_PRESETS.map((s) => (
+                <div className="relative h-3 rounded-full bg-white/[0.07] overflow-hidden">
+                  {drsZones.map((z, idx) => (
                     <div
-                      key={s.name}
-                      className="px-3.5 py-2.5 flex items-center justify-between text-xs"
+                      key={idx}
+                      className="absolute top-0 bottom-0 bg-emerald-400/80 rounded-full"
+                      style={{
+                        left: `${z.start * 100}%`,
+                        width: `${Math.max(4, (z.end - z.start) * 100)}%`,
+                      }}
+                    />
+                  ))}
+                </div>
+                <div className="space-y-1.5">
+                  {drsZones.map((z, idx) => (
+                    <div
+                      key={idx}
+                      className="flex items-center justify-between text-xs font-mono text-[var(--text-secondary)]"
                     >
-                      <div>
-                        <div className="font-mono font-medium text-white">{s.name}</div>
-                        <div className="text-[10px] text-[var(--text-muted)]">
-                          Damping {s.damping} · Vib {s.vibration}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-cyan-300">μ {s.grip.toFixed(2)}</span>
-                        <Badge variant={s.valid ? "success" : "warning"}>
-                          {s.valid ? "Valid" : "Off-Track"}
-                        </Badge>
-                      </div>
+                      <span>Zone {idx + 1}</span>
+                      <span>
+                        {(z.start * 100).toFixed(1)}% → {(z.end * 100).toFixed(1)}% lap
+                      </span>
                     </div>
                   ))}
                 </div>
               </div>
-            )}
 
-            {inspectorTab === "drs" && (
-              <div className="space-y-3">
-                <div className="glass-panel rounded-xl p-3.5 space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <span className="flex items-center gap-1.5 text-xs font-semibold text-white">
-                      <Wind className="w-3.5 h-3.5 text-emerald-400" />
-                      DRS Activation Zones ({drsZones.length})
-                    </span>
-                    <Badge variant="success">drs_zones.ini</Badge>
-                  </div>
-                  <div className="relative h-3 rounded-full bg-white/[0.07] overflow-hidden">
-                    {drsZones.map((z, idx) => (
-                      <div
-                        key={idx}
-                        className="absolute top-0 bottom-0 bg-emerald-400/80 rounded-full"
-                        style={{
-                          left: `${z.start * 100}%`,
-                          width: `${Math.max(4, (z.end - z.start) * 100)}%`,
-                        }}
-                      />
-                    ))}
-                  </div>
-                  <div className="space-y-1.5">
-                    {drsZones.map((z, idx) => (
-                      <div
-                        key={idx}
-                        className="flex items-center justify-between text-xs font-mono text-[var(--text-secondary)]"
-                      >
-                        <span>Zone {idx + 1}</span>
-                        <span>
-                          {(z.start * 100).toFixed(1)}% → {(z.end * 100).toFixed(1)}% lap
-                        </span>
-                      </div>
-                    ))}
+              <div className="glass-panel rounded-xl p-3.5 flex items-center justify-between">
+                <div>
+                  <div className="text-xs font-semibold text-white">TV Replay Camera Sets</div>
+                  <div className="text-[11px] text-[var(--text-muted)]">
+                    {trackScene
+                      ? `${trackScene.camerasCount ?? 0} broadcast splines detected in cameras.ini`
+                      : "Waiting for cameras.ini telemetry..."}
                   </div>
                 </div>
-
-                <div className="glass-panel rounded-xl p-3.5 flex items-center justify-between">
-                  <div>
-                    <div className="text-xs font-semibold text-white">TV Replay Camera Sets</div>
-                    <div className="text-[11px] text-[var(--text-muted)]">
-                      {trackScene?.camerasCount ?? 18} broadcast splines detected in cameras.ini
-                    </div>
-                  </div>
-                  <Badge variant="info">TV1 · TV2 · Static</Badge>
-                </div>
+                <Badge variant="info">TV1 · TV2 · Static</Badge>
               </div>
-            )}
+            </div>
 
-            {inspectorTab === "ai-hints" && (
-              <div className="glass-panel rounded-xl overflow-hidden">
-                <div className="px-3.5 py-2 border-b border-white/[0.06] text-[11px] font-mono uppercase tracking-wider text-[var(--text-muted)]">
-                  data/ai_hints.ini · Spline Modifiers
-                </div>
-                <div className="divide-y divide-white/[0.05]">
-                  {DEMO_AI_HINTS.map((h, i) => (
+            {/* 3. ai_hints.ini Modifiers */}
+            <div className="glass-panel rounded-xl overflow-hidden">
+              <div className="px-3.5 py-2 border-b border-white/[0.06] text-[11px] font-mono uppercase tracking-wider text-[var(--text-muted)]">
+                data/ai_hints.ini · Spline Modifiers
+              </div>
+              <div className="divide-y divide-white/[0.05]">
+                {trackScene?.aiHints && trackScene.aiHints.length > 0 ? (
+                  trackScene.aiHints.map((h, i) => (
+                    <div key={i} className="px-3.5 py-2.5 flex items-center justify-between gap-2">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <Badge variant={h.section.toUpperCase().includes("DANGER") ? "danger" : "info"}>
+                            {h.section}
+                          </Badge>
+                          <span className="font-mono text-[11px] text-white">
+                            {h.start.toFixed(2)} – {h.end.toFixed(2)}
+                          </span>
+                        </div>
+                      </div>
+                      <span className="font-mono text-xs font-semibold text-[var(--accent)]">
+                        {h.value}
+                      </span>
+                    </div>
+                  ))
+                ) : trackScene ? (
+                  <div className="px-3.5 py-6 text-center text-xs text-[var(--text-muted)]">
+                    No ai_hints.ini rules defined for this layout.
+                  </div>
+                ) : (
+                  DEMO_AI_HINTS.map((h, i) => (
                     <div key={i} className="px-3.5 py-2.5 flex items-center justify-between gap-2">
                       <div>
                         <div className="flex items-center gap-2">
@@ -794,12 +800,40 @@ export function TracksPage() {
                         {h.value}
                       </span>
                     </div>
-                  ))}
-                </div>
+                  ))
+                )}
               </div>
-            )}
+            </div>
+
+            {/* 4. surfaces.ini Grip Matrix */}
+            <div className="glass-panel rounded-xl overflow-hidden">
+              <div className="px-3.5 py-2 border-b border-white/[0.06] text-[11px] font-mono uppercase tracking-wider text-[var(--text-muted)]">
+                surfaces.ini · Grip &amp; Damping Matrix
+              </div>
+              <div className="divide-y divide-white/[0.05]">
+                {SURFACE_PRESETS.map((s) => (
+                  <div
+                    key={s.name}
+                    className="px-3.5 py-2.5 flex items-center justify-between text-xs"
+                  >
+                    <div>
+                      <div className="font-mono font-medium text-white">{s.name}</div>
+                      <div className="text-[10px] text-[var(--text-muted)]">
+                        Damping {s.damping} · Vib {s.vibration}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-cyan-300">μ {s.grip.toFixed(2)}</span>
+                      <Badge variant={s.valid ? "success" : "warning"}>
+                        {s.valid ? "Valid" : "Off-Track"}
+                      </Badge>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
-        </div>
+        </aside>
       )}
     </div>
   );

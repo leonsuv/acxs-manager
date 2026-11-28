@@ -192,6 +192,17 @@ export interface QuickRaceRequest {
   mode: SessionMode;
   laps: number;
   durationMinutes: number;
+  practiceEnabled?: boolean;
+  practiceMinutes?: number;
+  qualifyEnabled?: boolean;
+  qualifyMinutes?: number;
+  raceEnabled?: boolean;
+  trackDayMinutes?: number;
+  dragMatches?: number;
+  playerBallastKg?: number;
+  playerRestrictor?: number;
+  aiLevel?: number;
+  aiAggression?: number;
   aiOpponents: AiOpponent[];
   timeOfDayMinutes: number;
   weatherId: string;
@@ -284,8 +295,10 @@ export interface OnlineServerSummary {
   maxClients: number;
   pingMs?: number | null;
   cars: string[];
+  playerNames?: string[];
   passworded: boolean;
   country?: string;
+  region?: string;
   cspRequired?: number | null;
   sessionType?: string;
   timeLeftSec?: number | null;
@@ -306,6 +319,16 @@ export interface MissingContentItem {
   downloadUrl?: string | null;
 }
 
+export type ServerTab = "online" | "watchlist" | "recent" | "lan";
+export type ServerSortKey = "name" | "track" | "content" | "clients" | "ping";
+export type ContentOwnershipFilter =
+  | "all"
+  | "ready"
+  | "full"
+  | "have-track"
+  | "missing";
+export type CspRequirementFilter = "all" | "compatible" | "required" | "vanilla";
+
 export interface OnlineServerDetail {
   summary: OnlineServerSummary;
   resolvedTrackId: string;
@@ -313,6 +336,7 @@ export interface OnlineServerDetail {
   minCspBuild?: number | null;
   slots: ServerCarSlot[];
   missingContent: MissingContentItem[];
+  features?: string[];
   description?: string;
   bookingMode?: boolean;
 }
@@ -329,10 +353,67 @@ export interface JoinOnlineRequest {
   host: string;
   port: number;
   httpPort?: number;
+  serverName?: string;
+  track?: string;
+  trackLayout?: string | null;
   carId: string;
   skinId: string;
   password?: string;
   driverName?: string;
+  features?: string[];
+}
+
+export interface JoinUri {
+  host: string;
+  httpPort: number;
+  password?: string;
+  car?: string;
+  skin?: string;
+  minCspBuild?: number;
+}
+
+export interface OnlineJoinResult {
+  pid: number;
+  raceIniPath: string;
+}
+
+export interface OnlineBookingReply {
+  accepted: boolean;
+  message: string;
+  bookingTimeSec?: number | null;
+}
+
+export interface CachedDirectoryResult {
+  servers: OnlineServerSummary[];
+  savedUnix: number | null;
+}
+
+export interface DirectoryProgressEvent {
+  requestId: number;
+  servers: OnlineServerSummary[];
+  loaded: number;
+  total: number;
+  done: boolean;
+}
+
+export interface DedicatedDynamicTrack {
+  sessionStart: number;
+  randomness: number;
+  sessionTransfer: number;
+  lapGain: number;
+}
+
+export interface DedicatedRealism {
+  absAllowed: number;
+  tcAllowed: number;
+  stabilityAllowed: boolean;
+  autoclutchAllowed: boolean;
+  tyreBlanketsAllowed: boolean;
+  forceVirtualMirror: boolean;
+  fuelRate: number;
+  damageMultiplier: number;
+  tyreWearRate: number;
+  allowedTyresOut: number;
 }
 
 export interface DedicatedServerConfig {
@@ -352,6 +433,10 @@ export interface DedicatedServerConfig {
   practiceMinutes: number;
   qualifyMinutes: number;
   raceLaps: number;
+  sunAngle?: number;
+  dynamicTrack?: DedicatedDynamicTrack;
+  realism?: DedicatedRealism;
+  votingPlugins?: Record<string, unknown> | null;
 }
 
 export interface DedicatedServerStatus {
@@ -359,6 +444,34 @@ export interface DedicatedServerStatus {
   pid?: number | null;
   uptimeSec?: number;
   recentLogs: string[];
+}
+
+export interface CspExtraOptions {
+  allowWrongWay: boolean;
+  enforceBackToPitsPenalty: boolean;
+  noCollisions: boolean;
+  pitsKeepCollisions: boolean;
+  pitsNonLethal: boolean;
+  pitsSpeedKmh: number;
+  useCustomWeather: boolean;
+  forceRain: boolean;
+  contentUrl: string;
+  minimumCspBuild: number;
+}
+
+export interface ExtraCfgYml {
+  enableAi: boolean;
+  enableClientMessages: boolean;
+  enableRealPenalty: boolean;
+  contentUrl: string;
+  minimumCspVersion: number;
+  aiMaxDensity: number;
+  aiMaxSpeedKph: number;
+}
+
+export interface ServerCspBundle {
+  cspExtraOptions: CspExtraOptions;
+  extraCfgYml: ExtraCfgYml | null;
 }
 
 export interface RconResponse {
@@ -370,16 +483,41 @@ export interface RconResponse {
 // Garage: 3D Scene, Physics, Tuning, SFX, Setups, Packages, JSGME, Health
 // ----------------------------------------------------------------------------
 
+export interface CarMaterialData {
+  name: string;
+  shader: string;
+  blendMode: number;
+  alphaTested: boolean;
+  ksDiffuse: number;
+  ksSpecular: number;
+  ksSpecularExp: number;
+  diffuseTexture?: string | null;
+}
+
+export interface CarMeshPartData {
+  materialIndex: number;
+  positions: number[];
+  normals: number[];
+  uvs: number[];
+  indices: number[];
+}
+
 export interface Scene3DMeshData {
   positions: number[];
   normals: number[];
   indices: number[];
+  parts?: CarMeshPartData[];
+  materials?: CarMaterialData[];
+  textures?: Record<string, string>;
   bounds?: {
     min: [number, number, number];
     max: [number, number, number];
+    center?: [number, number, number];
+    radius?: number;
   };
   triangleCount?: number;
   nodeCount?: number;
+  meshCount?: number;
   sourcePath?: string;
 }
 
@@ -392,6 +530,7 @@ export interface Track3DSceneData {
   camerasCount?: number;
   sectionsCount?: number;
   aiHintsCount?: number;
+  aiHints?: Array<{ section: string; start: number; end: number; value: number }>;
 }
 
 export interface CarPhysicsData {
@@ -524,6 +663,7 @@ export interface ReplaySummary {
   carId?: string;
   trackId?: string;
   durationSec?: number;
+  place?: string;
 }
 
 export interface StrategyRequest {
@@ -608,6 +748,7 @@ export interface VideoSettings {
   shadowMapSize: number;
   postProcessing: boolean;
   ppFilter: string;
+  cameraMode?: "Default" | "Triple" | "Oculus" | "OpenVr";
 }
 
 export interface VrTripleSettings {

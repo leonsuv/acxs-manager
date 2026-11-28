@@ -200,17 +200,25 @@ mod live_tests {
 }
 
 /// Read the pages one after another and hand each to `on_page(servers, total)` as it arrives, so a
-/// list can fill in while the rest is still loading. Stops after `max_pages` or the last page.
-pub fn fetch_stream(
+/// list can fill in while the rest is still loading. Stops after `max_pages`, the last page, or
+/// when `should_continue()` returns `false`.
+pub fn fetch_stream_cancellable(
     query: Option<&str>,
     has_players: bool,
     max_pages: u32,
     timeout: Duration,
+    should_continue: impl Fn() -> bool,
     mut on_page: impl FnMut(Vec<LobbyServer>, u64),
 ) -> Result<(), String> {
     let mut page = 1;
     loop {
+        if !should_continue() {
+            return Ok(());
+        }
         let result = fetch_page(query, has_players, page, timeout)?;
+        if !should_continue() {
+            return Ok(());
+        }
         let per_page = result.per_page.max(1);
         let pages = result.total.div_ceil(per_page).min(u64::from(max_pages)) as u32;
         let total = result.total;
@@ -221,6 +229,18 @@ pub fn fetch_stream(
         page += 1;
         std::thread::sleep(PAUSE);
     }
+}
+
+/// Read the pages one after another and hand each to `on_page(servers, total)` as it arrives, so a
+/// list can fill in while the rest is still loading. Stops after `max_pages` or the last page.
+pub fn fetch_stream(
+    query: Option<&str>,
+    has_players: bool,
+    max_pages: u32,
+    timeout: Duration,
+    on_page: impl FnMut(Vec<LobbyServer>, u64),
+) -> Result<(), String> {
+    fetch_stream_cancellable(query, has_players, max_pages, timeout, || true, on_page)
 }
 
 /// Maximum number of recently joined servers retained in [`RecentServers`].

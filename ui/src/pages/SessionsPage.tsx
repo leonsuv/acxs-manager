@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -144,6 +144,16 @@ export default function SessionsPage() {
   const [selectedId, setSelectedId] = useState<string>("");
   const [analysis, setAnalysis] = useState<TelemetrySessionAnalysis | null>(null);
   const [activeCornerIdx, setActiveCornerIdx] = useState<number | null>(null);
+  const [isolateCorner, setIsolateCorner] = useState(false);
+  const cornerCardRefs = useRef<Record<number, HTMLDivElement | null>>({});
+
+  useEffect(() => {
+    if (activeCornerIdx === null) return;
+    const el = cornerCardRefs.current[activeCornerIdx];
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }, [activeCornerIdx]);
 
   const loadSessions = useCallback(async () => {
     setLoading(true);
@@ -202,19 +212,15 @@ export default function SessionsPage() {
     if (!analysis) {
       return { lockups: 0, wheelspin: 0, balancePct: 50, totalLossMs: 0 };
     }
-    const lockups = Math.max(
-      1,
-      analysis.speedTrace.filter((p) => p.brake > 0.88).length
-    );
-    const wheelspin = Math.max(
-      1,
-      analysis.speedTrace.filter((p) => p.throttle > 0.92 && p.speedKmh < 120).length
-    );
-    const totalLossMs = analysis.corners.reduce((acc, c) => acc + c.timeLossMs, 0);
+    const trace = analysis.speedTrace ?? [];
+    const corners = analysis.corners ?? [];
+    const lockups = trace.filter((p) => p.brake > 0.88).length;
+    const wheelspin = trace.filter((p) => p.throttle > 0.92 && p.speedKmh < 120).length;
+    const totalLossMs = corners.reduce((acc, c) => acc + (c.timeLossMs ?? 0), 0);
     // Negative = understeer bias, positive = oversteer bias (0..100 scale, 50 neutral)
     const balancePct = Math.min(
       82,
-      Math.max(18, 44 + (wheelspin - lockups) * 4)
+      Math.max(18, 50 + (wheelspin - lockups) * 4)
     );
     return { lockups, wheelspin, balancePct, totalLossMs };
   }, [analysis]);
@@ -296,7 +302,7 @@ export default function SessionsPage() {
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
         {/* Left Column: Recorded Session Timeline */}
-        <Card className="lg:col-span-4 space-y-3" padding="md">
+        <Card className="lg:col-span-4 min-w-0 space-y-3" padding="md">
           <div className="flex items-center justify-between">
             <div className="text-xs font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
               Recorded Stints ({sessions.length})
@@ -358,7 +364,7 @@ export default function SessionsPage() {
         </Card>
 
         {/* Right Column: KPI Strip + Track Hotspot Map + Corner Coach */}
-        <div className="lg:col-span-8 space-y-5">
+        <div className="lg:col-span-8 min-w-0 space-y-5">
           {/* KPI Telemetry Strip */}
           <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
             <KpiTile
@@ -421,7 +427,7 @@ export default function SessionsPage() {
 
           {/* SVG Track Hotspot Map & Lap Pace Strip */}
           <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
-            <Card className="xl:col-span-7" padding="md">
+            <Card className="xl:col-span-7 min-w-0" padding="md">
               <div className="flex items-center justify-between mb-3">
                 <div>
                   <div className="text-xs font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
@@ -507,7 +513,7 @@ export default function SessionsPage() {
               </div>
             </Card>
 
-            <Card className="xl:col-span-5 flex flex-col justify-between" padding="md">
+            <Card className="xl:col-span-5 min-w-0 flex flex-col justify-between" padding="md">
               <div>
                 <div className="text-xs font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
                   Stint Pace Consistency
@@ -570,91 +576,127 @@ export default function SessionsPage() {
 
           {/* Corner-by-Corner Coaching Cards */}
           <div className="space-y-3">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <Sparkles className="w-4 h-4 text-[var(--accent)]" />
                 <h2 className="text-sm font-semibold text-[var(--text-primary)]">
-                  Corner-by-Corner Coaching & Setup Actions
+                  Corner-by-Corner Coaching &amp; Setup Actions
                 </h2>
               </div>
               {activeCornerIdx !== null && (
-                <button
-                  type="button"
-                  onClick={() => setActiveCornerIdx(null)}
-                  className="text-xs text-[var(--text-secondary)] hover:text-white cursor-pointer"
-                >
-                  Show all corners
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    aria-pressed={isolateCorner}
+                    onClick={() => setIsolateCorner((v) => !v)}
+                    className={`h-7 px-2.5 rounded-lg text-[11px] font-medium border transition-colors cursor-pointer ${
+                      isolateCorner
+                        ? "bg-[var(--accent-soft)] text-[var(--accent)] border-[var(--accent-border)]"
+                        : "bg-white/[0.03] text-[var(--text-secondary)] border-white/[0.08] hover:text-white"
+                    }`}
+                  >
+                    Isolate Selected
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveCornerIdx(null);
+                      setIsolateCorner(false);
+                    }}
+                    className="text-xs text-[var(--text-secondary)] hover:text-white cursor-pointer"
+                  >
+                    Clear Focus
+                  </button>
+                </div>
               )}
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               {(analysis?.corners ?? [])
                 .filter(
-                  (c) => activeCornerIdx === null || c.cornerIndex === activeCornerIdx
+                  (c) =>
+                    !isolateCorner ||
+                    activeCornerIdx === null ||
+                    c.cornerIndex === activeCornerIdx
                 )
-                .map((corner) => (
-                  <Card
-                    key={corner.cornerIndex}
-                    variant="elevated"
-                    padding="md"
-                    className={`border transition-all ${
-                      activeCornerIdx === corner.cornerIndex
-                        ? "border-[var(--accent-border)]"
-                        : "border-white/[0.07]"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <div className="text-sm font-semibold text-[var(--text-primary)]">
-                          {corner.name}
-                        </div>
-                        <div className="flex items-center gap-3 mt-1 text-[11px] font-mono text-[var(--text-secondary)]">
-                          <span>
-                            Entry{" "}
-                            <span
-                              className={
-                                corner.entrySpeedDeltaKmh < 0
-                                  ? "text-amber-300"
-                                  : "text-emerald-300"
-                              }
-                            >
-                              {corner.entrySpeedDeltaKmh > 0 ? "+" : ""}
-                              {corner.entrySpeedDeltaKmh.toFixed(1)} km/h
-                            </span>
-                          </span>
-                          <span>
-                            Apex{" "}
-                            <span className="text-red-300">
-                              {corner.apexSpeedDeltaKmh.toFixed(1)} km/h
-                            </span>
-                          </span>
-                        </div>
-                      </div>
-                      <Badge variant={corner.timeLossMs >= 250 ? "danger" : "warning"}>
-                        +{(corner.timeLossMs / 1000).toFixed(3)}s
-                      </Badge>
-                    </div>
-
-                    <p className="text-xs text-[var(--text-secondary)] leading-relaxed mt-3">
-                      {corner.advice}
-                    </p>
-
-                    <div className="mt-3.5 pt-3 border-t border-white/[0.06] flex items-center justify-between">
-                      <span className="text-[11px] font-mono text-[var(--text-muted)]">
-                        Recommended Adjustment
-                      </span>
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        icon={<Sliders className="w-3 h-3" />}
-                        onClick={() => navigate("garage", "setups")}
+                .map((corner) => {
+                  const focused = activeCornerIdx === corner.cornerIndex;
+                  return (
+                    <div
+                      key={corner.cornerIndex}
+                      ref={(el) => {
+                        cornerCardRefs.current[corner.cornerIndex] = el;
+                      }}
+                      onClick={() =>
+                        setActiveCornerIdx(focused ? null : corner.cornerIndex)
+                      }
+                      className="cursor-pointer"
+                    >
+                      <Card
+                        variant="elevated"
+                        padding="md"
+                        className={`h-full border transition-all ${
+                          focused
+                            ? "ring-2 ring-[var(--accent)] border-[var(--accent)] bg-[var(--accent-soft)]/15"
+                            : "border-white/[0.07] hover:border-white/[0.16]"
+                        }`}
                       >
-                        Open Setups
-                      </Button>
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="text-sm font-semibold text-[var(--text-primary)]">
+                              {corner.name}
+                            </div>
+                            <div className="flex items-center gap-3 mt-1 text-[11px] font-mono text-[var(--text-secondary)]">
+                              <span>
+                                Entry{" "}
+                                <span
+                                  className={
+                                    corner.entrySpeedDeltaKmh < 0
+                                      ? "text-amber-300"
+                                      : "text-emerald-300"
+                                  }
+                                >
+                                  {corner.entrySpeedDeltaKmh > 0 ? "+" : ""}
+                                  {corner.entrySpeedDeltaKmh.toFixed(1)} km/h
+                                </span>
+                              </span>
+                              <span>
+                                Apex{" "}
+                                <span className="text-red-300">
+                                  {corner.apexSpeedDeltaKmh.toFixed(1)} km/h
+                                </span>
+                              </span>
+                            </div>
+                          </div>
+                          <Badge variant={corner.timeLossMs >= 250 ? "danger" : "warning"}>
+                            +{(corner.timeLossMs / 1000).toFixed(3)}s
+                          </Badge>
+                        </div>
+
+                        <p className="text-xs text-[var(--text-secondary)] leading-relaxed mt-3">
+                          {corner.advice}
+                        </p>
+
+                        <div className="mt-3.5 pt-3 border-t border-white/[0.06] flex items-center justify-between">
+                          <span className="text-[11px] font-mono text-[var(--text-muted)]">
+                            Recommended Adjustment
+                          </span>
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            icon={<Sliders className="w-3 h-3" />}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              navigate("garage", "setups");
+                            }}
+                          >
+                            Open Setups
+                          </Button>
+                        </div>
+                      </Card>
                     </div>
-                  </Card>
-                ))}
+                  );
+                })}
             </div>
           </div>
         </div>

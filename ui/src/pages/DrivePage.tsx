@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Bookmark,
+  Box,
   Car,
   Cloud,
   CloudRain,
@@ -10,6 +11,7 @@ import {
   Flame,
   Gauge,
   Ghost,
+  Image as ImageIcon,
   MapPin,
   Moon,
   Play,
@@ -24,6 +26,7 @@ import {
   X,
 } from "lucide-react";
 import { api, assetUrl } from "../lib/api";
+import { ACCENT_PRESETS } from "../lib/types";
 import type {
   AdaptiveAiSuggestion,
   AiOpponent,
@@ -32,9 +35,12 @@ import type {
   QuickRaceRequest,
   SessionMode,
   SkinEntry,
+  Track3DSceneData,
+  TrackEntry,
   WeatherController,
 } from "../lib/types";
 import { useAppStore } from "../store/appStore";
+import { Viewport3D } from "../components/Viewport3D";
 import {
   Badge,
   Button,
@@ -372,12 +378,29 @@ export function DrivePage() {
     armedSession,
     cars,
     tracks,
+    accent,
     gameRunning,
     armCar,
     armTrack,
     setArmedSession,
     notify,
   } = useAppStore();
+
+  const accentHex = useMemo(
+    () => ACCENT_PRESETS.find((p) => p.id === accent)?.hex ?? "#FF4D2E",
+    [accent]
+  );
+
+  // Track 2D/3D preview state + cache
+  const [trackViewMode, setTrackViewMode] = useState<"2d" | "3d">("2d");
+  const [armedTrackScene, setArmedTrackScene] = useState<Track3DSceneData | null>(null);
+  const [loadingTrackScene, setLoadingTrackScene] = useState(false);
+  const [pickerTrackMode, setPickerTrackMode] = useState<"2d" | "3d">("2d");
+  const [pickerPreviewTrack, setPickerPreviewTrack] = useState<TrackEntry | null>(null);
+  const [pickerPreviewLayoutId, setPickerPreviewLayoutId] = useState<string>("default");
+  const [pickerTrackScene, setPickerTrackScene] = useState<Track3DSceneData | null>(null);
+  const [loadingPickerScene, setLoadingPickerScene] = useState(false);
+  const trackSceneCacheRef = useRef<Map<string, Track3DSceneData>>(new Map());
 
   // Session params & combinable Weekend sessions
   const [practiceEnabled, setPracticeEnabled] = useState(true);
@@ -434,6 +457,18 @@ export function DrivePage() {
   const [pickerQuery, setPickerQuery] = useState("");
   const [pickerFilter, setPickerFilter] = useState("All");
 
+  useEffect(() => {
+    if (!pickerMode) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setPickerMode(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [pickerMode]);
+
   const armedCar = useMemo(
     () => cars.find((c) => c.id === armedSession.carId) ?? cars[0] ?? null,
     [cars, armedSession.carId]
@@ -442,6 +477,78 @@ export function DrivePage() {
     () => tracks.find((t) => t.id === armedSession.trackId) ?? tracks[0] ?? null,
     [tracks, armedSession.trackId]
   );
+
+  const openTrackPicker = () => {
+    setPickerPreviewTrack(armedTrack);
+    setPickerPreviewLayoutId(
+      armedSession.layoutId || armedTrack?.layouts[0]?.id || "default"
+    );
+    setPickerMode("track");
+    setPickerQuery("");
+    setPickerFilter("All");
+  };
+
+  useEffect(() => {
+    if (trackViewMode !== "3d" || !armedTrack) return;
+    const layoutId =
+      armedSession.layoutId || armedTrack.layouts[0]?.id || "default";
+    const key = `${armedTrack.path}::${layoutId}`;
+    const cached = trackSceneCacheRef.current.get(key);
+    if (cached) {
+      setArmedTrackScene(cached);
+      return;
+    }
+    let cancelled = false;
+    setLoadingTrackScene(true);
+    api
+      .loadTrack3DScene(armedTrack.path, layoutId)
+      .then((scene) => {
+        if (cancelled) return;
+        if (scene) trackSceneCacheRef.current.set(key, scene);
+        setArmedTrackScene(scene ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setArmedTrackScene(null);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingTrackScene(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [trackViewMode, armedTrack, armedSession.layoutId]);
+
+  useEffect(() => {
+    if (pickerMode !== "track" || pickerTrackMode !== "3d" || !pickerPreviewTrack) {
+      return;
+    }
+    const layoutId =
+      pickerPreviewLayoutId || pickerPreviewTrack.layouts[0]?.id || "default";
+    const key = `${pickerPreviewTrack.path}::${layoutId}`;
+    const cached = trackSceneCacheRef.current.get(key);
+    if (cached) {
+      setPickerTrackScene(cached);
+      return;
+    }
+    let cancelled = false;
+    setLoadingPickerScene(true);
+    api
+      .loadTrack3DScene(pickerPreviewTrack.path, layoutId)
+      .then((scene) => {
+        if (cancelled) return;
+        if (scene) trackSceneCacheRef.current.set(key, scene);
+        setPickerTrackScene(scene ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setPickerTrackScene(null);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingPickerScene(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pickerMode, pickerTrackMode, pickerPreviewTrack, pickerPreviewLayoutId]);
 
   // Load weather controllers & presets on mount
   useEffect(() => {
@@ -495,6 +602,17 @@ export function DrivePage() {
     mode: armedSession.mode,
     laps,
     durationMinutes,
+    practiceEnabled,
+    practiceMinutes,
+    qualifyEnabled,
+    qualifyMinutes,
+    raceEnabled,
+    trackDayMinutes: unlimitedTrackDay ? 0 : durationMinutes,
+    dragMatches,
+    playerBallastKg,
+    playerRestrictor,
+    aiLevel: defaultAiSkill,
+    aiAggression: defaultAiAggression,
     aiOpponents: aiOpponents.map((o) => ({
       ...o,
       ballastKg: o.ballastKg ?? 0,
@@ -571,6 +689,20 @@ export function DrivePage() {
     setArmedSession({ mode: r.mode });
     setLaps(r.laps);
     setDurationMinutes(r.durationMinutes);
+    if (r.practiceEnabled !== undefined) setPracticeEnabled(r.practiceEnabled);
+    if (r.practiceMinutes !== undefined) setPracticeMinutes(r.practiceMinutes);
+    if (r.qualifyEnabled !== undefined) setQualifyEnabled(r.qualifyEnabled);
+    if (r.qualifyMinutes !== undefined) setQualifyMinutes(r.qualifyMinutes);
+    if (r.raceEnabled !== undefined) setRaceEnabled(r.raceEnabled);
+    if (r.trackDayMinutes !== undefined) {
+      setUnlimitedTrackDay(r.trackDayMinutes === 0);
+      if (r.trackDayMinutes > 0) setDurationMinutes(r.trackDayMinutes);
+    }
+    if (r.dragMatches !== undefined) setDragMatches(r.dragMatches);
+    if (r.playerBallastKg !== undefined) setPlayerBallastKg(r.playerBallastKg);
+    if (r.playerRestrictor !== undefined) setPlayerRestrictor(r.playerRestrictor);
+    if (r.aiLevel !== undefined) setDefaultAiSkill(r.aiLevel);
+    if (r.aiAggression !== undefined) setDefaultAiAggression(r.aiAggression);
     setAiOpponents(r.aiOpponents ?? []);
     setTimeOfDayMinutes(r.timeOfDayMinutes);
     setWeatherId(r.weatherId);
@@ -609,10 +741,50 @@ export function DrivePage() {
         4
       );
       if (res) {
-        setAdaptiveSuggestion(res);
-        setDefaultAiSkill(Math.round(res.recommendedLevel));
-        if (res.opponents && res.opponents.length > 0) {
-          setAiOpponents(res.opponents);
+        const recLevel = Number.isFinite(res.recommendedLevel)
+          ? Math.round(res.recommendedLevel)
+          : defaultAiSkill;
+        const minLevel = Number.isFinite(res.minLevel)
+          ? Math.round(res.minLevel)
+          : Math.max(70, recLevel - 2);
+        const maxLevel = Number.isFinite(res.maxLevel)
+          ? Math.round(res.maxLevel)
+          : Math.min(100, recLevel + 2);
+        const confidence = Number.isFinite(res.confidence)
+          ? res.confidence
+          : 0.75;
+        const sampleLaps = Number.isFinite(res.sampleLaps)
+          ? res.sampleLaps
+          : 0;
+        const safeRes: AdaptiveAiSuggestion = {
+          ...res,
+          recommendedLevel: recLevel,
+          minLevel,
+          maxLevel,
+          confidence,
+          sampleLaps,
+        };
+        setAdaptiveSuggestion(safeRes);
+        setDefaultAiSkill(recLevel);
+        if (safeRes.opponents && safeRes.opponents.length > 0) {
+          const pool = cars.length > 0 ? cars : [];
+          setAiOpponents((prev) =>
+            safeRes.opponents.map((opp, i) => ({
+              ...opp,
+              carId:
+                prev[i]?.carId ||
+                opp.carId ||
+                pool[i % Math.max(1, pool.length)]?.id ||
+                armedSession.carId,
+              skinId: prev[i]?.skinId ?? opp.skinId,
+              driverName:
+                prev[i]?.driverName || opp.driverName || `AI Driver ${i + 1}`,
+              aiLevel: Number.isFinite(opp.aiLevel) ? opp.aiLevel : recLevel,
+              aiAggression: Number.isFinite(opp.aiAggression)
+                ? opp.aiAggression
+                : defaultAiAggression,
+            }))
+          );
         } else {
           // Generate balanced opponents using recommended level
           const pool = cars.length > 0 ? cars : [];
@@ -623,10 +795,7 @@ export function DrivePage() {
               return {
                 carId: c?.id ?? armedSession.carId,
                 driverName: `AI Driver ${i + 1}`,
-                aiLevel: Math.min(
-                  100,
-                  Math.max(70, Math.round(res.recommendedLevel + offset))
-                ),
+                aiLevel: Math.min(100, Math.max(70, Math.round(recLevel + offset))),
                 aiAggression: defaultAiAggression,
               };
             }
@@ -636,25 +805,15 @@ export function DrivePage() {
         notify(
           "Adaptive AI matched to your pace",
           "success",
-          `Recommended skill ${Math.round(res.recommendedLevel)}% (${
-            res.sampleLaps
-          } sample laps)`
+          `Recommended skill ${recLevel}% (${sampleLaps} sample ${
+            sampleLaps === 1 ? "signal" : "signals"
+          })`
         );
       } else {
-        // Graceful fallback in browser mode
-        const fallbackOpps: AiOpponent[] = (cars.slice(0, 5) || []).map(
-          (c, i) => ({
-            carId: c.id,
-            driverName: `${c.brand} Works #${12 + i * 7}`,
-            aiLevel: Math.min(100, defaultAiSkill - 2 + i),
-            aiAggression: defaultAiAggression,
-          })
-        );
-        setAiOpponents(fallbackOpps);
         notify(
-          "Grid populated with matched AI pace",
-          "info",
-          `Centered around ${defaultAiSkill}% skill`
+          "Adaptive AI data unavailable",
+          "warning",
+          "No lap telemetry or backend adaptive AI data found."
         );
       }
     } catch (err) {
@@ -718,8 +877,17 @@ export function DrivePage() {
   }, [tracks, pickerQuery, pickerFilter]);
 
   const carPreview = assetUrl(armedCar?.previewPath ?? armedSession.carPreviewPath);
+  const activeArmedLayout = useMemo(
+    () =>
+      armedTrack?.layouts.find((l) => l.id === armedSession.layoutId) ??
+      armedTrack?.layouts[0] ??
+      null,
+    [armedTrack, armedSession.layoutId]
+  );
   const trackPreview = assetUrl(
-    armedTrack?.previewPath ?? armedSession.trackPreviewPath
+    activeArmedLayout?.previewPath ??
+      armedTrack?.previewPath ??
+      armedSession.trackPreviewPath
   );
 
   return (
@@ -747,16 +915,27 @@ export function DrivePage() {
         {/* ================================================================= */}
         {/* LEFT COLUMN (4 cols): Armed Car, Armed Track, Presets             */}
         {/* ================================================================= */}
-        <div className="xl:col-span-4 space-y-4">
+        <div className="xl:col-span-4 min-w-0 space-y-4">
           {/* Armed Car Card */}
           <Card variant="glass" padding="none" className="overflow-hidden">
             <div
+              role="button"
+              tabIndex={0}
+              aria-label={`Change car: ${armedCar?.name ?? armedSession.carName}`}
               onClick={() => {
                 setPickerMode("car");
                 setPickerQuery("");
                 setPickerFilter("All");
               }}
-              className="relative h-40 cursor-pointer group overflow-hidden"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setPickerMode("car");
+                  setPickerQuery("");
+                  setPickerFilter("All");
+                }
+              }}
+              className="relative h-40 cursor-pointer group overflow-hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--accent)]"
             >
               {carPreview ? (
                 <img
@@ -821,7 +1000,7 @@ export function DrivePage() {
                   <div className="text-[10px] font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
                     Livery ({skins.length})
                   </div>
-                  <div className="flex gap-1.5 overflow-x-auto pb-1">
+                  <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto pr-0.5">
                     {skins.map((s) => {
                       const active = s.id === armedSession.skinId;
                       return (
@@ -848,55 +1027,129 @@ export function DrivePage() {
 
           {/* Armed Track Card */}
           <Card variant="glass" padding="none" className="overflow-hidden">
-            <div
-              onClick={() => {
-                setPickerMode("track");
-                setPickerQuery("");
-                setPickerFilter("All");
-              }}
-              className="relative h-32 cursor-pointer group overflow-hidden"
-            >
-              {trackPreview ? (
-                <img
-                  src={trackPreview}
-                  alt={armedTrack?.name ?? armedSession.trackName}
-                  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-                />
-              ) : (
-                <div
-                  className="w-full h-full"
-                  style={{
-                    background:
-                      "radial-gradient(320px 150px at 20% 25%, rgba(0, 209, 255, 0.2), transparent 70%), linear-gradient(135deg, #101925 0%, #090D14 100%)",
-                  }}
-                />
-              )}
-              <div className="absolute inset-0 bg-gradient-to-t from-[#0D1118] via-[#0D1118]/45 to-transparent" />
-              <div className="absolute top-3 left-3">
+            {/* Compact Top Control Bar: 2D / 3D Rotating Preview + Change Track */}
+            <div className="px-3.5 py-2 border-b border-white/[0.06] bg-black/25 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
                 <Badge variant="info">CIRCUIT</Badge>
-              </div>
-              <div className="absolute top-3 right-3 px-2 py-1 rounded-md bg-black/55 border border-white/[0.12] text-[11px] font-medium text-white/90 group-hover:border-[var(--accent-border)] transition-colors">
-                Change Track
-              </div>
-              <div className="absolute bottom-3 inset-x-4">
-                <div className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-[0.12em] text-cyan-300">
-                  <MapPin className="w-3 h-3" />
-                  <span>{armedTrack?.country ?? "Circuit"}</span>
-                  {armedTrack?.length && <span>· {armedTrack.length}</span>}
-                </div>
-                <div className="font-display text-xl font-bold uppercase tracking-wide text-white truncate">
+                <span className="text-xs font-semibold text-white truncate">
                   {armedTrack?.name ?? armedSession.trackName}
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <div className="flex items-center p-0.5 rounded-lg bg-black/50 border border-white/[0.08]">
+                  <button
+                    type="button"
+                    onClick={() => setTrackViewMode("2d")}
+                    className={`px-2 py-0.5 rounded-md text-[10px] font-medium flex items-center gap-1 transition-colors cursor-pointer ${
+                      trackViewMode === "2d"
+                        ? "bg-white/[0.12] text-white"
+                        : "text-[var(--text-muted)] hover:text-white"
+                    }`}
+                  >
+                    <ImageIcon className="w-3 h-3" />
+                    2D
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTrackViewMode("3d")}
+                    className={`px-2 py-0.5 rounded-md text-[10px] font-medium flex items-center gap-1 transition-colors cursor-pointer ${
+                      trackViewMode === "3d"
+                        ? "bg-[var(--accent-soft)] text-[var(--accent)] border border-[var(--accent-border)]"
+                        : "text-[var(--text-muted)] hover:text-white"
+                    }`}
+                  >
+                    <Box className="w-3 h-3" />
+                    3D
+                  </button>
                 </div>
+                <button
+                  type="button"
+                  onClick={openTrackPicker}
+                  className="px-2 py-1 rounded-md bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.1] hover:border-[var(--accent-border)] text-[11px] font-medium text-white/90 transition-colors cursor-pointer whitespace-nowrap"
+                >
+                  Change Track
+                </button>
               </div>
             </div>
 
-            {/* Layout Selector */}
+            {trackViewMode === "3d" ? (
+              <div className="h-56 relative bg-[#090E16]">
+                <Viewport3D
+                  mode="track"
+                  trackData={armedTrackScene}
+                  accentHex={accentHex}
+                  loading={loadingTrackScene}
+                  label={`3D CORRIDOR · ${(armedSession.layoutId || armedTrack?.layouts[0]?.id || "default").toUpperCase()}`}
+                />
+              </div>
+            ) : (
+              <div
+                role="button"
+                tabIndex={0}
+                aria-label={`Change track: ${armedTrack?.name ?? armedSession.trackName}`}
+                onClick={openTrackPicker}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    openTrackPicker();
+                  }
+                }}
+                className="relative h-32 cursor-pointer group overflow-hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--accent)]"
+              >
+                {trackPreview ? (
+                  <img
+                    src={trackPreview}
+                    alt={armedTrack?.name ?? armedSession.trackName}
+                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                  />
+                ) : (
+                  <div
+                    className="w-full h-full"
+                    style={{
+                      background:
+                        "radial-gradient(320px 150px at 20% 25%, rgba(0, 209, 255, 0.2), transparent 70%), linear-gradient(135deg, #101925 0%, #090D14 100%)",
+                    }}
+                  />
+                )}
+                <div className="absolute inset-0 bg-gradient-to-t from-[#0D1118] via-[#0D1118]/45 to-transparent" />
+                <div className="absolute bottom-3 inset-x-4">
+                  <div className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-[0.12em] text-cyan-300">
+                    <MapPin className="w-3 h-3" />
+                    <span>{armedTrack?.country ?? "Circuit"}</span>
+                    {(activeArmedLayout?.lengthMeters
+                      ? `${(activeArmedLayout.lengthMeters / 1000).toFixed(2)} km`
+                      : armedTrack?.length) && (
+                      <span>
+                        ·{" "}
+                        {activeArmedLayout?.lengthMeters
+                          ? `${(activeArmedLayout.lengthMeters / 1000).toFixed(2)} km`
+                          : armedTrack?.length}
+                      </span>
+                    )}
+                  </div>
+                  <div className="font-display text-xl font-bold uppercase tracking-wide text-white truncate">
+                    {armedTrack?.name ?? armedSession.trackName}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Direct Track Layout Selector */}
             {armedTrack && armedTrack.layouts.length > 0 && (
               <div className="p-3.5 space-y-1.5">
-                <div className="text-[10px] font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
-                  Track Layout
+                <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
+                  <span>Track Layout ({armedTrack.layouts.length})</span>
+                  {activeArmedLayout && (
+                    <span className="text-[var(--text-secondary)] truncate max-w-[160px]">
+                      {activeArmedLayout.pitboxes ? `${activeArmedLayout.pitboxes} pits` : ""}
+                      {activeArmedLayout.pitboxes && activeArmedLayout.lengthMeters ? " · " : ""}
+                      {activeArmedLayout.lengthMeters
+                        ? `${(activeArmedLayout.lengthMeters / 1000).toFixed(2)} km`
+                        : ""}
+                    </span>
+                  )}
                 </div>
-                <div className="flex flex-wrap gap-1.5">
+                <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto pr-0.5">
                   {armedTrack.layouts.map((lay) => {
                     const active = lay.id === armedSession.layoutId;
                     return (
@@ -984,6 +1237,7 @@ export function DrivePage() {
                       type="button"
                       onClick={() => handleDeletePreset(p.name)}
                       className="p-1 text-[var(--text-muted)] hover:text-red-400 cursor-pointer"
+                      aria-label={`Delete preset ${p.name}`}
                       title="Delete preset"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
@@ -998,7 +1252,7 @@ export function DrivePage() {
         {/* ================================================================= */}
         {/* CENTER COLUMN (4 cols): Solar Arc, WeatherFX, Grip, Realism       */}
         {/* ================================================================= */}
-        <div className="xl:col-span-4 space-y-4">
+        <div className="xl:col-span-4 min-w-0 space-y-4">
           {/* Solar Arc & Environment Card */}
           <Card variant="glass" padding="md" className="space-y-4">
             <div className="flex items-center justify-between">
@@ -1342,7 +1596,7 @@ export function DrivePage() {
         {/* ================================================================= */}
         {/* RIGHT COLUMN (4 cols): Mode-Specific Opponents / Solo Info, BoP   */}
         {/* ================================================================= */}
-        <div className="xl:col-span-4 space-y-4">
+        <div className="xl:col-span-4 min-w-0 space-y-4">
           {effectiveMode === "Hotlap" || effectiveMode === "Drift" || effectiveMode === "TimeAttack" ? (
             <Card variant="glass" padding="md" className="space-y-3">
               <div className="flex items-center justify-between">
@@ -1421,12 +1675,26 @@ export function DrivePage() {
                   <span className="text-amber-200">
                     Adaptive Target:{" "}
                     <strong className="font-mono">
-                      {Math.round(adaptiveSuggestion.recommendedLevel)}%
+                      {Number.isFinite(adaptiveSuggestion.recommendedLevel)
+                        ? Math.round(adaptiveSuggestion.recommendedLevel)
+                        : defaultAiSkill}
+                      %
                     </strong>{" "}
-                    ({adaptiveSuggestion.minLevel}–{adaptiveSuggestion.maxLevel}%)
+                    (
+                    {Number.isFinite(adaptiveSuggestion.minLevel)
+                      ? adaptiveSuggestion.minLevel
+                      : defaultAiSkill}
+                    –
+                    {Number.isFinite(adaptiveSuggestion.maxLevel)
+                      ? adaptiveSuggestion.maxLevel
+                      : defaultAiSkill}
+                    %)
                   </span>
                   <span className="font-mono text-amber-300/80">
-                    {Math.round(adaptiveSuggestion.confidence * 100)}% conf
+                    {Number.isFinite(adaptiveSuggestion.confidence)
+                      ? Math.round(adaptiveSuggestion.confidence * 100)
+                      : 75}
+                    % conf
                   </span>
                 </div>
               )}
@@ -1493,6 +1761,8 @@ export function DrivePage() {
                                 prev.filter((_, i) => i !== idx)
                               )
                             }
+                            aria-label={`Remove opponent ${carInfo?.name ?? opp.carId}`}
+                            title="Remove opponent"
                             className="p-1 text-[var(--text-muted)] hover:text-red-400 cursor-pointer"
                           >
                             <X className="w-3.5 h-3.5" />
@@ -1615,10 +1885,19 @@ export function DrivePage() {
           onClick={() => setPickerMode(null)}
         >
           <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={
+              pickerMode === "track"
+                ? "Select Circuit"
+                : pickerMode === "opponent"
+                  ? "Add AI Opponent"
+                  : "Select Machine"
+            }
             onClick={(e) => e.stopPropagation()}
-            className="glass-panel rounded-2xl w-full max-w-4xl max-h-[82vh] flex flex-col overflow-hidden border border-white/[0.14] animate-scale-in"
+            className="glass-panel rounded-2xl w-full max-w-[min(1100px,calc(100vw-2rem))] max-h-[82vh] flex flex-col overflow-hidden border border-white/[0.14] animate-scale-in"
           >
-            <div className="px-5 py-4 border-b border-white/[0.08] flex items-center justify-between gap-4">
+            <div className="px-5 py-4 border-b border-white/[0.08] flex items-center justify-between gap-4 shrink-0 min-w-0">
               <div className="flex items-center gap-2.5">
                 {pickerMode === "track" ? (
                   <Compass className="w-5 h-5 text-cyan-400" />
@@ -1640,16 +1919,56 @@ export function DrivePage() {
                   </p>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => setPickerMode(null)}
-                className="p-1.5 rounded-lg text-[var(--text-muted)] hover:text-white hover:bg-white/[0.08] cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
+              <div className="flex items-center gap-2">
+                {pickerMode === "track" && (
+                  <div className="flex items-center p-0.5 rounded-lg bg-black/50 border border-white/[0.1]">
+                    <button
+                      type="button"
+                      onClick={() => setPickerTrackMode("2d")}
+                      className={`px-2.5 py-1 rounded-md text-[11px] font-medium flex items-center gap-1.5 transition-colors cursor-pointer ${
+                        pickerTrackMode === "2d"
+                          ? "bg-white/[0.12] text-white"
+                          : "text-[var(--text-secondary)] hover:text-white"
+                      }`}
+                    >
+                      <ImageIcon className="w-3.5 h-3.5" />
+                      2D Preview
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!pickerPreviewTrack && armedTrack) {
+                          setPickerPreviewTrack(armedTrack);
+                          setPickerPreviewLayoutId(
+                            armedSession.layoutId || armedTrack.layouts[0]?.id || "default"
+                          );
+                        }
+                        setPickerTrackMode("3d");
+                      }}
+                      className={`px-2.5 py-1 rounded-md text-[11px] font-medium flex items-center gap-1.5 transition-colors cursor-pointer ${
+                        pickerTrackMode === "3d"
+                          ? "bg-[var(--accent-soft)] text-[var(--accent)] border border-[var(--accent-border)]"
+                          : "text-[var(--text-secondary)] hover:text-white"
+                      }`}
+                    >
+                      <Box className="w-3.5 h-3.5" />
+                      3D Preview
+                    </button>
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setPickerMode(null)}
+                  aria-label="Close picker"
+                  title="Close"
+                  className="p-1.5 rounded-lg text-[var(--text-muted)] hover:text-white hover:bg-white/[0.08] cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
 
-            <div className="px-5 py-3 border-b border-white/[0.06] space-y-2.5">
+            <div className="px-5 py-3 border-b border-white/[0.06] space-y-2.5 shrink-0">
               <div className="relative">
                 <Search className="w-4 h-4 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
@@ -1683,103 +2002,243 @@ export function DrivePage() {
               </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              {pickerMode === "track"
-                ? filteredPickerTracks.map((t) => {
-                    const img = assetUrl(t.previewPath);
-                    const selected = t.id === armedSession.trackId;
-                    return (
-                      <button
-                        key={t.id}
-                        type="button"
-                        onClick={() => {
-                          armTrack(t);
-                          setPickerMode(null);
-                        }}
-                        className={`text-left rounded-xl overflow-hidden border transition-all cursor-pointer group ${
-                          selected
-                            ? "border-[var(--accent)] bg-[var(--accent-soft)]"
-                            : "border-white/[0.08] bg-white/[0.03] hover:border-white/[0.2]"
-                        }`}
-                      >
-                        <div className="h-24 bg-black/50 relative overflow-hidden">
-                          {img ? (
-                            <img
-                              src={img}
-                              alt={t.name}
-                              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                            />
-                          ) : (
-                            <div className="w-full h-full bg-gradient-to-br from-cyan-500/15 to-transparent flex items-center justify-center">
-                              <Flag className="w-6 h-6 text-white/20" />
-                            </div>
-                          )}
-                          <div className="absolute bottom-1.5 right-1.5 px-1.5 py-0.5 rounded bg-black/70 text-[10px] font-mono text-white/85">
-                            {t.length ?? "Circuit"}
-                          </div>
-                        </div>
-                        <div className="p-2.5">
-                          <div className="text-xs font-semibold text-[var(--text-primary)] truncate">
-                            {t.name}
-                          </div>
-                          <div className="text-[11px] text-[var(--text-muted)]">
-                            {t.country} · {t.layouts.length} layout
-                            {t.layouts.length === 1 ? "" : "s"}
-                          </div>
-                        </div>
-                      </button>
-                    );
-                  })
-                : filteredPickerCars.map((c) => {
-                    const img = assetUrl(c.previewPath);
-                    const selected =
-                      pickerMode === "car" && c.id === armedSession.carId;
-                    return (
-                      <button
-                        key={c.id}
-                        type="button"
-                        onClick={() => {
-                          if (pickerMode === "opponent") {
-                            handleAddOpponentCar(c);
-                            notify("Opponent added", "info", c.name);
-                          } else {
-                            armCar(c);
+            {pickerMode === "track" && pickerTrackMode === "3d" && pickerPreviewTrack && (
+              <div className="px-5 py-3 border-b border-white/[0.08] bg-black/30 shrink-0 grid grid-cols-1 md:grid-cols-12 gap-3 items-center min-w-0">
+                <div className="md:col-span-7 min-w-0 h-44 rounded-xl overflow-hidden border border-white/[0.1] relative">
+                  <Viewport3D
+                    mode="track"
+                    trackData={pickerTrackScene}
+                    accentHex={accentHex}
+                    loading={loadingPickerScene}
+                    label={`${pickerPreviewTrack.name.toUpperCase()} · ${pickerPreviewLayoutId.toUpperCase()}`}
+                  />
+                </div>
+                <div className="md:col-span-5 flex flex-col justify-between gap-2.5 min-w-0">
+                  <div>
+                    <div className="text-[10px] font-mono uppercase tracking-[0.12em] text-cyan-300">
+                      {pickerPreviewTrack.country} ·{" "}
+                      {pickerPreviewTrack.length ?? "Circuit"}
+                    </div>
+                    <div className="font-display text-lg font-bold uppercase text-white truncate">
+                      {pickerPreviewTrack.name}
+                    </div>
+                  </div>
+                  {pickerPreviewTrack.layouts.length > 0 && (
+                    <div className="space-y-1">
+                      <div className="text-[10px] font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
+                        Choose Layout ({pickerPreviewTrack.layouts.length})
+                      </div>
+                      <div className="flex flex-wrap gap-1.5 max-h-20 overflow-y-auto">
+                        {pickerPreviewTrack.layouts.map((lay) => {
+                          const activeLay = lay.id === pickerPreviewLayoutId;
+                          return (
+                            <button
+                              key={lay.id}
+                              type="button"
+                              onClick={() => setPickerPreviewLayoutId(lay.id)}
+                              className={`px-2 py-1 rounded-md text-[11px] font-medium border transition-colors cursor-pointer ${
+                                activeLay
+                                  ? "bg-[var(--accent-soft)] text-[var(--accent)] border-[var(--accent-border)]"
+                                  : "bg-white/[0.04] text-[var(--text-secondary)] border-white/[0.08] hover:text-white"
+                              }`}
+                            >
+                              {lay.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={() => {
+                        armTrack(pickerPreviewTrack, pickerPreviewLayoutId);
+                        setPickerMode(null);
+                      }}
+                    >
+                      Select Circuit & Layout
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="flex-1 min-h-0 overflow-y-auto p-5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 auto-rows-max">
+                {pickerMode === "track"
+                  ? filteredPickerTracks.map((t) => {
+                      const selected = t.id === armedSession.trackId;
+                      const previewing =
+                        pickerTrackMode === "3d" && pickerPreviewTrack?.id === t.id;
+                      const activeLayoutId =
+                        previewing
+                          ? pickerPreviewLayoutId
+                          : selected
+                            ? armedSession.layoutId
+                            : t.layouts[0]?.id ?? "default";
+                      const activeLayoutObj =
+                        t.layouts.find((l) => l.id === activeLayoutId) ?? t.layouts[0];
+                      const img = assetUrl(activeLayoutObj?.previewPath ?? t.previewPath);
+                      return (
+                        <div
+                          key={t.id}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => {
+                            armTrack(t, activeLayoutId);
                             setPickerMode(null);
-                          }
-                        }}
-                        className={`text-left rounded-xl overflow-hidden border transition-all cursor-pointer group ${
-                          selected
-                            ? "border-[var(--accent)] bg-[var(--accent-soft)]"
-                            : "border-white/[0.08] bg-white/[0.03] hover:border-white/[0.2]"
-                        }`}
-                      >
-                        <div className="h-24 bg-black/50 relative overflow-hidden">
-                          {img ? (
-                            <img
-                              src={img}
-                              alt={c.name}
-                              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                            />
-                          ) : (
-                            <div className="w-full h-full bg-gradient-to-br from-[var(--accent)]/15 to-transparent flex items-center justify-center">
-                              <Car className="w-6 h-6 text-white/20" />
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              armTrack(t, activeLayoutId);
+                              setPickerMode(null);
+                            }
+                          }}
+                          className={`flex flex-col text-left rounded-xl overflow-hidden border transition-all cursor-pointer group ${
+                            previewing || selected
+                              ? "border-[var(--accent)] bg-[var(--accent-soft)]"
+                              : "border-white/[0.08] bg-white/[0.03] hover:border-white/[0.2]"
+                          }`}
+                        >
+                          <div className="w-full h-24 shrink-0 bg-black/50 relative overflow-hidden">
+                            {img ? (
+                              <img
+                                src={img}
+                                alt={t.name}
+                                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                              />
+                            ) : (
+                              <div className="w-full h-full bg-gradient-to-br from-cyan-500/15 to-transparent flex items-center justify-center">
+                                <Flag className="w-6 h-6 text-white/20" />
+                              </div>
+                            )}
+                            <button
+                              type="button"
+                              title="Preview in 3D"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setPickerPreviewTrack(t);
+                                setPickerPreviewLayoutId(activeLayoutId);
+                                setPickerTrackMode("3d");
+                              }}
+                              className="absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded bg-black/75 hover:bg-black border border-white/[0.14] text-[10px] font-mono text-cyan-300 flex items-center gap-1 cursor-pointer"
+                            >
+                              <Box className="w-2.5 h-2.5" />
+                              3D
+                            </button>
+                            <div className="absolute bottom-1.5 right-1.5 px-1.5 py-0.5 rounded bg-black/70 text-[10px] font-mono text-white/85">
+                              {t.length ?? "Circuit"}
                             </div>
-                          )}
-                          <div className="absolute bottom-1.5 right-1.5 px-1.5 py-0.5 rounded bg-black/70 text-[10px] font-mono text-white/85">
-                            {c.bhp ?? c.class}
+                          </div>
+                          <div className="p-2.5 shrink-0 space-y-1.5">
+                            <div>
+                              <div className="text-xs font-semibold text-[var(--text-primary)] truncate">
+                                {t.name}
+                              </div>
+                              <div className="text-[11px] text-[var(--text-muted)]">
+                                {t.country} · {t.layouts.length} layout
+                                {t.layouts.length === 1 ? "" : "s"}
+                              </div>
+                            </div>
+                            {t.layouts.length > 1 && (
+                              <div
+                                className="flex flex-wrap gap-1 pt-0.5"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                {t.layouts.slice(0, 4).map((lay) => {
+                                  const laySelected = selected && lay.id === armedSession.layoutId;
+                                  return (
+                                    <button
+                                      key={lay.id}
+                                      type="button"
+                                      onClick={() => {
+                                        armTrack(t, lay.id);
+                                        setPickerMode(null);
+                                      }}
+                                      className={`px-1.5 py-0.5 rounded text-[10px] font-mono border transition-colors cursor-pointer ${
+                                        laySelected
+                                          ? "bg-[var(--accent-soft)] text-[var(--accent)] border-[var(--accent-border)]"
+                                          : "bg-white/[0.04] text-[var(--text-secondary)] border-white/[0.08] hover:text-white"
+                                      }`}
+                                    >
+                                      {lay.name}
+                                    </button>
+                                  );
+                                })}
+                                {t.layouts.length > 4 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setPickerPreviewTrack(t);
+                                      setPickerPreviewLayoutId(activeLayoutId);
+                                      setPickerTrackMode("3d");
+                                    }}
+                                    className="px-1.5 py-0.5 rounded text-[10px] font-mono text-cyan-300 bg-cyan-500/10 border border-cyan-500/25 cursor-pointer"
+                                  >
+                                    +{t.layouts.length - 4}
+                                  </button>
+                                )}
+                              </div>
+                            )}
                           </div>
                         </div>
-                        <div className="p-2.5">
-                          <div className="text-[10px] font-mono uppercase text-[var(--accent)]">
-                            {c.brand}
+                      );
+                    })
+                  : filteredPickerCars.map((c) => {
+                      const img = assetUrl(c.previewPath);
+                      const selected =
+                        pickerMode === "car" && c.id === armedSession.carId;
+                      return (
+                        <button
+                          key={c.id}
+                          type="button"
+                          onClick={() => {
+                            if (pickerMode === "opponent") {
+                              handleAddOpponentCar(c);
+                              notify("Opponent added", "info", c.name);
+                            } else {
+                              armCar(c);
+                              setPickerMode(null);
+                            }
+                          }}
+                          className={`flex flex-col w-full text-left rounded-xl overflow-hidden border transition-all cursor-pointer group ${
+                            selected
+                              ? "border-[var(--accent)] bg-[var(--accent-soft)]"
+                              : "border-white/[0.08] bg-white/[0.03] hover:border-white/[0.2]"
+                          }`}
+                        >
+                          <div className="w-full h-24 shrink-0 bg-black/50 relative overflow-hidden">
+                            {img ? (
+                              <img
+                                src={img}
+                                alt={c.name}
+                                loading="lazy"
+                                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                              />
+                            ) : (
+                              <div className="w-full h-full bg-gradient-to-br from-[var(--accent)]/15 to-transparent flex items-center justify-center">
+                                <Car className="w-6 h-6 text-white/20" />
+                              </div>
+                            )}
+                            <div className="absolute bottom-1.5 right-1.5 px-1.5 py-0.5 rounded bg-black/70 text-[10px] font-mono text-white/85">
+                              {c.bhp ?? c.class}
+                            </div>
                           </div>
-                          <div className="text-xs font-semibold text-[var(--text-primary)] truncate">
-                            {c.name}
+                          <div className="p-2.5 w-full shrink-0">
+                            <div className="text-[10px] font-mono uppercase text-[var(--accent)]">
+                              {c.brand}
+                            </div>
+                            <div className="text-xs font-semibold text-[var(--text-primary)] truncate">
+                              {c.name}
+                            </div>
                           </div>
-                        </div>
-                      </button>
-                    );
-                  })}
+                        </button>
+                      );
+                    })}
+              </div>
             </div>
           </div>
         </div>

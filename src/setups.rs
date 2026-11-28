@@ -293,6 +293,67 @@ pub fn set_value(path: &Path, section: &str, key: &str, value: &str, allow_new_k
     ini.save_with_backup(path)
 }
 
+/// Batch-apply `(section, key, value)` entries to a setup file and write once.
+/// When `create_if_missing` is true and `path` does not exist yet, starts from an empty
+/// INI, creates parent directories, and writes the new file once.
+pub fn set_values(
+    path: &Path,
+    entries: &[(&str, &str, &str)],
+    allow_new_key: bool,
+    create_if_missing: bool,
+) -> io::Result<usize> {
+    let mut validated = Vec::with_capacity(entries.len());
+    for &(section, key, value) in entries {
+        let section = section.trim();
+        let key = key.trim();
+        check_section_name(section)?;
+        check_key_name(key)?;
+        check_value(value)?;
+        validated.push((section, key, value));
+    }
+
+    let existed = path.exists();
+    let mut ini = if existed {
+        Ini::load(path)?
+    } else if create_if_missing {
+        Ini::default()
+    } else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no such setup file: {}", path.display()),
+        ));
+    };
+
+    let mut changed = !existed;
+    for (section, key, value) in validated {
+        match ini.get(section, key) {
+            Some(current) if current == value => {}
+            Some(_) => {
+                ini.set(section, key, value);
+                changed = true;
+            }
+            None if allow_new_key => {
+                ini.set(section, key, value);
+                changed = true;
+            }
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "{key} is not in [{section}] of {}, and adding keys is not allowed",
+                        path.display()
+                    ),
+                ));
+            }
+        }
+    }
+
+    if changed {
+        ini.save_with_backup(path)?;
+    }
+    Ok(entries.len())
+}
+
 fn check_section_name(name: &str) -> io::Result<()> {
     if name.is_empty() || name.chars().any(|c| c == '[' || c == ']' || c.is_control()) {
         Err(invalid(format!("invalid section name {name:?}")))
@@ -659,5 +720,45 @@ mod tests {
         set_value(&path, "TYRES", "REAR", "29", false).unwrap();
         let rear = values(&path).unwrap().into_iter().find(|(s, k, _)| s == "TYRES" && k == "REAR");
         assert_eq!(rear, Some(("TYRES".into(), "REAR".into(), "29".into())));
+    }
+
+    #[test]
+    fn set_values_creates_new_file_and_batch_updates_existing() {
+        let t = TempDir::new("set-values-batch");
+        let path = t.path().join("ks_bmw/spa/custom_1.ini");
+
+        // Creating a nonexistent setup with missing parent directories succeeds and writes once.
+        let count = set_values(
+            &path,
+            &[
+                ("PRESSURE_LF", "VALUE", "26.4"),
+                ("WING_1", "VALUE", "4"),
+            ],
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(count, 2);
+        assert!(path.is_file());
+        assert_eq!(count_files(&t.path().join("ks_bmw/spa")), 1);
+        let ini = Ini::load(&path).unwrap();
+        assert_eq!(ini.get("PRESSURE_LF", "VALUE"), Some("26.4"));
+        assert_eq!(ini.get("WING_1", "VALUE"), Some("4"));
+
+        // Batch-updating multiple keys creates only a single backup file.
+        set_values(
+            &path,
+            &[
+                ("PRESSURE_LF", "VALUE", "26.8"),
+                ("WING_1", "VALUE", "5"),
+            ],
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(count_files(&t.path().join("ks_bmw/spa")), 2);
+        let ini = Ini::load(&path).unwrap();
+        assert_eq!(ini.get("PRESSURE_LF", "VALUE"), Some("26.8"));
+        assert_eq!(ini.get("WING_1", "VALUE"), Some("5"));
     }
 }

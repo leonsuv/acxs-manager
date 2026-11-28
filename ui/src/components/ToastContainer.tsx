@@ -36,7 +36,7 @@ export function ToastContainer() {
   return (
     <div
       aria-live="polite"
-      className="fixed bottom-20 right-5 z-50 flex flex-col gap-2 w-[340px] max-w-[calc(100vw-2rem)] pointer-events-none"
+      className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 flex flex-col-reverse items-center gap-2 w-auto min-w-[260px] max-w-[min(420px,calc(100vw-2rem))] pointer-events-none"
     >
       {toasts.map((toast) => {
         const cfg = VARIANT_STYLES[toast.variant];
@@ -44,7 +44,7 @@ export function ToastContainer() {
         return (
           <div
             key={toast.id}
-            className={`pointer-events-auto glass-panel ${cfg.border} rounded-xl px-3.5 py-3 flex items-start gap-3 animate-fade-in shadow-2xl`}
+            className={`pointer-events-auto w-full px-3.5 py-2.5 rounded-xl bg-[#0D121B] border ${cfg.border} shadow-[0_14px_34px_rgba(0,0,0,0.8)] flex items-start gap-3 animate-fade-in`}
           >
             <Icon className={`w-4 h-4 mt-0.5 shrink-0 ${cfg.iconColor}`} />
             <div className="flex-1 min-w-0">

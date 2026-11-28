@@ -32,42 +32,59 @@ import {
 } from "../components/Primitives";
 
 type CategoryId =
-  | "video"
-  | "vr-triple"
-  | "camera"
-  | "controls"
-  | "ffb"
-  | "rigs"
-  | "audio"
-  | "gameplay"
-  | "snapshots";
+  | "display"
+  | "vr-rigs"
+  | "controls-audio"
+  | "gameplay-snapshots";
+
+const LOCAL_PREFS_KEY = "acxs_game_local_prefs_v1";
+
+interface LocalGamePrefs {
+  fovDeg: number;
+  replayQuality: "Medium" | "High" | "Ultra";
+  masterVol: number;
+  engineVol: number;
+  tyreVol: number;
+  autoBlip: boolean;
+  idealLine: boolean;
+}
+
+const DEFAULT_LOCAL_PREFS: LocalGamePrefs = {
+  fovDeg: 54,
+  replayQuality: "High",
+  masterVol: 85,
+  engineVol: 92,
+  tyreVol: 78,
+  autoBlip: false,
+  idealLine: false,
+};
+
+function loadLocalPrefs(): LocalGamePrefs {
+  try {
+    const raw = localStorage.getItem(LOCAL_PREFS_KEY);
+    if (!raw) return DEFAULT_LOCAL_PREFS;
+    return { ...DEFAULT_LOCAL_PREFS, ...(JSON.parse(raw) as Partial<LocalGamePrefs>) };
+  } catch {
+    return DEFAULT_LOCAL_PREFS;
+  }
+}
 
 const NAV_GROUPS: Array<{
   title: string;
-  items: Array<{ id: CategoryId; label: string; icon: typeof Monitor }>;
+  items: Array<{ id: CategoryId; label: string; desc: string; icon: typeof Monitor }>;
 }> = [
   {
-    title: "DISPLAY",
+    title: "VISUALS & RIG",
     items: [
-      { id: "video", label: "Video", icon: Monitor },
-      { id: "vr-triple", label: "VR & Triple", icon: Glasses },
-      { id: "camera", label: "Camera & Replay", icon: Camera },
+      { id: "display", label: "Display, Video & Camera", desc: "video.ini · FOV · Replay", icon: Monitor },
+      { id: "vr-rigs", label: "VR, Triple & Rig Profiles", desc: "Atomic rig & optics", icon: Glasses },
     ],
   },
   {
-    title: "CONTROLS",
+    title: "DRIVING & SYSTEM",
     items: [
-      { id: "controls", label: "Controls", icon: Gamepad2 },
-      { id: "ffb", label: "FFB & LUT", icon: Sliders },
-      { id: "rigs", label: "Rig Profiles", icon: Layers },
-    ],
-  },
-  {
-    title: "SIMULATION",
-    items: [
-      { id: "audio", label: "Audio", icon: Volume2 },
-      { id: "gameplay", label: "Gameplay", icon: Wrench },
-      { id: "snapshots", label: "Snapshots", icon: History },
+      { id: "controls-audio", label: "Controls, FFB & Audio", desc: "Force feedback · LUT · Mix", icon: Sliders },
+      { id: "gameplay-snapshots", label: "Gameplay & Snapshots", desc: "Assists · INI backups", icon: History },
     ],
   },
 ];
@@ -112,7 +129,7 @@ const DEFAULT_FFB: FfbConfig = {
 
 export default function GameSettingsPage() {
   const { notify } = useAppStore();
-  const [category, setCategory] = useState<CategoryId>("video");
+  const [category, setCategory] = useState<CategoryId>("display");
   const [saving, setSaving] = useState(false);
 
   const [video, setVideo] = useState<VideoSettings>(DEFAULT_VIDEO);
@@ -128,14 +145,22 @@ export default function GameSettingsPage() {
   const [snapshots, setSnapshots] = useState<ConfigSnapshot[]>([]);
   const [snapshotLabel, setSnapshotLabel] = useState("");
 
-  // Local camera / audio / gameplay states
-  const [fovDeg, setFovDeg] = useState(54);
-  const [replayQuality, setReplayQuality] = useState<"Medium" | "High" | "Ultra">("High");
-  const [masterVol, setMasterVol] = useState(85);
-  const [engineVol, setEngineVol] = useState(92);
-  const [tyreVol, setTyreVol] = useState(78);
-  const [autoBlip, setAutoBlip] = useState(false);
-  const [idealLine, setIdealLine] = useState(false);
+  // Local-only preview preferences (persisted in localStorage)
+  const [localPrefs, setLocalPrefs] = useState<LocalGamePrefs>(() => loadLocalPrefs());
+  const updateLocalPref = <K extends keyof LocalGamePrefs>(
+    key: K,
+    val: LocalGamePrefs[K]
+  ) => {
+    setLocalPrefs((prev) => {
+      const next = { ...prev, [key]: val };
+      try {
+        localStorage.setItem(LOCAL_PREFS_KEY, JSON.stringify(next));
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  };
 
   useEffect(() => {
     void Promise.all([
@@ -146,60 +171,28 @@ export default function GameSettingsPage() {
       api.listConfigSnapshots().catch(() => []),
     ]).then(([v, vrRes, ffbRes, rigList, snapList]) => {
       if (v) {
-        const raw = v as unknown as Record<string, unknown>;
-        const normalizedVideo: VideoSettings = {
-          ...DEFAULT_VIDEO,
-          width: Number(raw.width ?? DEFAULT_VIDEO.width),
-          height: Number(raw.height ?? DEFAULT_VIDEO.height),
-          refreshHz: Number(raw.refreshHz ?? raw.refresh ?? DEFAULT_VIDEO.refreshHz),
-          fullscreen: Boolean(raw.fullscreen ?? DEFAULT_VIDEO.fullscreen),
-          vsync: Boolean(raw.vsync ?? DEFAULT_VIDEO.vsync),
-          fpsCap: Number(raw.fpsCap ?? raw.fps_cap ?? DEFAULT_VIDEO.fpsCap),
-          msaa: Number(raw.msaa ?? raw.aa_samples ?? DEFAULT_VIDEO.msaa),
-          anisotropic: Number(raw.anisotropic ?? DEFAULT_VIDEO.anisotropic),
-          shadowMapSize: Number(raw.shadowMapSize ?? raw.shadow_map_size ?? DEFAULT_VIDEO.shadowMapSize),
-          worldDetail: Number(raw.worldDetail ?? raw.world_detail ?? DEFAULT_VIDEO.worldDetail),
-          postProcessing: Boolean(raw.postProcessing ?? raw.post_process ?? DEFAULT_VIDEO.postProcessing),
-          ppFilter: String(raw.ppFilter ?? raw.pp_filter ?? DEFAULT_VIDEO.ppFilter),
-        };
-        setVideo(normalizedVideo);
-        setSavedVideo(normalizedVideo);
+        setVideo(v);
+        setSavedVideo(v);
       }
       if (vrRes) {
-        const raw = vrRes as unknown as Record<string, unknown>;
-        const triple = (raw.triple_screen ?? raw.tripleScreen ?? {}) as Record<string, unknown>;
-        const openvr = (raw.openvr ?? raw.oculus ?? {}) as Record<string, unknown>;
+        const modeFromVideo: VrTripleSettings["renderMode"] =
+          v?.cameraMode === "Triple"
+            ? "TRIPLE"
+            : v?.cameraMode === "OpenVr"
+              ? "OPENVR"
+              : v?.cameraMode === "Oculus"
+                ? "OCULUS"
+                : vrRes.renderMode ?? DEFAULT_VR.renderMode;
         const normalizedVr: VrTripleSettings = {
-          ...DEFAULT_VR,
-          renderMode: (raw.renderMode as VrTripleSettings["renderMode"]) ?? DEFAULT_VR.renderMode,
-          tripleFovDeg: Number(raw.tripleFovDeg ?? triple.fov_deg ?? DEFAULT_VR.tripleFovDeg),
-          screenWidthMm: Number(raw.screenWidthMm ?? triple.width_mm ?? DEFAULT_VR.screenWidthMm),
-          distanceMm: Number(raw.distanceMm ?? triple.distance_mm ?? DEFAULT_VR.distanceMm),
-          bezelMm: Number(raw.bezelMm ?? triple.bezel_mm ?? DEFAULT_VR.bezelMm),
-          sideAngleDeg: Number(raw.sideAngleDeg ?? triple.angle_deg ?? DEFAULT_VR.sideAngleDeg),
-          vrPixelDensity: Number(raw.vrPixelDensity ?? openvr.pixel_per_display ?? DEFAULT_VR.vrPixelDensity),
+          ...vrRes,
+          renderMode: modeFromVideo,
         };
         setVr(normalizedVr);
         setSavedVr(normalizedVr);
       }
       if (ffbRes) {
-        const raw = ffbRes as unknown as Record<string, unknown>;
-        const pp = (raw.post_process ?? raw.postProcess ?? {}) as Record<string, unknown>;
-        const normalizedFfb: FfbConfig = {
-          ...DEFAULT_FFB,
-          gain: Number(raw.gain ?? DEFAULT_FFB.gain),
-          filter: Number(raw.filter ?? DEFAULT_FFB.filter),
-          minForce: Number(raw.minForce ?? DEFAULT_FFB.minForce),
-          kerbEffect: Number(raw.kerbEffect ?? DEFAULT_FFB.kerbEffect),
-          roadEffect: Number(raw.roadEffect ?? DEFAULT_FFB.roadEffect),
-          slipEffect: Number(raw.slipEffect ?? DEFAULT_FFB.slipEffect),
-          absEffect: Number(raw.absEffect ?? DEFAULT_FFB.absEffect),
-          enhancedUndersteer: Boolean(raw.enhancedUndersteer ?? DEFAULT_FFB.enhancedUndersteer),
-          gammaEnabled: Boolean(raw.gammaEnabled ?? pp.enabled ?? DEFAULT_FFB.gammaEnabled),
-          gammaValue: Number(raw.gammaValue ?? pp.gamma ?? DEFAULT_FFB.gammaValue),
-        };
-        setFfb(normalizedFfb);
-        setSavedFfb(normalizedFfb);
+        setFfb(ffbRes);
+        setSavedFfb(ffbRes);
       }
       setRigs(
         rigList && rigList.length > 0
@@ -246,12 +239,22 @@ export default function GameSettingsPage() {
   const handleSaveAll = async () => {
     setSaving(true);
     try {
+      const cameraMode =
+        vr.renderMode === "TRIPLE"
+          ? "Triple"
+          : vr.renderMode === "OPENVR"
+            ? "OpenVr"
+            : vr.renderMode === "OCULUS"
+              ? "Oculus"
+              : "Default";
+      const videoToSave: VideoSettings = { ...video, cameraMode };
       await Promise.all([
-        api.saveVideoSettings(video),
+        api.saveVideoSettings(videoToSave),
         api.saveVrTripleSettings(vr),
         api.saveFfbConfig(ffb),
       ]);
-      setSavedVideo(video);
+      setVideo(videoToSave);
+      setSavedVideo(videoToSave);
       setSavedVr(vr);
       setSavedFfb(ffb);
       notify("Game settings saved", "success", "video.ini, triple_screen.ini & ff_post_process.ini updated");
@@ -271,10 +274,24 @@ export default function GameSettingsPage() {
 
   const handleAtomicRigSwitch = async (mode: VrTripleSettings["renderMode"]) => {
     const next = { ...vr, renderMode: mode };
+    const cameraMode: VideoSettings["cameraMode"] =
+      mode === "TRIPLE"
+        ? "Triple"
+        : mode === "OPENVR"
+          ? "OpenVr"
+          : mode === "OCULUS"
+            ? "Oculus"
+            : "Default";
+    const nextVideo: VideoSettings = { ...video, cameraMode };
     setVr(next);
+    setVideo(nextVideo);
     try {
-      await api.saveVrTripleSettings(next);
+      await Promise.all([
+        api.saveVrTripleSettings(next),
+        api.saveVideoSettings(nextVideo),
+      ]);
       setSavedVr(next);
+      setSavedVideo(nextVideo);
       notify("Rig render mode switched", "success", `Active mode: ${mode}`);
     } catch (err) {
       notify("Rig switch failed", "error", String(err));
@@ -307,7 +324,7 @@ export default function GameSettingsPage() {
   };
 
   return (
-    <div className="p-6 max-w-[1620px] mx-auto pb-24 space-y-5 animate-fade-in">
+    <div className="p-6 max-w-[1620px] mx-auto pb-24 space-y-5 overflow-x-hidden animate-fade-in">
       <PageHeader
         eyebrow="SETUP · ASSETTO CORSA CONFIGURATION"
         title="Game Settings"
@@ -327,7 +344,7 @@ export default function GameSettingsPage() {
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
         {/* Master-Detail Left Category Rail */}
-        <Card className="lg:col-span-3 space-y-5" padding="sm">
+        <Card className="lg:col-span-3 min-w-0 space-y-5" padding="sm">
           {NAV_GROUPS.map((grp) => (
             <div key={grp.title} className="space-y-1">
               <div className="px-2.5 py-1 text-[10px] font-mono uppercase tracking-[0.14em] text-[var(--text-muted)]">
@@ -341,14 +358,19 @@ export default function GameSettingsPage() {
                     key={item.id}
                     type="button"
                     onClick={() => setCategory(item.id)}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium transition-all cursor-pointer ${
+                    className={`w-full flex items-start gap-2.5 px-3 py-2.5 rounded-lg text-left transition-all cursor-pointer ${
                       active
                         ? "bg-[var(--accent-soft)] text-[var(--accent)] border border-[var(--accent-border)]"
                         : "text-[var(--text-secondary)] hover:text-white hover:bg-white/[0.04] border border-transparent"
                     }`}
                   >
-                    <Icon className="w-4 h-4 shrink-0" />
-                    <span>{item.label}</span>
+                    <Icon className="w-4 h-4 shrink-0 mt-0.5" />
+                    <div className="min-w-0">
+                      <div className="text-[13px] font-medium leading-tight">{item.label}</div>
+                      <div className="text-[10px] font-mono text-[var(--text-muted)] mt-0.5 truncate">
+                        {item.desc}
+                      </div>
+                    </div>
                   </button>
                 );
               })}
@@ -357,11 +379,12 @@ export default function GameSettingsPage() {
         </Card>
 
         {/* Full-Width 2-Column Content Area */}
-        <div className="lg:col-span-9 space-y-5">
-          {/* VIDEO */}
-          {category === "video" && (
-            <div className="grid grid-cols-1 xl:grid-cols-12 gap-5">
-              <Card className="xl:col-span-7 space-y-4" padding="md">
+        <div className="lg:col-span-9 min-w-0 space-y-5">
+          {/* GROUP 1: DISPLAY, VIDEO & CAMERA */}
+          {category === "display" && (
+            <div className="space-y-5">
+              <div className="grid grid-cols-1 xl:grid-cols-12 gap-5">
+              <Card className="xl:col-span-7 min-w-0 space-y-4" padding="md">
                 <div className="text-xs font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
                   Display & Rendering Pipeline
                 </div>
@@ -419,46 +442,119 @@ export default function GameSettingsPage() {
                   />
                 </div>
 
-                <Slider
-                  label="MSAA Samples"
-                  value={video.msaa}
-                  min={0}
-                  max={8}
-                  step={2}
-                  formatValue={(v) => (v === 0 ? "Off" : `${v}x`)}
-                  onChange={(v) => setVideo({ ...video, msaa: v })}
-                />
-                <Slider
-                  label="Anisotropic Filtering"
-                  value={video.anisotropic}
-                  min={0}
-                  max={16}
-                  step={4}
-                  formatValue={(v) => (v === 0 ? "Off" : `${v}x`)}
-                  onChange={(v) => setVideo({ ...video, anisotropic: v })}
-                />
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-[var(--text-secondary)] font-medium">
+                      MSAA Anti-Aliasing
+                    </span>
+                    <span className="font-mono text-[var(--text-primary)]">
+                      {video.msaa <= 1 ? "Off" : `${video.msaa}x`}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-4 gap-2">
+                    {[
+                      { label: "Off", value: 0 },
+                      { label: "2x", value: 2 },
+                      { label: "4x", value: 4 },
+                      { label: "8x", value: 8 },
+                    ].map((opt) => {
+                      const currentAa = video.msaa <= 1 ? 0 : video.msaa;
+                      const active = currentAa === opt.value;
+                      return (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          onClick={() => setVideo({ ...video, msaa: opt.value })}
+                          className={`h-8 rounded-lg border text-xs font-mono transition-colors cursor-pointer ${
+                            active
+                              ? "bg-[var(--accent-soft)] border-[var(--accent-border)] text-[var(--accent)] font-semibold"
+                              : "bg-white/[0.04] border-white/[0.08] text-[var(--text-secondary)] hover:text-white"
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-[var(--text-secondary)] font-medium">
+                      Anisotropic Filtering
+                    </span>
+                    <span className="font-mono text-[var(--text-primary)]">
+                      {video.anisotropic === 0 ? "Off" : `${video.anisotropic}x`}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-5 gap-1.5">
+                    {[0, 2, 4, 8, 16].map((val) => {
+                      const active = video.anisotropic === val;
+                      return (
+                        <button
+                          key={val}
+                          type="button"
+                          onClick={() => setVideo({ ...video, anisotropic: val })}
+                          className={`h-8 rounded-lg border text-xs font-mono transition-colors cursor-pointer ${
+                            active
+                              ? "bg-[var(--accent-soft)] border-[var(--accent-border)] text-[var(--accent)] font-semibold"
+                              : "bg-white/[0.04] border-white/[0.08] text-[var(--text-secondary)] hover:text-white"
+                          }`}
+                        >
+                          {val === 0 ? "Off" : `${val}x`}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
                 <Slider
                   label="World Detail"
                   value={video.worldDetail}
-                  min={1}
+                  min={0}
                   max={5}
                   step={1}
-                  formatValue={(v) => ["Very Low", "Low", "Medium", "High", "Maximum"][v - 1]}
+                  formatValue={(v) => ["Minimum", "Very Low", "Low", "Medium", "High", "Maximum"][v] ?? String(v)}
                   onChange={(v) => setVideo({ ...video, worldDetail: v })}
                 />
-                <Slider
-                  label="Shadow Map Resolution"
-                  value={video.shadowMapSize}
-                  min={512}
-                  max={4096}
-                  step={512}
-                  unit=" px"
-                  onChange={(v) => setVideo({ ...video, shadowMapSize: v })}
-                />
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-[var(--text-secondary)] font-medium">
+                      Shadow Map Resolution
+                    </span>
+                    <span className="font-mono text-[var(--text-primary)]">
+                      {video.shadowMapSize <= 0 ? "Off" : `${video.shadowMapSize} px`}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-5 gap-1.5">
+                    {[
+                      { label: "Off", value: 0 },
+                      { label: "512", value: 512 },
+                      { label: "1024", value: 1024 },
+                      { label: "2048", value: 2048 },
+                      { label: "4096", value: 4096 },
+                    ].map((opt) => {
+                      const currentShadow = video.shadowMapSize <= 0 ? 0 : video.shadowMapSize;
+                      const active = currentShadow === opt.value;
+                      return (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          onClick={() => setVideo({ ...video, shadowMapSize: opt.value })}
+                          className={`h-8 rounded-lg border text-xs font-mono transition-colors cursor-pointer ${
+                            active
+                              ? "bg-[var(--accent-soft)] border-[var(--accent-border)] text-[var(--accent)] font-semibold"
+                              : "bg-white/[0.04] border-white/[0.08] text-[var(--text-secondary)] hover:text-white"
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
               </Card>
 
               {/* Right: Live Visual Quality vs Performance Bars */}
-              <Card className="xl:col-span-5 space-y-5" padding="md">
+              <Card className="xl:col-span-5 min-w-0 space-y-5" padding="md">
                 <div>
                   <div className="text-xs font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
                     Live Telemetry Estimator
@@ -519,12 +615,51 @@ export default function GameSettingsPage() {
                   </div>
                 </div>
               </Card>
+              </div>
+
+              {/* Camera & Replay Card */}
+              <Card padding="md" className="space-y-4">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-xs font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
+                    <Camera className="w-3.5 h-3.5 text-[var(--accent)]" />
+                    <span>Cockpit Camera &amp; Replay Quality</span>
+                  </div>
+                  <Badge variant="info">Local Preview</Badge>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
+                  <Slider
+                    label="Vertical FOV"
+                    value={localPrefs.fovDeg}
+                    min={32}
+                    max={80}
+                    unit="°"
+                    onChange={(v) => updateLocalPref("fovDeg", v)}
+                  />
+                  <div className="space-y-2">
+                    <div className="text-[11px] font-medium text-[var(--text-secondary)]">
+                      Replay Recording Quality
+                    </div>
+                    <div className="flex gap-2">
+                      {(["Medium", "High", "Ultra"] as const).map((q) => (
+                        <Button
+                          key={q}
+                          size="sm"
+                          variant={localPrefs.replayQuality === q ? "primary" : "secondary"}
+                          onClick={() => updateLocalPref("replayQuality", q)}
+                        >
+                          {q}
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </Card>
             </div>
           )}
 
-          {/* VR & TRIPLE */}
-          {category === "vr-triple" && (
-            <div className="space-y-4">
+          {/* GROUP 2: VR, TRIPLE SCREEN & RIG PROFILES */}
+          {category === "vr-rigs" && (
+            <div className="space-y-5">
               <Card padding="md" className="space-y-3">
                 <div className="flex items-center justify-between">
                   <div>
@@ -632,279 +767,277 @@ export default function GameSettingsPage() {
                   />
                 </Card>
               </div>
-            </div>
-          )}
 
-          {/* FFB & LUT */}
-          {category === "ffb" && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-              <Card padding="md" className="space-y-4">
-                <div className="text-xs font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
-                  Force Feedback Core Gain & Effects
+              {/* Rig Profiles */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2 text-xs font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
+                  <Layers className="w-3.5 h-3.5 text-[var(--accent)]" />
+                  <span>Saved Rig Profiles</span>
                 </div>
-                <Slider
-                  label="Master Gain"
-                  value={Math.round(ffb.gain * 100)}
-                  min={10}
-                  max={150}
-                  unit="%"
-                  onChange={(v) => setFfb({ ...ffb, gain: v / 100 })}
-                />
-                <Slider
-                  label="Minimum Force"
-                  value={Math.round(ffb.minForce * 100)}
-                  min={0}
-                  max={25}
-                  unit="%"
-                  onChange={(v) => setFfb({ ...ffb, minForce: v / 100 })}
-                />
-                <Slider
-                  label="Kerb Effect"
-                  value={Math.round(ffb.kerbEffect * 100)}
-                  min={0}
-                  max={100}
-                  unit="%"
-                  onChange={(v) => setFfb({ ...ffb, kerbEffect: v / 100 })}
-                />
-                <Slider
-                  label="Road Effect"
-                  value={Math.round(ffb.roadEffect * 100)}
-                  min={0}
-                  max={100}
-                  unit="%"
-                  onChange={(v) => setFfb({ ...ffb, roadEffect: v / 100 })}
-                />
-                <Slider
-                  label="Slip Effect"
-                  value={Math.round(ffb.slipEffect * 100)}
-                  min={0}
-                  max={100}
-                  unit="%"
-                  onChange={(v) => setFfb({ ...ffb, slipEffect: v / 100 })}
-                />
-              </Card>
-
-              <Card padding="md" className="space-y-4">
-                <div className="text-xs font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
-                  Post-Processing & Gamma / LUT Curve
-                </div>
-                <Toggle
-                  checked={ffb.enhancedUndersteer}
-                  onChange={(v) => setFfb({ ...ffb, enhancedUndersteer: v })}
-                  label="Enhanced Understeer Effect"
-                  description="Drops steering torque progressively when front tyres exceed peak slip angle."
-                />
-                <Toggle
-                  checked={ffb.gammaEnabled}
-                  onChange={(v) => setFfb({ ...ffb, gammaEnabled: v })}
-                  label="Enable Gamma Linearity Curve"
-                />
-                <Slider
-                  label="Gamma Value"
-                  value={ffb.gammaValue}
-                  min={0.5}
-                  max={1.5}
-                  step={0.05}
-                  disabled={!ffb.gammaEnabled}
-                  formatValue={(v) => v.toFixed(2)}
-                  onChange={(v) => setFfb({ ...ffb, gammaValue: v })}
-                />
-                <div className="rounded-xl bg-[#070A10] border border-white/[0.06] p-3">
-                  <div className="text-[10px] font-mono text-[var(--text-muted)] mb-1">
-                    TORQUE RESPONSE CURVE
-                  </div>
-                  <svg viewBox="0 0 220 96" className="w-full h-[96px]">
-                    <line x1="10" y1="86" x2="210" y2="10" stroke="rgba(255,255,255,0.15)" strokeDasharray="3 3" />
-                    <path
-                      d={Array.from({ length: 24 }, (_, i) => {
-                        const x = i / 23;
-                        const y = Math.pow(x, ffb.gammaEnabled ? ffb.gammaValue : 1);
-                        return `${i === 0 ? "M" : "L"} ${(10 + x * 200).toFixed(1)} ${(86 - y * 76).toFixed(1)}`;
-                      }).join(" ")}
-                      fill="none"
-                      stroke="var(--accent)"
-                      strokeWidth="2.5"
-                    />
-                  </svg>
-                </div>
-              </Card>
-            </div>
-          )}
-
-          {/* RIG PROFILES */}
-          {category === "rigs" && (
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {rigs.map((rig) => (
-                <Card
-                  key={rig.name}
-                  variant="elevated"
-                  padding="md"
-                  className={rig.active ? "border-[var(--accent-border)]" : ""}
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="text-sm font-semibold text-[var(--text-primary)]">
-                      {rig.name}
-                    </div>
-                    {rig.active && <Badge variant="accent">ACTIVE</Badge>}
-                  </div>
-                  <div className="text-xs text-[var(--text-secondary)] mt-1.5">
-                    {rig.description ?? "Saved video & FFB rig configuration"}
-                  </div>
-                  <div className="mt-3 pt-3 border-t border-white/[0.06] flex items-center justify-between text-[11px] font-mono">
-                    <span className="text-[var(--text-muted)]">{rig.videoMode}</span>
-                    <Button
-                      variant={rig.active ? "secondary" : "primary"}
-                      size="sm"
-                      onClick={() => void handleApplyRig(rig.name)}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {rigs.map((rig) => (
+                    <Card
+                      key={rig.name}
+                      variant="elevated"
+                      padding="md"
+                      className={rig.active ? "border-[var(--accent-border)]" : ""}
                     >
-                      {rig.active ? "Re-Apply" : "Switch Rig"}
-                    </Button>
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="text-sm font-semibold text-[var(--text-primary)]">
+                          {rig.name}
+                        </div>
+                        {rig.active && <Badge variant="accent">ACTIVE</Badge>}
+                      </div>
+                      <div className="text-xs text-[var(--text-secondary)] mt-1.5">
+                        {rig.description ?? "Saved video & FFB rig configuration"}
+                      </div>
+                      <div className="mt-3 pt-3 border-t border-white/[0.06] flex items-center justify-between text-[11px] font-mono">
+                        <span className="text-[var(--text-muted)]">{rig.videoMode}</span>
+                        <Button
+                          variant={rig.active ? "secondary" : "primary"}
+                          size="sm"
+                          onClick={() => void handleApplyRig(rig.name)}
+                        >
+                          {rig.active ? "Re-Apply" : "Switch Rig"}
+                        </Button>
+                      </div>
+                    </Card>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* GROUP 3: CONTROLS, FFB & AUDIO */}
+          {category === "controls-audio" && (
+            <div className="space-y-5">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                <Card padding="md" className="space-y-4">
+                  <div className="text-xs font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
+                    Force Feedback Core Gain &amp; Effects
+                  </div>
+                  <Slider
+                    label="Master Gain"
+                    value={Math.round(ffb.gain * 100)}
+                    min={10}
+                    max={150}
+                    unit="%"
+                    onChange={(v) => setFfb({ ...ffb, gain: v / 100 })}
+                  />
+                  <Slider
+                    label="Minimum Force"
+                    value={Math.round(ffb.minForce * 100)}
+                    min={0}
+                    max={25}
+                    unit="%"
+                    onChange={(v) => setFfb({ ...ffb, minForce: v / 100 })}
+                  />
+                  <Slider
+                    label="Kerb Effect"
+                    value={Math.round(ffb.kerbEffect * 100)}
+                    min={0}
+                    max={100}
+                    unit="%"
+                    onChange={(v) => setFfb({ ...ffb, kerbEffect: v / 100 })}
+                  />
+                  <Slider
+                    label="Road Effect"
+                    value={Math.round(ffb.roadEffect * 100)}
+                    min={0}
+                    max={100}
+                    unit="%"
+                    onChange={(v) => setFfb({ ...ffb, roadEffect: v / 100 })}
+                  />
+                  <Slider
+                    label="Slip Effect"
+                    value={Math.round(ffb.slipEffect * 100)}
+                    min={0}
+                    max={100}
+                    unit="%"
+                    onChange={(v) => setFfb({ ...ffb, slipEffect: v / 100 })}
+                  />
+                </Card>
+
+                <Card padding="md" className="space-y-4">
+                  <div className="text-xs font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
+                    Post-Processing &amp; Gamma / LUT Curve
+                  </div>
+                  <Toggle
+                    checked={ffb.enhancedUndersteer}
+                    onChange={(v) => setFfb({ ...ffb, enhancedUndersteer: v })}
+                    label="Enhanced Understeer Effect"
+                    description="Drops steering torque progressively when front tyres exceed peak slip angle."
+                  />
+                  <Toggle
+                    checked={ffb.gammaEnabled}
+                    onChange={(v) => setFfb({ ...ffb, gammaEnabled: v })}
+                    label="Enable Gamma Linearity Curve"
+                  />
+                  <Slider
+                    label="Gamma Value"
+                    value={ffb.gammaValue}
+                    min={0.5}
+                    max={1.5}
+                    step={0.05}
+                    disabled={!ffb.gammaEnabled}
+                    formatValue={(v) => v.toFixed(2)}
+                    onChange={(v) => setFfb({ ...ffb, gammaValue: v })}
+                  />
+                  <div className="rounded-xl bg-[#070A10] border border-white/[0.06] p-3">
+                    <div className="text-[10px] font-mono text-[var(--text-muted)] mb-1">
+                      TORQUE RESPONSE CURVE
+                    </div>
+                    <svg viewBox="0 0 220 96" className="w-full h-[96px]">
+                      <line x1="10" y1="86" x2="210" y2="10" stroke="rgba(255,255,255,0.15)" strokeDasharray="3 3" />
+                      <path
+                        d={Array.from({ length: 24 }, (_, i) => {
+                          const x = i / 23;
+                          const y = Math.pow(x, ffb.gammaEnabled ? ffb.gammaValue : 1);
+                          return `${i === 0 ? "M" : "L"} ${(10 + x * 200).toFixed(1)} ${(86 - y * 76).toFixed(1)}`;
+                        }).join(" ")}
+                        fill="none"
+                        stroke="var(--accent)"
+                        strokeWidth="2.5"
+                      />
+                    </svg>
                   </div>
                 </Card>
-              ))}
+              </div>
+
+              {/* DirectInput + Audio Mix */}
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-5">
+                <Card padding="md" className="md:col-span-5 min-w-0 space-y-2.5">
+                  <div className="flex items-center gap-2 text-xs font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
+                    <Gamepad2 className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>Wheel &amp; Pedal Bindings</span>
+                  </div>
+                  <div className="text-sm font-semibold text-[var(--text-primary)]">
+                    DirectInput / controls.ini Synced
+                  </div>
+                  <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
+                    Bind steering axes, shift paddles, DRS, and pit limiter inside Assetto Corsa or switch between saved Rig Profiles.
+                  </p>
+                </Card>
+
+                <Card padding="md" className="md:col-span-7 min-w-0 space-y-4">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 text-xs font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
+                      <Volume2 className="w-3.5 h-3.5 text-[var(--accent)]" />
+                      <span>Audio Mix Levels</span>
+                    </div>
+                    <Badge variant="info">Local Preview</Badge>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <Slider
+                      label="Master Volume"
+                      value={localPrefs.masterVol}
+                      min={0}
+                      max={100}
+                      unit="%"
+                      onChange={(v) => updateLocalPref("masterVol", v)}
+                    />
+                    <Slider
+                      label="Engine & Exhaust"
+                      value={localPrefs.engineVol}
+                      min={0}
+                      max={100}
+                      unit="%"
+                      onChange={(v) => updateLocalPref("engineVol", v)}
+                    />
+                    <Slider
+                      label="Tyre Scrub & Slip"
+                      value={localPrefs.tyreVol}
+                      min={0}
+                      max={100}
+                      unit="%"
+                      onChange={(v) => updateLocalPref("tyreVol", v)}
+                    />
+                  </div>
+                </Card>
+              </div>
             </div>
           )}
 
-          {/* SNAPSHOTS */}
-          {category === "snapshots" && (
-            <Card padding="md" className="space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <div className="text-sm font-semibold text-[var(--text-primary)]">
-                    Atomic Configuration Snapshots
+          {/* GROUP 4: GAMEPLAY & CONFIG SNAPSHOTS */}
+          {category === "gameplay-snapshots" && (
+            <div className="space-y-5">
+              <Card padding="md" className="space-y-4">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-xs font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
+                    <Wrench className="w-3.5 h-3.5 text-[var(--accent)]" />
+                    <span>Gameplay &amp; Driving Aids</span>
                   </div>
-                  <div className="text-xs text-[var(--text-secondary)]">
-                    Back up and restore video.ini, controls.ini, and CSP configs in one click.
-                  </div>
+                  <Badge variant="info">Local Preview</Badge>
                 </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    value={snapshotLabel}
-                    onChange={(e) => setSnapshotLabel(e.target.value)}
-                    placeholder="Snapshot label..."
-                    className="h-8 rounded-lg bg-black/40 border border-white/[0.1] px-2.5 text-xs text-[var(--text-primary)] focus:outline-none"
-                  />
-                  <Button variant="primary" size="sm" onClick={() => void handleCreateSnapshot()}>
-                    Create Snapshot
-                  </Button>
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                {snapshots.map((s) => (
-                  <div
-                    key={s.id}
-                    className="flex items-center justify-between p-3 rounded-xl bg-white/[0.03] border border-white/[0.06]"
-                  >
-                    <div>
-                      <div className="text-[13px] font-semibold text-[var(--text-primary)]">
-                        {s.label}
-                      </div>
-                      <div className="text-[11px] font-mono text-[var(--text-muted)]">
-                        {s.createdAt} · {s.filesCount} ini files
-                      </div>
-                    </div>
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      icon={<RotateCcw className="w-3.5 h-3.5" />}
-                      onClick={() => {
-                        void api.restoreConfigSnapshot(s.id).catch(() => {});
-                        notify("Snapshot restored", "success", s.label);
-                      }}
-                    >
-                      Restore
-                    </Button>
-                  </div>
-                ))}
-              </div>
-            </Card>
-          )}
-
-          {/* CAMERA / CONTROLS / AUDIO / GAMEPLAY */}
-          {(category === "camera" ||
-            category === "controls" ||
-            category === "audio" ||
-            category === "gameplay") && (
-            <Card padding="md" className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {category === "camera" && (
-                <>
-                  <div className="space-y-4">
-                    <div className="text-xs font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
-                      Cockpit Camera
-                    </div>
-                    <Slider label="Vertical FOV" value={fovDeg} min={32} max={80} unit="°" onChange={setFovDeg} />
-                  </div>
-                  <div className="space-y-3">
-                    <div className="text-xs font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
-                      Replay Recording Quality
-                    </div>
-                    <div className="flex gap-2">
-                      {(["Medium", "High", "Ultra"] as const).map((q) => (
-                        <Button
-                          key={q}
-                          size="sm"
-                          variant={replayQuality === q ? "primary" : "secondary"}
-                          onClick={() => setReplayQuality(q)}
-                        >
-                          {q}
-                        </Button>
-                      ))}
-                    </div>
-                  </div>
-                </>
-              )}
-
-              {category === "controls" && (
-                <>
-                  <div className="space-y-2">
-                    <div className="text-xs font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
-                      Active Wheel & Pedal Bindings
-                    </div>
-                    <div className="text-sm font-semibold text-[var(--text-primary)]">
-                      DirectInput / Wheel Profile Synced
-                    </div>
-                    <p className="text-xs text-[var(--text-secondary)]">
-                      Bind axes, shift paddles, DRS, and pit limiter directly inside Assetto Corsa or switch saved Rig Profiles.
-                    </p>
-                  </div>
-                  <div className="flex items-center justify-end">
-                    <Button variant="secondary" size="sm" onClick={() => setCategory("ffb")}>
-                      Tune FFB & LUT Curve
-                    </Button>
-                  </div>
-                </>
-              )}
-
-              {category === "audio" && (
-                <>
-                  <div className="space-y-4">
-                    <Slider label="Master Volume" value={masterVol} min={0} max={100} unit="%" onChange={setMasterVol} />
-                    <Slider label="Engine & Exhaust" value={engineVol} min={0} max={100} unit="%" onChange={setEngineVol} />
-                  </div>
-                  <div className="space-y-4">
-                    <Slider label="Tyre Scrub & Slip" value={tyreVol} min={0} max={100} unit="%" onChange={setTyreVol} />
-                  </div>
-                </>
-              )}
-
-              {category === "gameplay" && (
-                <>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <Toggle
-                    checked={autoBlip}
-                    onChange={setAutoBlip}
+                    checked={localPrefs.autoBlip}
+                    onChange={(v) => updateLocalPref("autoBlip", v)}
                     label="Auto-Blip on Downshift"
                     description="Automatically rev-match H-pattern manual gearboxes."
                   />
                   <Toggle
-                    checked={idealLine}
-                    onChange={setIdealLine}
+                    checked={localPrefs.idealLine}
+                    onChange={(v) => updateLocalPref("idealLine", v)}
                     label="Show On-Track Ideal Line"
                     description="Display dynamic braking & racing line overlay in-sim."
                   />
-                </>
-              )}
-            </Card>
+                </div>
+              </Card>
+
+              <Card padding="md" className="space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-[var(--text-primary)]">
+                      Atomic Configuration Snapshots
+                    </div>
+                    <div className="text-xs text-[var(--text-secondary)]">
+                      Back up and restore video.ini, controls.ini, and CSP configs in one click.
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      value={snapshotLabel}
+                      onChange={(e) => setSnapshotLabel(e.target.value)}
+                      placeholder="Snapshot label..."
+                      className="h-8 rounded-lg bg-black/40 border border-white/[0.1] px-2.5 text-xs text-[var(--text-primary)] focus:outline-none"
+                    />
+                    <Button variant="primary" size="sm" onClick={() => void handleCreateSnapshot()}>
+                      Create Snapshot
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  {snapshots.map((s) => (
+                    <div
+                      key={s.id}
+                      className="flex items-center justify-between p-3 rounded-xl bg-white/[0.03] border border-white/[0.06]"
+                    >
+                      <div>
+                        <div className="text-[13px] font-semibold text-[var(--text-primary)]">
+                          {s.label}
+                        </div>
+                        <div className="text-[11px] font-mono text-[var(--text-muted)]">
+                          {s.createdAt} · {s.filesCount} ini files
+                        </div>
+                      </div>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        icon={<RotateCcw className="w-3.5 h-3.5" />}
+                        onClick={() => {
+                          void api.restoreConfigSnapshot(s.id).catch(() => {});
+                          notify("Snapshot restored", "success", s.label);
+                        }}
+                      >
+                        Restore
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+            </div>
           )}
         </div>
       </div>

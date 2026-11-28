@@ -1,164 +1,81 @@
-# ACXS Manager
+# ACXS Manager (v0.4.0)
 
-ACXS Manager is a desktop manager for Assetto Corsa built on a pure-Rust core
-library (`acxs_manager`, 118 modules, 1,221 unit tests) paired with a modern
-**Tauri v2 + React 19 + TypeScript + Tailwind CSS v4 + Three.js** desktop UI
-(`src-tauri/` + `ui/`). It brings content management, racing & online server
-joining, dedicated server hosting/RCON, CSP & VR/Controls configuration,
-standalone 3D Showroom/Replay/Track/Trajectory tools, and live telemetry into
-one fast native window — without needing Content Manager.
+ACXS Manager is a native desktop manager for **Assetto Corsa** built on a pure-Rust core library (`acxs_manager`, 118 modules, 1,221 unit tests) paired with a **Tauri v2 + React 19 + TypeScript + Tailwind CSS v4 + Three.js** desktop UI (`src-tauri/` + `ui/`). It brings content management, racing & online server joining, dedicated server hosting/RCON, CSP & VR/Controls configuration, standalone 3D Showroom/Replay/Track/Trajectory tools, and live telemetry into one fast frameless dark-glass window — without needing Content Manager.
 
-*(The legacy `egui`/`eframe` binary remains buildable from the root crate; the
-primary v0.4.0 desktop app is `src-tauri/` + `ui/`.)*
+*(The legacy `egui`/`eframe` binary remains buildable from the root crate; the primary v0.4.0 desktop app is `src-tauri/` + `ui/`.)*
 
-## A look at it
+## A Look at v0.4.0
 
 | | |
 |---|---|
-| ![Home](docs/screenshots/home.png) | ![Cars](docs/screenshots/cars.png) |
-| Home: a featured car, launch, and your content at a glance | Cars: a card grid with real previews, skins, favorites and filters |
-| ![Showroom](docs/screenshots/showroom.png) | ![Tracks](docs/screenshots/tracks.png) |
-| Showroom: one car large, its skins, specs and description | Tracks: previews, layouts and the track map |
-| ![Servers](docs/screenshots/servers.png) | ![Quick Race](docs/screenshots/quick-race.png) |
-| Servers: your list and the public lobby, with a car chooser and drivers | Quick Race: choose car and track with pictures, then sessions, weather and driver aids |
-| ![CSP config](docs/screenshots/csp-config.png) | |
-| CSP config: searchable files, changed values marked, one save bar | |
+| ![Paddock](docs/screenshots/v04-paddock.png) | ![Quick Race & Practice](docs/screenshots/v04-drive.png) |
+| **Paddock**: featured car, quick launch, and content & driving stats at a glance | **Drive**: Quick Race & Practice with 2D/3D rotating track corridor preview, layout selector, and AI grid |
+| ![3D Showroom](docs/screenshots/v04-showroom.png) | ![Cars](docs/screenshots/v04-cars.png) |
+| **3D Showroom**: KN5 renderer with `ksPerPixelMultiMap` paint compositing, skin switcher, and 6-axis radar | **Cars**: searchable card grid with previews, skins, favorites, and class/tag filters |
+| ![Tracks](docs/screenshots/v04-tracks.png) | ![Online Server Browser](docs/screenshots/v04-servers.png) |
+| **Tracks**: layout previews, surface details, and track maps | **Online**: live server browser with track/car ownership badges, multi-filter bar, and driver inspector |
+| ![CSP Config Editor](docs/screenshots/v04-csp-config.png) | ![Telemetry & Corner Coach](docs/screenshots/v04-telemetry.png) |
+| **CSP Config**: searchable INI sections, modified-value indicators, and one-click save | **Telemetry & Corner Coach**: lap telemetry, delta traces, and corner-by-corner driving analysis |
 
-Press `Ctrl+K` anywhere to jump to a page, a tool, a car or a track. Drop a car or
-track `.zip` on the window to install it. Joining a server and Quick Race start the
-game directly; Content Manager is not needed.
+Press `Ctrl+K` anywhere to jump to a page, tool, car, or track. Drop a car or track `.zip` onto the window to install it. Quick Race and online server joining launch Assetto Corsa directly; Content Manager is not required.
 
-## What it does today
+## Feature Overview
 
-- **Install and launch:** finds installs through Steam library folders, checks a
-  folder picked by hand, detects whether the game is running, starts the game or a
-  third-party launcher profile, and installs cars and tracks from zip archives.
-- **Content:** scans cars and tracks, filters and searches them, shows specs and
-  thumbnails, compares two cars or two tracks, edits car and track metadata, runs
-  content health checks with optional repairs, enables and disables content without
-  deleting it, keeps collections, and exports lists to CSV or JSON.
-- **Skins and tuning:** scans and imports skins, recolours skin textures, makes
-  licence plates, and edits a car's engine, mass, fuel, gear and final drive values.
-- **Models:** inspects KN5 models, exports OBJ and FBX, writes KN5 from OBJ, renders
-  preview images, bakes AO values, and lists `data.acd` entries.
-- **Setups:** lists, imports and archives setup files, compares them, edits values,
-  and runs a three-way merge.
-- **CSP and game settings:** installs, switches and removes the CSP lights patch
-  (with rollback), edits CSP config, force-feedback, weather presets, car classes
-  (create, remove, assign) and car years, reads gamepad settings, manages user Lua
-  apps, edits `video.ini` and `assetto_corsa.ini`, and makes and restores
-  configuration snapshots.
-- **Graphics:** switches the active graphics injector between the lights patch, an
-  injector build folder, a runtime build folder or none, and manages those folders.
-- **Racing:** writes a quick-race config and starts the game with named presets,
-  keeps lap records with a delta trace, views replays, and offers race engineer,
-  setup, strategy and timing-tower views. Championships are scored from CSV results
-  or dedicated server result files.
-- **Driving statistics:** records your own sessions while the game runs (time,
-  distance, laps, crashes, jumps, lock-ups, wheelspin, an estimate of understeer and
-  oversteer) with a track map of your trouble spots and setup suggestions. Home adds
-  your Content Manager history. Everything stays on your PC.
-- **Server:** edits the dedicated server configuration and entry list, starts
-  and stops the server process, and shows live server status.
-- **Telemetry and logs:** shows live UDP telemetry with charts and a track map,
-  reads the game's shared memory on Windows, exports telemetry and laps to CSV,
-  serves a local web dashboard, edits a HUD layout, summarizes game logs, and
-  writes a diagnostics bundle.
+- **Frameless Dark-Glass Desktop Shell:** Custom Minimize / Maximize / Close window controls, themed right-click context menus, command palette (`Ctrl+K`), and drag-and-drop `.zip` mod installation.
+- **Drive:** Quick Race & Practice with 2D/3D rotating track corridor preview, direct layout selector, searchable Car/Track pickers, weather/time-of-day presets, driver aids, and AI grid builder.
+- **Garage:**
+  - **3D KN5 Showroom:** Real-time Three.js KN5 viewer with `ksPerPixelMultiMap` car-paint compositing, Car Chooser, skin switcher, and 6-axis telemetry radar.
+  - **Cars & Tracks:** Fast scanning, filtering, favorites, collections, metadata editing, content health checks & repairs, car/track comparison, and CSV/JSON export.
+  - **Setups, Livery Painter & Car Tuning:** Setup browser/editor/3-way merge, skin recolouring & licence plates, and engine/mass/fuel/gearing tuning.
+- **Online:** Live server browser with immediate track & car ownership badges, multi-filter bar, watchlist, and live driver/car inspector.
+- **Server, Telemetry & Setup:**
+  - **Dedicated Server Manager:** Edit server config & entry lists, start/stop server processes, RCON, and live server status.
+  - **Lap Telemetry & Corner Coach:** Live UDP telemetry & Windows shared memory reader, lap delta traces, track map trouble spots, setup suggestions, and CSV export.
+  - **Game Settings & CSP:** Display, VR/Triple-screen, Force Feedback (FFB), CSP Lights Patch installer/switcher (with rollback), CSP Config Editor, and WeatherFX.
 
-The full feature list, with the status of each feature and the reason for anything
-not built, is in [ROADMAP.md](ROADMAP.md).
+The full feature coverage matrix is in [ROADMAP.md](ROADMAP.md).
 
-## Building
-
-See [BUILD.md](BUILD.md) for full Windows and macOS steps. In short:
-
-- **Tauri v2 Desktop App (v0.4.0, Windows native):**
-  ```bat
-  cd ui && npm install && npm run build
-  cd ..\src-tauri && cargo build --release
-  ```
-  Output: `src-tauri\target\release\acxs-tauri.exe` (or run `npx tauri build` for a Windows NSIS/MSI installer).
-- **Tauri v2 Dev Mode (macOS / Windows):**
-  ```sh
-  npm --prefix ui run dev -- --port 1420 --strictPort
-  cargo run --manifest-path src-tauri/Cargo.toml
-  ```
-- **Core library tests (host):**
-  ```sh
-  cargo test --lib
-  ```
-  Last run: **1,221 tests passed, 0 failed** (macOS host).
-
-## Project layout
+## Architecture
 
 ```
-acxs-manager/
-  Cargo.toml            package `acxs-manager` (library `acxs_manager` and a binary)
-  src/
-    main.rs             eframe entry point: window setup, starts the UI
-    lib.rs              core library: declares the modules below
-    ui/                 egui front end
-      mod.rs            app state, background work, message channel
-      pages.rs          Home, Cars, Tracks and CSP Lights Patch pages
-      theme.rs          colors, spacing, widget styling
-      widgets.rs        pills, stat tiles, section headers, list cards
-      tools/            one file per Tools page (registered in tools/mod.rs)
-  scripts/
-    build-windows.sh   cross-compile for Windows and copy the executable into dist/
-    package-release.sh zip the executable and write its SHA-256 sum
-  docs/
-    csp-lights-patch-analysis.md   static analysis notes for the two known patch builds
-  dist/                 release executable, zip and checksums from the scripts
-  BUILD.md              build instructions for macOS and Windows
-  ROADMAP.md            feature coverage matrix
+acsx-manager/
+  src-tauri/            Tauri v2 Rust backend, IPC commands, window & native integrations
+  ui/                   React 19 + TypeScript + Tailwind CSS v4 + Three.js frontend
+  src/                  Pure-Rust core library (`acxs_manager`: 118 modules) + legacy eframe binary
+  scripts/              Release packaging & Windows cross-compile helpers
+  docs/                 Architecture notes & v0.4.0 screenshots
+  BUILD.md              Detailed build instructions for Windows & macOS
+  ROADMAP.md            Feature coverage matrix
 ```
 
-Core modules by feature area (all in `src/`):
+## Building & Running
 
-- **Install and launch:** `steam.rs`, `settings.rs`, `game.rs`, `launcher.rs`,
-  `installer.rs`, `util.rs`.
-- **Content:** `content.rs`, `query.rs`, `dashboard_stats.rs`, `mods.rs`,
-  `collection.rs`, `content_meta.rs`, `content_repair.rs`, `content_export.rs`,
-  `cardata.rs`, `car_compare.rs`, `car_classes.rs`, `track_surfaces.rs`,
-  `track_compare.rs`, `skins.rs`, `skin_import.rs`, `livery.rs`,
-  `license_plate.rs`, `thumbnails.rs`, `png.rs`, `car_tuning.rs`.
-- **Models:** `kn5.rs`, `kn5_export.rs`, `kn5_writer.rs`, `obj_import.rs`, `fbx.rs`,
-  `ao_bake.rs`, `ortho.rs`, `acd.rs`.
-- **Setups:** `setups.rs`, `ini.rs` (lenient INI reader and writer, keeps comments
-  and key order), `ini_merge.rs`, `setup_advice.rs`.
-- **CSP, graphics and settings:** `csp.rs`, `csp_config.rs`, `ffb.rs`, `weather.rs`,
-  `gamepad.rs`, `rare.rs`, `lua_apps.rs`, `shift_lights.rs`, `game_cfg.rs`,
-  `backup.rs`, `graphics_profiles.rs`, `graphics_check.rs`, `reshade.rs`, `remix.rs`.
-- **Racing and server:** `race.rs`, `presets.rs`, `laptimes.rs`, `delta.rs`,
-  `replay.rs`, `replay_player.rs`, `engineer.rs`, `strategy.rs`, `timing.rs`,
-  `championship.rs`, `server.rs`, `server_process.rs`, `server_status.rs`.
-- **Telemetry, logs and updates:** `telemetry.rs`, `udp_client.rs`,
-  `telemetry_csv.rs`, `charts.rs`, `track_map.rs`, `sharedmem.rs`, `hud.rs`,
-  `web_dashboard.rs`, `ac_log.rs`, `diagnostics.rs`, `update.rs`.
+### Prerequisites
 
-## Status
+- **Rust** (stable toolchain via `rustup`)
+- **Node.js** (LTS) & **npm**
+- **Tauri v2 system dependencies** (WebView2 on Windows; Xcode Command Line Tools on macOS)
 
-- Working and reachable from the UI: game folder detection, car and track scan,
-  CSP lights patch install, switch, uninstall and rollback, content metadata edits,
-  health checks with repairs, setups including value edits, skins, collections,
-  quick race, dedicated server files and process control, lap records, replay
-  viewing, live telemetry with charts, KN5 export and preview, graphics injector
-  switching, configuration snapshots, the diagnostics bundle, the install-from-zip
-  page, live server status, the shared memory reader, session recording, and joining
-  servers. Quick Race, joining and the recorder have run against the real game.
-- Partial: a few pages stop short of the full feature. Examples: the HUD layout
-  (no in-game drawing) and AO baking (values not written). ROADMAP.md names what is
-  missing for each.
-- Not started: the Planned rows in ROADMAP.md, such as the online content catalog,
-  shared leaderboards, server uploads, hardware outputs and the Windows CI workflow.
-- Switched off: RTX & ReShade. Remix hooks Direct3D 9 and the game uses Direct3D 11.
+### Build Tauri v2 Desktop App (Release)
 
-Build and test results above were recorded from the repository state at the time
-of writing. Run `cargo test --lib` before relying on them.
+```sh
+cd ui && npm install && npm run build
+cd ../src-tauri && cargo build --release --features tauri/custom-protocol
+```
 
-## Analysis notes
+Output binary: `src-tauri/target/release/acxs-tauri.exe` (Windows) or `src-tauri/target/release/acxs-tauri` (macOS/Linux). You can also run `npx tauri build` from `ui/`/`src-tauri/` to bundle a Windows NSIS/MSI installer.
 
-[docs/csp-lights-patch-analysis.md](docs/csp-lights-patch-analysis.md) records the
-static analysis of the two known lights patch builds: file sizes, SHA-256 digests,
-PE exports and imports, and the differences between the two `extension/` trees. It
-is analysis only. Nothing was executed.
+### Dev Mode
+
+```sh
+npm --prefix ui run dev -- --port 1420 --strictPort
+cargo run --manifest-path src-tauri/Cargo.toml
+```
+
+### Core Library Tests
+
+```sh
+cargo test --lib
+```
+
+*(See [BUILD.md](BUILD.md) for platform-specific details.)*

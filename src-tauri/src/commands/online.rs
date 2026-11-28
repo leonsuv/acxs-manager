@@ -5,7 +5,8 @@ use std::collections::HashSet;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use acxs_manager::content_dl::{self, ContentDownloadPlan};
@@ -28,9 +29,9 @@ use acxs_manager::settings;
 use acxs_manager::steam;
 use acxs_manager::uri;
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{Emitter, State};
 
-use crate::state::AppState;
+use crate::state::{save_directory_cache_async, AppState};
 
 /// Serializable summary of a public directory / lobby server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +123,27 @@ pub struct WatchlistEntryDto {
     pub port: u16,
     #[serde(default)]
     pub favorite: bool,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedDirectoryDto {
+    pub servers: Vec<LobbyServerDto>,
+    pub saved_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryProgressPayload {
+    pub request_id: u64,
+    pub servers: Vec<LobbyServerDto>,
+    pub loaded: usize,
+    pub total: u64,
+    pub done: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,12 +269,18 @@ pub struct BatchInstallReportDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct DynamicTrackDto {
     pub session_start: u32,
     pub randomness: u32,
     pub session_transfer: u32,
     pub lap_gain: u32,
+}
+
+impl Default for DynamicTrackDto {
+    fn default() -> Self {
+        Self::from(&DynamicTrack::default())
+    }
 }
 
 impl From<&DynamicTrack> for DynamicTrackDto {
@@ -278,7 +306,7 @@ impl From<&DynamicTrackDto> for DynamicTrack {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct ServerConfigDto {
     pub name: String,
     pub password: String,
@@ -301,6 +329,12 @@ pub struct ServerConfigDto {
     pub weather: Vec<WeatherSlot>,
     pub realism: Option<RealismConfig>,
     pub voting_plugins: Option<VotingPluginsConfig>,
+}
+
+impl Default for ServerConfigDto {
+    fn default() -> Self {
+        Self::from(&ServerConfig::default())
+    }
 }
 
 impl From<&ServerConfig> for ServerConfigDto {
@@ -643,35 +677,144 @@ fn process_status_dto(proc: &mut ServerProcess) -> DedicatedServerStatusDto {
     }
 }
 
-/// Fetches live public servers from `acservers.online` in a blocking thread and caches them in state.
+/// Returns previously cached directory servers loaded from `directory-cache.json` or memory.
+#[tauri::command]
+pub fn get_cached_directory_servers(
+    state: State<'_, AppState>,
+) -> Result<CachedDirectoryDto, String> {
+    let servers = state
+        .lobby_servers
+        .lock()
+        .map_err(|_| "lobby_servers lock poisoned".to_string())?
+        .iter()
+        .map(LobbyServerDto::from)
+        .collect();
+    let saved_unix = *state
+        .lobby_cache_saved_unix
+        .lock()
+        .map_err(|_| "lobby_cache_saved_unix lock poisoned".to_string())?;
+    Ok(CachedDirectoryDto {
+        servers,
+        saved_unix,
+    })
+}
+
+/// Fetches live public servers from `acservers.online` incrementally, emits `directory:progress`,
+/// cancels any superseded stream, and persists unfiltered results to `directory-cache.json`.
 #[tauri::command]
 pub async fn fetch_directory_servers(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     query: Option<String>,
     has_players: bool,
+    max_pages: Option<u32>,
+    request_id: Option<u64>,
 ) -> Result<Vec<LobbyServerDto>, String> {
-    let query_owned = query.filter(|q| !q.trim().is_empty());
-    let servers = tauri::async_runtime::spawn_blocking(move || {
-        directory::fetch_all(
+    let query_owned = query
+        .map(|q| q.trim().to_string())
+        .filter(|q| !q.is_empty());
+    let is_unfiltered = query_owned.is_none();
+    let pages_cap = max_pages.unwrap_or(60).clamp(1, 60);
+
+    let target_seq = if is_unfiltered {
+        &state.directory_refresh_seq
+    } else {
+        &state.directory_search_seq
+    };
+    let seq = target_seq.fetch_add(1, Ordering::SeqCst) + 1;
+    let client_request_id = request_id.unwrap_or(seq);
+    let seq_guard = Arc::clone(target_seq);
+    let app_handle = app.clone();
+
+    let (servers, was_cancelled) = tauri::async_runtime::spawn_blocking(move || {
+        let mut all_servers: Vec<LobbyServer> = Vec::new();
+        let mut seen_keys: HashSet<String> = HashSet::new();
+        let mut last_total: u64 = 0;
+
+        let res = directory::fetch_stream_cancellable(
             query_owned.as_deref(),
             has_players,
-            10,
-            Duration::from_secs(12),
-            |_| {},
-        )
+            pages_cap,
+            Duration::from_secs(20),
+            || seq_guard.load(Ordering::SeqCst) == seq,
+            |page_servers, total| {
+                if seq_guard.load(Ordering::SeqCst) != seq {
+                    return;
+                }
+                last_total = total;
+                let mut page_dtos = Vec::new();
+                for srv in page_servers {
+                    if seen_keys.insert(srv.key()) {
+                        page_dtos.push(LobbyServerDto::from(&srv));
+                        all_servers.push(srv);
+                    }
+                }
+                let _ = app_handle.emit(
+                    "directory:progress",
+                    DirectoryProgressPayload {
+                        request_id: client_request_id,
+                        servers: page_dtos,
+                        loaded: all_servers.len(),
+                        total,
+                        done: false,
+                    },
+                );
+            },
+        );
+
+        let cancelled = seq_guard.load(Ordering::SeqCst) != seq;
+        if cancelled {
+            return Ok((Vec::new(), true));
+        }
+        res?;
+        let _ = app_handle.emit(
+            "directory:progress",
+            DirectoryProgressPayload {
+                request_id: client_request_id,
+                servers: Vec::new(),
+                loaded: all_servers.len(),
+                total: last_total.max(all_servers.len() as u64),
+                done: true,
+            },
+        );
+        Ok::<_, String>((all_servers, false))
     })
     .await
     .map_err(|e| format!("Directory worker failed: {e}"))??;
 
+    if was_cancelled {
+        return Ok(Vec::new());
+    }
+
     let dtos: Vec<LobbyServerDto> = servers.iter().map(LobbyServerDto::from).collect();
-    {
-        let mut cached = state
-            .lobby_servers
-            .lock()
-            .map_err(|_| "lobby_servers lock poisoned".to_string())?;
-        *cached = servers;
+    if is_unfiltered && !servers.is_empty() {
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        {
+            let mut cached = state
+                .lobby_servers
+                .lock()
+                .map_err(|_| "lobby_servers lock poisoned".to_string())?;
+            *cached = servers.clone();
+        }
+        {
+            let mut saved_ts = state
+                .lobby_cache_saved_unix
+                .lock()
+                .map_err(|_| "lobby_cache_saved_unix lock poisoned".to_string())?;
+            *saved_ts = Some(now_unix);
+        }
+        save_directory_cache_async(servers, now_unix);
     }
     Ok(dtos)
+}
+
+/// Cancels any active remote directory search stream without affecting full directory refreshes.
+#[tauri::command]
+pub fn cancel_directory_search(state: State<'_, AppState>) {
+    state.directory_search_seq.fetch_add(1, Ordering::SeqCst);
 }
 
 /// Fetches `/INFO` + `/JSON|-1` for a server, resolves track & CSP requirement, and computes missing content URLs.

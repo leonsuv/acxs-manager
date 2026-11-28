@@ -127,6 +127,19 @@ fn decode_blocks(data: &[u8], width: u32, height: u32, fourcc: &[u8]) -> Result<
     Ok(pixels)
 }
 
+fn extract_masked_channel(pixel: u32, mask: u32) -> u8 {
+    if mask == 0 {
+        return 255;
+    }
+    let shift = mask.trailing_zeros();
+    let max_val = mask >> shift;
+    if max_val == 0 {
+        return 255;
+    }
+    let val = (pixel & mask) >> shift;
+    ((val.saturating_mul(255) + (max_val / 2)) / max_val).min(255) as u8
+}
+
 /// Decodes the top mip level.
 pub fn decode(bytes: &[u8]) -> Result<Rgba, DdsError> {
     if bytes.len() < 4 || &bytes[..4] != MAGIC {
@@ -146,7 +159,7 @@ pub fn decode(bytes: &[u8]) -> Result<Rgba, DdsError> {
     } else if fourcc == [0, 0, 0, 0] {
         let bits = u32_at(bytes, 88);
         let step = (bits / 8) as usize;
-        if bits != 32 && bits != 24 {
+        if !matches!(bits, 32 | 24 | 16 | 8) {
             return Err(DdsError::Unsupported(format!("{bits} bit")));
         }
         let has_alpha = u32_at(bytes, 80) & 1 != 0;
@@ -154,11 +167,59 @@ pub fn decode(bytes: &[u8]) -> Result<Rgba, DdsError> {
         if data.len() < count * step {
             return Err(DdsError::Truncated);
         }
-        let (r_shift, b_shift) = (u32_at(bytes, 92).trailing_zeros() / 8, u32_at(bytes, 100).trailing_zeros() / 8);
+        let (r_mask, g_mask, b_mask, a_mask) = (
+            u32_at(bytes, 92),
+            u32_at(bytes, 96),
+            u32_at(bytes, 100),
+            u32_at(bytes, 104),
+        );
         let mut pixels = Vec::with_capacity(count * 4);
-        for texel in data[..count * step].chunks_exact(step) {
-            let alpha = if step == 4 && has_alpha { texel[3] } else { 255 };
-            pixels.extend_from_slice(&[texel[(r_shift as usize).min(2)], texel[1], texel[(b_shift as usize).min(2)], alpha]);
+        match bits {
+            32 | 24 => {
+                let (r_shift, b_shift) = (
+                    r_mask.trailing_zeros() / 8,
+                    b_mask.trailing_zeros() / 8,
+                );
+                for texel in data[..count * step].chunks_exact(step) {
+                    let alpha = if step == 4 && has_alpha { texel[3] } else { 255 };
+                    pixels.extend_from_slice(&[
+                        texel[(r_shift as usize).min(2)],
+                        texel[1],
+                        texel[(b_shift as usize).min(2)],
+                        alpha,
+                    ]);
+                }
+            }
+            16 => {
+                for texel in data[..count * 2].chunks_exact(2) {
+                    let val = u32::from(u16::from_le_bytes([texel[0], texel[1]]));
+                    let r = extract_masked_channel(val, r_mask);
+                    let (g, b) = if g_mask == 0 && b_mask == 0 {
+                        (r, r)
+                    } else {
+                        (
+                            extract_masked_channel(val, g_mask),
+                            extract_masked_channel(val, b_mask),
+                        )
+                    };
+                    let a = if has_alpha && a_mask != 0 {
+                        extract_masked_channel(val, a_mask)
+                    } else {
+                        255
+                    };
+                    pixels.extend_from_slice(&[r, g, b, a]);
+                }
+            }
+            8 => {
+                for &texel in &data[..count] {
+                    if a_mask != 0 && r_mask == 0 {
+                        pixels.extend_from_slice(&[255, 255, 255, texel]);
+                    } else {
+                        pixels.extend_from_slice(&[texel, texel, texel, 255]);
+                    }
+                }
+            }
+            _ => unreachable!(),
         }
         pixels
     } else {

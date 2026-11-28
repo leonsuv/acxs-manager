@@ -108,6 +108,29 @@ pub struct Bounds3DDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CarMaterialDto {
+    pub name: String,
+    pub shader: String,
+    pub blend_mode: u8,
+    pub alpha_tested: bool,
+    pub ks_diffuse: f32,
+    pub ks_specular: f32,
+    pub ks_specular_exp: f32,
+    pub diffuse_texture: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CarMeshPartDto {
+    pub material_index: usize,
+    pub positions: Vec<f32>,
+    pub normals: Vec<f32>,
+    pub uvs: Vec<f32>,
+    pub indices: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Car3DSceneDto {
     pub lod_file: String,
     pub mesh_count: usize,
@@ -116,35 +139,72 @@ pub struct Car3DSceneDto {
     pub positions: Vec<f32>,
     pub normals: Vec<f32>,
     pub indices: Vec<u32>,
+    pub parts: Vec<CarMeshPartDto>,
+    pub materials: Vec<CarMaterialDto>,
+    pub textures: BTreeMap<String, String>,
     pub bounds: Bounds3DDto,
 }
 
 #[tauri::command]
-pub fn load_car_3d_scene(
+pub async fn load_car_3d_scene(
     car_path: String,
     skin: Option<String>,
 ) -> Result<Car3DSceneDto, String> {
+    tauri::async_runtime::spawn_blocking(move || load_car_3d_scene_sync(&car_path, skin.as_deref()))
+        .await
+        .map_err(|e| format!("3D car loader worker failed: {e}"))?
+}
+
+fn load_car_3d_scene_sync(
+    car_path: &str,
+    skin: Option<&str>,
+) -> Result<Car3DSceneDto, String> {
     let opts = LoadOptions {
-        load_textures: false,
+        load_textures: true,
         skip_ac_helpers: true,
         ..LoadOptions::default()
     };
-    let car_scene = kn5_scene::load_car_lod(Path::new(&car_path), skin.as_deref(), 0, &opts)
+    let car_scene = kn5_scene::load_car_lod(Path::new(car_path), skin, 0, &opts)
         .map_err(|e| e.to_string())?;
-
-    let mut positions: Vec<f32> = Vec::new();
-    let mut normals: Vec<f32> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
 
     let mut min = [f32::INFINITY; 3];
     let mut max = [f32::NEG_INFINITY; 3];
     let mut mesh_count = 0usize;
+    let mut vertex_count = 0usize;
+    let mut triangle_count = 0usize;
+
+    // Group meshes by KN5 material index so each material renders with its own texture & shader params.
+    let mut part_by_mat: BTreeMap<usize, CarMeshPartDto> = BTreeMap::new();
+    let fallback_mat_idx = car_scene.scene.materials.len();
 
     for mesh in &car_scene.scene.meshes {
         if mesh.positions.is_empty() || mesh.indices.is_empty() {
             continue;
         }
-        let base_vertex = (positions.len() / 3) as u32;
+        let upper_name = mesh.name.to_ascii_uppercase();
+        if upper_name.contains("COLLIDER")
+            || upper_name.contains("RIM_BLUR")
+            || upper_name.contains("TYRE_BLUR")
+            || upper_name.contains("TIRE_BLUR")
+            || upper_name.contains("AMBIENT_SHADOW")
+        {
+            continue;
+        }
+
+        let mat_idx = usize::try_from(mesh.material_id)
+            .ok()
+            .filter(|&i| i < car_scene.scene.materials.len())
+            .unwrap_or(fallback_mat_idx);
+
+        let part = part_by_mat.entry(mat_idx).or_insert_with(|| CarMeshPartDto {
+            material_index: mat_idx,
+            positions: Vec::new(),
+            normals: Vec::new(),
+            uvs: Vec::new(),
+            indices: Vec::new(),
+        });
+
+        let base_vertex = (part.positions.len() / 3) as u32;
         mesh_count += 1;
 
         for (i, pos) in mesh.positions.iter().enumerate() {
@@ -159,16 +219,126 @@ pub fn load_car_3d_scene(
                     }
                 }
             }
-            positions.extend_from_slice(&wp);
+            part.positions.extend_from_slice(&wp);
 
             let raw_n = mesh.normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]);
             let wn = normalize_vec3(kn5_scene::mat4_transform(&mesh.transform, &raw_n, false));
-            normals.extend_from_slice(&wn);
+            part.normals.extend_from_slice(&wn);
+
+            let uv = mesh.uvs.get(i).copied().unwrap_or([0.0, 0.0]);
+            part.uvs.extend_from_slice(&uv);
         }
 
         for &idx in &mesh.indices {
-            indices.push(base_vertex + u32::from(idx));
+            part.indices.push(base_vertex + u32::from(idx));
         }
+
+        vertex_count += mesh.positions.len();
+        triangle_count += mesh.indices.len() / 3;
+    }
+
+    // Build compact material list & decode only textures actually used by rendered parts.
+    let mut compact_mat_map: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut materials: Vec<CarMaterialDto> = Vec::new();
+    let mut textures: BTreeMap<String, String> = BTreeMap::new();
+    let mut parts: Vec<CarMeshPartDto> = Vec::with_capacity(part_by_mat.len());
+
+    for (orig_mat_idx, mut part) in part_by_mat {
+        let new_idx = if let Some(&existing) = compact_mat_map.get(&orig_mat_idx) {
+            existing
+        } else {
+            let dto = if let Some(m) = car_scene.scene.materials.get(orig_mat_idx) {
+                let is_valid_tex = |name: &str| {
+                    !name.is_empty() && !name.eq_ignore_ascii_case("null.dds")
+                };
+                let diff_name = is_valid_tex(&m.tx_diffuse).then(|| m.tx_diffuse.clone());
+                let detail_name = (m.use_detail > 0.5 && is_valid_tex(&m.tx_detail))
+                    .then(|| m.tx_detail.clone());
+                let fallback_detail_name = is_valid_tex(&m.tx_detail).then(|| m.tx_detail.clone());
+
+                let keep_alpha = m.blend_mode != 0
+                    || m.alpha_tested
+                    || m.shader.to_ascii_lowercase().contains("alpha")
+                    || m.shader.to_ascii_lowercase().contains("glass")
+                    || m.shader.to_ascii_lowercase().contains("windscreen");
+
+                let mut resolved_tex_key = None;
+                if let (Some(diff), Some(det)) = (&diff_name, &detail_name) {
+                    if let (Some(diff_bytes), Some(det_bytes)) =
+                        (car_scene.texture_bytes(diff), car_scene.texture_bytes(det))
+                    {
+                        let mult = if m.detail_uv_multiplier.is_finite()
+                            && m.detail_uv_multiplier > 0.01
+                        {
+                            m.detail_uv_multiplier
+                        } else {
+                            1.0
+                        };
+                        let key = format!(
+                            "{}::detail::{}::{mult:.1}::{keep_alpha}",
+                            diff.to_ascii_lowercase(),
+                            det.to_ascii_lowercase()
+                        );
+                        if !textures.contains_key(&key) {
+                            if let Some(data_url) = kn5_scene::encode_composited_car_paint_data_url(
+                                diff_bytes, det_bytes, mult, 1024, keep_alpha,
+                            ) {
+                                textures.insert(key.clone(), data_url);
+                            }
+                        }
+                        if textures.contains_key(&key) {
+                            resolved_tex_key = Some(key);
+                        }
+                    }
+                }
+
+                if resolved_tex_key.is_none() {
+                    if let Some(name) = diff_name.or(fallback_detail_name) {
+                        let key = format!("{}::{keep_alpha}", name.to_ascii_lowercase());
+                        if !textures.contains_key(&key) {
+                            if let Some(raw_bytes) = car_scene.texture_bytes(&name) {
+                                if let Some(data_url) =
+                                    kn5_scene::encode_texture_data_url(raw_bytes, 1024, keep_alpha)
+                                {
+                                    textures.insert(key.clone(), data_url);
+                                }
+                            }
+                        }
+                        if textures.contains_key(&key) {
+                            resolved_tex_key = Some(key);
+                        }
+                    }
+                }
+
+                CarMaterialDto {
+                    name: m.name.clone(),
+                    shader: m.shader.clone(),
+                    blend_mode: m.blend_mode,
+                    alpha_tested: m.alpha_tested,
+                    ks_diffuse: m.ks_diffuse,
+                    ks_specular: m.ks_specular,
+                    ks_specular_exp: m.ks_specular_exp,
+                    diffuse_texture: resolved_tex_key,
+                }
+            } else {
+                CarMaterialDto {
+                    name: "Default".to_string(),
+                    shader: String::new(),
+                    blend_mode: 0,
+                    alpha_tested: false,
+                    ks_diffuse: 0.6,
+                    ks_specular: 0.5,
+                    ks_specular_exp: 10.0,
+                    diffuse_texture: None,
+                }
+            };
+            let idx = materials.len();
+            materials.push(dto);
+            compact_mat_map.insert(orig_mat_idx, idx);
+            idx
+        };
+        part.material_index = new_idx;
+        parts.push(part);
     }
 
     let bounds = if min[0].is_finite() && max[0].is_finite() {
@@ -196,17 +366,17 @@ pub fn load_car_3d_scene(
         }
     };
 
-    let vertex_count = positions.len() / 3;
-    let triangle_count = indices.len() / 3;
-
     Ok(Car3DSceneDto {
         lod_file: car_scene.lod_file,
         mesh_count,
         vertex_count,
         triangle_count,
-        positions,
-        normals,
-        indices,
+        positions: Vec::new(),
+        normals: Vec::new(),
+        indices: Vec::new(),
+        parts,
+        materials,
+        textures,
         bounds,
     })
 }
@@ -286,11 +456,20 @@ pub struct Track3DSceneDto {
 }
 
 #[tauri::command]
-pub fn load_track_3d_scene(
+pub async fn load_track_3d_scene(
     track_path: String,
     layout: Option<String>,
 ) -> Result<Track3DSceneDto, String> {
-    let track_dir = Path::new(&track_path);
+    tauri::async_runtime::spawn_blocking(move || load_track_3d_scene_sync(&track_path, layout))
+        .await
+        .map_err(|e| format!("3D track loader worker failed: {e}"))?
+}
+
+fn load_track_3d_scene_sync(
+    track_path: &str,
+    layout: Option<String>,
+) -> Result<Track3DSceneDto, String> {
+    let track_dir = Path::new(track_path);
     if !track_dir.is_dir() {
         return Err(format!("Track directory not found: {track_path}"));
     }
@@ -358,28 +537,9 @@ pub fn load_track_3d_scene(
         }
     }
 
-    // 2. Track KN5 scene summary
-    let opts = LoadOptions {
-        load_textures: false,
-        skip_ac_helpers: false,
-        ..LoadOptions::default()
-    };
-    let models = match kn5_scene::load_track_layout(track_dir, layout_trimmed.as_deref(), &opts) {
-        Ok(scene) => scene
-            .models
-            .into_iter()
-            .map(|(file, kn5)| {
-                let triangle_count = kn5.meshes.iter().map(|m| m.indices.len() / 3).sum();
-                TrackModelSummaryDto {
-                    file,
-                    mesh_count: kn5.meshes.len(),
-                    helper_count: kn5.helpers.len(),
-                    triangle_count,
-                }
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    };
+    // 2. Skip decoding full multi-hundred-MB track KN5 geometry here so the
+    // Track Inspector opens in milliseconds instead of hanging for 30+ seconds.
+    let models = Vec::new();
 
     // 3. Track data files (DRS, cameras, sections, ai_hints)
     let drs_zones = track_files::read_drs_zones(&data_dir)
@@ -885,6 +1045,8 @@ pub fn pack_car_acd(car_path: String) -> Result<AcdOperationResultDto, String> {
 pub struct SfxInfoDto {
     pub car_id: String,
     pub bank_files: Vec<String>,
+    pub bank_size_bytes: u64,
+    pub guids_present: bool,
     pub guids_path: Option<String>,
     pub referenced_car_ids: Vec<String>,
     pub issues: Vec<String>,
@@ -907,6 +1069,13 @@ pub fn inspect_car_sfx(car_path: String) -> Result<SfxInfoDto, String> {
         return Err(format!("Car directory not found: {car_path}"));
     }
     let info = sfx::inspect_car_sfx(dir);
+    let bank_size_bytes: u64 = info
+        .bank_files
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .sum();
+    let guids_present = info.guids_path.is_some();
     Ok(SfxInfoDto {
         car_id: info.car_id,
         bank_files: info
@@ -914,10 +1083,24 @@ pub fn inspect_car_sfx(car_path: String) -> Result<SfxInfoDto, String> {
             .into_iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect(),
+        bank_size_bytes,
+        guids_present,
         guids_path: info.guids_path.map(|p| p.to_string_lossy().into_owned()),
         referenced_car_ids: info.referenced_car_ids,
         issues: info.issues,
     })
+}
+
+fn car_id_from_arg(arg: &str) -> String {
+    let trimmed = arg.trim();
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        Path::new(trimmed)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| trimmed.to_string())
+    } else {
+        trimmed.to_string()
+    }
 }
 
 #[tauri::command]
@@ -927,7 +1110,9 @@ pub fn swap_car_sfx(
     donor_car: String,
 ) -> Result<SfxSwapReportDto, String> {
     let ac_root = ac_root_from_state(&state)?;
-    let report = sfx::swap_car_sound(&ac_root, &target_car, &donor_car, game::is_game_running())
+    let target_id = car_id_from_arg(&target_car);
+    let donor_id = car_id_from_arg(&donor_car);
+    let report = sfx::swap_car_sound(&ac_root, &target_id, &donor_id, game::is_game_running())
         .map_err(|e| e.to_string())?;
     Ok(SfxSwapReportDto {
         target_car_id: report.target_car_id,
@@ -1021,6 +1206,56 @@ pub struct SetupAbScorecardDto {
     pub setup_diffs: Vec<SetupDiffDto>,
 }
 
+fn resolve_setup_target_path(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Setup path is empty".to_string());
+    }
+
+    let virtual_rel = trimmed
+        .get(..8)
+        .filter(|prefix| {
+            prefix.eq_ignore_ascii_case("/setups/")
+                || prefix.eq_ignore_ascii_case("/setups\\")
+                || prefix.eq_ignore_ascii_case("\\setups\\")
+                || prefix.eq_ignore_ascii_case("\\setups/")
+        })
+        .map(|_| &trimmed[8..]);
+
+    let rel_str = if let Some(rel) = virtual_rel {
+        Some(rel)
+    } else {
+        let p = Path::new(trimmed);
+        if !p.has_root() && p.is_relative() {
+            Some(trimmed)
+        } else {
+            None
+        }
+    };
+
+    if let Some(rel) = rel_str {
+        let docs = settings::ac_documents_dir()
+            .ok_or_else(|| "Assetto Corsa documents folder could not be located".to_string())?;
+        let mut resolved = docs.join("setups");
+        let parts: Vec<&str> = rel.split(['/', '\\']).collect();
+        if parts.is_empty() || parts.iter().any(|part| {
+            part.is_empty()
+                || *part == "."
+                || *part == ".."
+                || part.contains(':')
+                || part.contains('\0')
+        }) {
+            return Err(format!("Invalid relative setup path: {trimmed}"));
+        }
+        for part in parts {
+            resolved.push(part);
+        }
+        return Ok(resolved);
+    }
+
+    Ok(PathBuf::from(trimmed))
+}
+
 #[tauri::command]
 pub fn list_setups() -> Result<Vec<SetupFileDto>, String> {
     let Some(docs) = settings::ac_documents_dir() else {
@@ -1045,7 +1280,8 @@ pub fn list_setups() -> Result<Vec<SetupFileDto>, String> {
 
 #[tauri::command]
 pub fn read_setup(path: String, car_path: Option<String>) -> Result<SetupDocumentDto, String> {
-    let raw_values = setups::values(Path::new(&path)).map_err(|e| e.to_string())?;
+    let resolved = resolve_setup_target_path(&path)?;
+    let raw_values = setups::values(&resolved).map_err(|e| e.to_string())?;
     let values = raw_values
         .into_iter()
         .map(|(section, key, value)| SetupValueDto {
@@ -1091,18 +1327,20 @@ pub fn read_setup(path: String, car_path: Option<String>) -> Result<SetupDocumen
 
 #[tauri::command]
 pub fn save_setup(path: String, values: Vec<SetupValueDto>) -> Result<usize, String> {
-    let target = Path::new(&path);
-    for entry in &values {
-        setups::set_value(target, &entry.section, &entry.key, &entry.value, true)
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(values.len())
+    let target = resolve_setup_target_path(&path)?;
+    let entries: Vec<(&str, &str, &str)> = values
+        .iter()
+        .map(|entry| (entry.section.as_str(), entry.key.as_str(), entry.value.as_str()))
+        .collect();
+    setups::set_values(&target, &entries, true, true).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn diff_setups(left: String, right: String) -> Result<Vec<SetupDiffDto>, String> {
-    let ini_l = Ini::load(Path::new(&left)).map_err(|e| format!("Failed to read {left}: {e}"))?;
-    let ini_r = Ini::load(Path::new(&right)).map_err(|e| format!("Failed to read {right}: {e}"))?;
+    let left_path = resolve_setup_target_path(&left)?;
+    let right_path = resolve_setup_target_path(&right)?;
+    let ini_l = Ini::load(&left_path).map_err(|e| format!("Failed to read {left}: {e}"))?;
+    let ini_r = Ini::load(&right_path).map_err(|e| format!("Failed to read {right}: {e}"))?;
     Ok(setups::diff(&ini_l, &ini_r)
         .into_iter()
         .map(|d| SetupDiffDto {

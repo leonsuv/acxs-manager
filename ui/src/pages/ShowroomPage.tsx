@@ -1,18 +1,21 @@
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import {
   Box,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   FolderOpen,
   Heart,
   Image as ImageIcon,
   Play,
+  Search,
   Sparkles,
   Gauge,
   Weight,
   Zap,
   Flame,
   Palette,
+  X,
 } from "lucide-react";
 import { api, assetUrl } from "../lib/api";
 import { ACCENT_PRESETS } from "../lib/types";
@@ -43,9 +46,10 @@ function saveFavoriteIds(ids: Set<string>) {
   }
 }
 
-function parseNumeric(val?: string | null): number {
-  if (!val) return 0;
-  const m = val.replace(/,/g, "").match(/[\d.]+/);
+function parseNumeric(val?: string | number | null): number {
+  if (val == null) return 0;
+  if (typeof val === "number") return Number.isFinite(val) ? val : 0;
+  const m = String(val).replace(/,/g, "").match(/[\d.]+/);
   return m ? parseFloat(m[0]) : 0;
 }
 
@@ -260,10 +264,17 @@ export function ShowroomPage() {
   });
   const [stageMode, setStageMode] = useState<StageMode>("3d");
   const [skins, setSkins] = useState<SkinEntry[]>([]);
+  const [loadingSkins, setLoadingSkins] = useState(false);
+  const [skinsCarId, setSkinsCarId] = useState<string | null>(null);
   const [activeSkinId, setActiveSkinId] = useState<string>(armedSession.skinId || "");
   const [meshData, setMeshData] = useState<Scene3DMeshData | null>(null);
   const [loadingMesh, setLoadingMesh] = useState(false);
   const [favorites, setFavorites] = useState<Set<string>>(() => loadFavoriteIds());
+  const [chooserOpen, setChooserOpen] = useState(false);
+  const [chooserQuery, setChooserQuery] = useState("");
+  const [chooserFavOnly, setChooserFavOnly] = useState(false);
+  const chooserContainerRef = useRef<HTMLDivElement>(null);
+  const chooserSearchRef = useRef<HTMLInputElement>(null);
 
   // Sync selected index if armed car changes externally
   useEffect(() => {
@@ -284,27 +295,79 @@ export function ShowroomPage() {
     [cars.length]
   );
 
+  const filteredChooserCars = useMemo(() => {
+    const q = chooserQuery.trim().toLowerCase();
+    return cars
+      .map((car, idx) => ({ car, idx }))
+      .filter(({ car }) => {
+        if (chooserFavOnly && !favorites.has(car.id)) return false;
+        if (!q) return true;
+        return (
+          car.name.toLowerCase().includes(q) ||
+          car.brand.toLowerCase().includes(q) ||
+          car.class.toLowerCase().includes(q) ||
+          car.id.toLowerCase().includes(q) ||
+          car.tags.some((t) => t.toLowerCase().includes(q))
+        );
+      });
+  }, [cars, chooserQuery, chooserFavOnly, favorites]);
+
+  useEffect(() => {
+    if (!chooserOpen) return;
+    chooserSearchRef.current?.focus();
+    const onPointerDown = (e: MouseEvent) => {
+      if (
+        chooserContainerRef.current &&
+        !chooserContainerRef.current.contains(e.target as Node)
+      ) {
+        setChooserOpen(false);
+      }
+    };
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setChooserOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", onPointerDown);
+    window.addEventListener("keydown", onEsc);
+    return () => {
+      window.removeEventListener("mousedown", onPointerDown);
+      window.removeEventListener("keydown", onEsc);
+    };
+  }, [chooserOpen]);
+
   const toggleFavorite = useCallback(
     (carId: string) => {
+      const wasFav = favorites.has(carId);
+      const next = new Set(favorites);
+      if (wasFav) {
+        next.delete(carId);
+      } else {
+        next.add(carId);
+      }
       setFavorites((prev) => {
-        const next = new Set(prev);
-        if (next.has(carId)) {
-          next.delete(carId);
-          notify("Removed from favorites", "info");
+        const updated = new Set(prev);
+        if (wasFav) {
+          updated.delete(carId);
         } else {
-          next.add(carId);
-          notify("Added to favorites", "success");
+          updated.add(carId);
         }
-        saveFavoriteIds(next);
-        return next;
+        return updated;
       });
+      saveFavoriteIds(next);
+      if (wasFav) {
+        notify("Removed from favorites", "info");
+      } else {
+        notify("Added to favorites", "success");
+      }
     },
-    [notify]
+    [favorites, notify]
   );
 
   // Keyboard shortcuts: Left / Right / F / 2 / 3
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
       const target = e.target as HTMLElement | null;
       if (
         target &&
@@ -332,10 +395,23 @@ export function ShowroomPage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [stepCar, toggleFavorite, currentCar]);
 
+  // Clear stale 3D mesh when selected car changes
+  useEffect(() => {
+    setMeshData(null);
+  }, [currentCar?.id]);
+
   // Load skins for current car
   useEffect(() => {
-    if (!currentCar) return;
+    if (!currentCar) {
+      setSkins([]);
+      setSkinsCarId(null);
+      setLoadingSkins(false);
+      return;
+    }
     let cancelled = false;
+    setLoadingSkins(true);
+    setSkins([]);
+    setSkinsCarId(null);
     api
       .getCarSkins(currentCar.path)
       .then((list) => {
@@ -349,18 +425,26 @@ export function ShowroomPage() {
         } else {
           setActiveSkinId("");
         }
+        setSkinsCarId(currentCar.id);
       })
       .catch(() => {
-        if (!cancelled) setSkins([]);
+        if (!cancelled) {
+          setSkins([]);
+          setActiveSkinId("");
+          setSkinsCarId(currentCar.id);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingSkins(false);
       });
     return () => {
       cancelled = true;
     };
   }, [currentCar]);
 
-  // Load real KN5 3D scene when in 3D mode
+  // Load real KN5 3D scene when in 3D mode (only after skins/default skin resolved for currentCar)
   useEffect(() => {
-    if (!currentCar || stageMode !== "3d") return;
+    if (!currentCar || stageMode !== "3d" || skinsCarId !== currentCar.id) return;
     let cancelled = false;
     setLoadingMesh(true);
     api
@@ -377,7 +461,7 @@ export function ShowroomPage() {
     return () => {
       cancelled = true;
     };
-  }, [currentCar, activeSkinId, stageMode]);
+  }, [currentCar, activeSkinId, stageMode, skinsCarId]);
 
   if (!currentCar) {
     return (
@@ -427,6 +511,224 @@ export function ShowroomPage() {
 
   return (
     <div className="h-full flex flex-col gap-3 p-4 overflow-hidden animate-fade-in">
+      {/* Unified Showroom Controls Bar (separated from 3D Viewport HUD so controls never collide) */}
+      <div className="shrink-0 relative z-30 glass-panel rounded-2xl px-3.5 py-2 flex flex-wrap items-center justify-between gap-2.5">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => stepCar(-1)}
+            aria-label="Previous Car"
+            title="Previous Car (←)"
+            className="h-8 w-8 rounded-lg flex items-center justify-center text-[var(--text-secondary)] hover:text-white hover:bg-white/[0.08] transition-colors cursor-pointer shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </button>
+
+          <div ref={chooserContainerRef} className="relative">
+            <button
+              type="button"
+              onClick={() => setChooserOpen((v) => !v)}
+              aria-expanded={chooserOpen}
+              aria-haspopup="dialog"
+              aria-label="Choose vehicle from garage"
+              className={`h-8 px-3 rounded-lg border flex items-center gap-2 text-xs transition-all cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] ${
+                chooserOpen
+                  ? "bg-[var(--accent-soft)] border-[var(--accent-border)] text-white"
+                  : "bg-white/[0.04] border-white/[0.09] text-[var(--text-primary)] hover:bg-white/[0.08]"
+              }`}
+            >
+              <span className="font-semibold max-w-[200px] sm:max-w-[260px] truncate">
+                {currentCar.name}
+              </span>
+              <span className="font-mono text-[11px] text-[var(--text-muted)] tabular-nums whitespace-nowrap shrink-0">
+                {String(selectedIndex + 1).padStart(2, "0")}/{String(cars.length).padStart(2, "0")}
+              </span>
+              <ChevronDown
+                className={`w-3.5 h-3.5 text-[var(--text-muted)] transition-transform ${
+                  chooserOpen ? "rotate-180 text-[var(--accent)]" : ""
+                }`}
+              />
+            </button>
+
+            {chooserOpen && (
+              <div
+                role="dialog"
+                aria-label="Car Chooser"
+                style={{ backgroundColor: "#0B0F17" }}
+                className="absolute left-0 top-10 w-[440px] max-w-[calc(100vw-2.5rem)] rounded-2xl border border-white/[0.14] shadow-[0_24px_60px_rgba(0,0,0,0.9)] z-50 overflow-hidden animate-fade-in"
+              >
+                <div className="p-3 border-b border-white/[0.08] space-y-2.5 bg-[#0F141F]">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] font-mono uppercase tracking-[0.12em] text-[var(--text-muted)]">
+                      Garage Car Chooser · {filteredChooserCars.length} of {cars.length}
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        aria-pressed={chooserFavOnly}
+                        onClick={() => setChooserFavOnly((v) => !v)}
+                        className={`px-2 py-0.5 rounded-md text-[10px] font-mono border cursor-pointer transition-colors ${
+                          chooserFavOnly
+                            ? "bg-red-500/20 text-red-300 border-red-500/35"
+                            : "bg-white/[0.04] text-[var(--text-secondary)] border-white/[0.08] hover:text-white"
+                        }`}
+                      >
+                        ★ Favorites
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setChooserOpen(false)}
+                        aria-label="Close car chooser"
+                        className="p-1 rounded-md text-[var(--text-muted)] hover:text-white hover:bg-white/[0.08] cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      ref={chooserSearchRef}
+                      type="text"
+                      value={chooserQuery}
+                      onChange={(e) => setChooserQuery(e.target.value)}
+                      placeholder="Search car, brand, class, or tag..."
+                      className="w-full h-8 pl-8 pr-7 rounded-lg bg-black/50 border border-white/[0.12] text-xs text-white placeholder:text-[var(--text-muted)] outline-none focus:border-[var(--accent-border)]"
+                    />
+                    {chooserQuery && (
+                      <button
+                        type="button"
+                        onClick={() => setChooserQuery("")}
+                        aria-label="Clear car search"
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-white cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="max-h-[54vh] overflow-y-auto divide-y divide-white/[0.04]">
+                  {filteredChooserCars.length === 0 ? (
+                    <div className="p-6 text-center text-xs text-[var(--text-muted)]">
+                      No cars match "{chooserQuery.trim() || "favorites"}".
+                    </div>
+                  ) : (
+                    filteredChooserCars.map(({ car, idx }) => {
+                      const active = idx === selectedIndex;
+                      const thumb = assetUrl(car.previewPath);
+                      const fav = favorites.has(car.id);
+                      return (
+                        <button
+                          key={car.id}
+                          type="button"
+                          onClick={() => {
+                            setSelectedIndex(idx);
+                            setChooserOpen(false);
+                          }}
+                          className={`w-full px-3 py-2 flex items-center gap-3 text-left transition-colors cursor-pointer ${
+                            active
+                              ? "bg-[var(--accent-soft)] border-l-2 border-l-[var(--accent)]"
+                              : "hover:bg-white/[0.05] border-l-2 border-l-transparent"
+                          }`}
+                        >
+                          <div className="w-14 h-9 rounded-md overflow-hidden bg-black/50 border border-white/[0.08] shrink-0 flex items-center justify-center">
+                            {thumb ? (
+                              <img
+                                src={thumb}
+                                alt={car.name}
+                                className="w-full h-full object-cover"
+                              />
+                            ) : (
+                              <Sparkles className="w-3.5 h-3.5 text-white/25" />
+                            )}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-xs font-semibold text-white truncate">
+                                {car.name}
+                              </span>
+                              {fav && <Heart className="w-3 h-3 text-red-400 fill-current shrink-0" />}
+                            </div>
+                            <div className="text-[10px] font-mono text-[var(--text-muted)] truncate">
+                              {car.brand}
+                              {car.bhp ? ` · ${car.bhp}` : ""}
+                              {car.weight ? ` · ${car.weight}` : ""}
+                            </div>
+                          </div>
+                          <span className="text-[10px] font-mono text-[var(--text-muted)] shrink-0 tabular-nums">
+                            #{String(idx + 1).padStart(2, "0")}
+                          </span>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => stepCar(1)}
+            aria-label="Next Car"
+            title="Next Car (→)"
+            className="h-8 w-8 rounded-lg flex items-center justify-center text-[var(--text-secondary)] hover:text-white hover:bg-white/[0.08] transition-colors cursor-pointer shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+          >
+            <ChevronRight className="w-4 h-4" />
+          </button>
+
+          <div className="w-px h-5 bg-white/[0.1] mx-1" />
+
+          <SegmentedControl
+            size="sm"
+            value={stageMode}
+            onChange={setStageMode}
+            options={[
+              { value: "3d", label: "3D Showroom", icon: <Box className="w-3.5 h-3.5" /> },
+              { value: "2d", label: "2D Studio", icon: <ImageIcon className="w-3.5 h-3.5" /> },
+            ]}
+          />
+        </div>
+
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => toggleFavorite(currentCar.id)}
+            aria-label="Toggle Favorite"
+            aria-pressed={isFav}
+            title="Toggle Favorite (F)"
+            className={`h-8 w-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] ${
+              isFav
+                ? "bg-red-500/20 text-red-400 border border-red-500/35"
+                : "text-[var(--text-secondary)] hover:text-white hover:bg-white/[0.08]"
+            }`}
+          >
+            <Heart className={`w-4 h-4 ${isFav ? "fill-current" : ""}`} />
+          </button>
+
+          <button
+            type="button"
+            onClick={handleOpenFolder}
+            aria-label="Open Car Folder"
+            title="Open Car Folder"
+            className="h-8 w-8 rounded-lg flex items-center justify-center text-[var(--text-secondary)] hover:text-white hover:bg-white/[0.08] transition-colors cursor-pointer shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+          >
+            <FolderOpen className="w-4 h-4" />
+          </button>
+
+          <Button
+            variant="primary"
+            size="sm"
+            icon={<Play className="w-3.5 h-3.5 fill-current" />}
+            onClick={handleRaceThisCar}
+            className="whitespace-nowrap shrink-0"
+          >
+            Race This Car
+          </Button>
+        </div>
+      </div>
+
       {/* Main Full-Bleed Showcase Stage */}
       <div className="relative flex-1 min-h-0 rounded-2xl overflow-hidden border border-white/[0.08] bg-[#06080D] shadow-2xl">
         {/* Stage Canvas: 3D or 2D */}
@@ -437,10 +739,11 @@ export function ShowroomPage() {
               meshData={meshData}
               accentHex={accentHex}
               label={`${currentCar.brand.toUpperCase()} · ${currentCar.name.toUpperCase()}`}
+              loading={loadingSkins || loadingMesh || skinsCarId !== currentCar.id}
               className="rounded-none border-0"
             />
-            {loadingMesh && (
-              <div className="absolute bottom-3 right-3 px-3 py-1.5 rounded-lg bg-black/70 backdrop-blur-md border border-white/[0.1] text-[11px] font-mono text-[var(--text-secondary)] flex items-center gap-2">
+            {loadingMesh && Boolean(meshData) && (
+              <div className="absolute bottom-3 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-lg bg-black/70 backdrop-blur-md border border-white/[0.1] text-[11px] font-mono text-[var(--text-secondary)] flex items-center gap-2 z-20">
                 <span className="w-2 h-2 rounded-full bg-[var(--accent)] animate-pulse" />
                 Loading KN5 geometry...
               </div>
@@ -471,76 +774,6 @@ export function ShowroomPage() {
             )}
           </div>
         )}
-
-        {/* Top Floating Controls Bar */}
-        <div className="absolute top-3.5 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2.5 px-2 py-1.5 rounded-2xl bg-black/65 backdrop-blur-xl border border-white/[0.1] shadow-xl">
-          <button
-            type="button"
-            onClick={() => stepCar(-1)}
-            title="Previous Car (←)"
-            className="h-8 w-8 rounded-lg flex items-center justify-center text-[var(--text-secondary)] hover:text-white hover:bg-white/[0.08] transition-colors cursor-pointer"
-          >
-            <ChevronLeft className="w-4 h-4" />
-          </button>
-
-          <span className="font-mono text-[11px] text-[var(--text-secondary)] tabular-nums px-1">
-            {String(selectedIndex + 1).padStart(2, "0")} / {String(cars.length).padStart(2, "0")}
-          </span>
-
-          <button
-            type="button"
-            onClick={() => stepCar(1)}
-            title="Next Car (→)"
-            className="h-8 w-8 rounded-lg flex items-center justify-center text-[var(--text-secondary)] hover:text-white hover:bg-white/[0.08] transition-colors cursor-pointer"
-          >
-            <ChevronRight className="w-4 h-4" />
-          </button>
-
-          <div className="w-px h-5 bg-white/[0.1]" />
-
-          <SegmentedControl
-            size="sm"
-            value={stageMode}
-            onChange={setStageMode}
-            options={[
-              { value: "3d", label: "3D Showroom", icon: <Box className="w-3.5 h-3.5" /> },
-              { value: "2d", label: "2D Studio", icon: <ImageIcon className="w-3.5 h-3.5" /> },
-            ]}
-          />
-
-          <div className="w-px h-5 bg-white/[0.1]" />
-
-          <button
-            type="button"
-            onClick={() => toggleFavorite(currentCar.id)}
-            title="Toggle Favorite (F)"
-            className={`h-8 w-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
-              isFav
-                ? "bg-red-500/20 text-red-400 border border-red-500/35"
-                : "text-[var(--text-secondary)] hover:text-white hover:bg-white/[0.08]"
-            }`}
-          >
-            <Heart className={`w-4 h-4 ${isFav ? "fill-current" : ""}`} />
-          </button>
-
-          <button
-            type="button"
-            onClick={handleOpenFolder}
-            title="Open Car Folder"
-            className="h-8 w-8 rounded-lg flex items-center justify-center text-[var(--text-secondary)] hover:text-white hover:bg-white/[0.08] transition-colors cursor-pointer"
-          >
-            <FolderOpen className="w-4 h-4" />
-          </button>
-
-          <Button
-            variant="primary"
-            size="sm"
-            icon={<Play className="w-3.5 h-3.5 fill-current" />}
-            onClick={handleRaceThisCar}
-          >
-            Race This Car
-          </Button>
-        </div>
 
         {/* Left/Right Stage Prev/Next Chevrons */}
         <button
@@ -654,11 +887,15 @@ export function ShowroomPage() {
         </div>
 
         <div className="flex-1 flex items-center gap-2.5 overflow-x-auto pb-0.5">
-          {skins.length === 0 ? (
+          {loadingSkins ? (
             <div className="flex items-center gap-2">
               <Skeleton className="h-16 w-36 rounded-xl" />
               <Skeleton className="h-16 w-36 rounded-xl" />
               <Skeleton className="h-16 w-36 rounded-xl" />
+            </div>
+          ) : skins.length === 0 ? (
+            <div className="text-xs font-mono text-[var(--text-muted)] px-2">
+              No liveries found
             </div>
           ) : (
             skins.map((skin, idx) => {

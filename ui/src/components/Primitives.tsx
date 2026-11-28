@@ -85,6 +85,10 @@ export function Card({
   padding = "md",
   className,
   children,
+  onClick,
+  onKeyDown,
+  role,
+  tabIndex,
   ...rest
 }: CardProps) {
   const padCls = {
@@ -101,8 +105,31 @@ export function Card({
       "glass-panel rounded-xl transition-all duration-150 hover:border-white/[0.16] hover:bg-white/[0.04] hover:-translate-y-[1px] cursor-pointer",
   }[variant];
 
+  const isClickable = Boolean(onClick);
+  const handleKeyDown: React.KeyboardEventHandler<HTMLDivElement> = (e) => {
+    onKeyDown?.(e);
+    if (e.defaultPrevented || !onClick) return;
+    if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
+      e.preventDefault();
+      onClick(e as unknown as React.MouseEvent<HTMLDivElement>);
+    }
+  };
+
   return (
-    <div className={cn(variantCls, padCls, className)} {...rest}>
+    <div
+      role={role ?? (isClickable ? "button" : undefined)}
+      tabIndex={tabIndex ?? (isClickable ? 0 : undefined)}
+      onClick={onClick}
+      onKeyDown={isClickable || onKeyDown ? handleKeyDown : undefined}
+      className={cn(
+        variantCls,
+        padCls,
+        isClickable &&
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]",
+        className
+      )}
+      {...rest}
+    >
       {children}
     </div>
   );

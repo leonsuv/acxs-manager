@@ -24,14 +24,26 @@ const MAX_ENTRIES: usize = 255;
 
 /// `[BOOKING]`, `[PRACTICE]`, or `[QUALIFY]` session section.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct SessionCfg {
     pub name: String,
     pub time_min: u32,
     pub is_open: u8,
 }
 
+impl Default for SessionCfg {
+    fn default() -> Self {
+        Self {
+            name: "Session".to_string(),
+            time_min: 15,
+            is_open: 1,
+        }
+    }
+}
+
 /// `[RACE]` session section.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct RaceSessionCfg {
     pub name: String,
     pub laps: u32,
@@ -41,8 +53,22 @@ pub struct RaceSessionCfg {
     pub reversed_grid_positions: i32,
 }
 
+impl Default for RaceSessionCfg {
+    fn default() -> Self {
+        Self {
+            name: "Race".to_string(),
+            laps: 10,
+            time_min: 0,
+            wait_time_sec: 60,
+            is_open: 1,
+            reversed_grid_positions: 0,
+        }
+    }
+}
+
 /// One `[WEATHER_n]` section.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct WeatherSlot {
     pub graphics: String,
     pub base_temp_ambient: i32,
@@ -73,6 +99,7 @@ impl Default for WeatherSlot {
 
 /// Realism and assist rules in `[SERVER]`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct RealismConfig {
     pub abs_allowed: u8,
     pub tc_allowed: u8,
@@ -117,6 +144,7 @@ impl Default for RealismConfig {
 
 /// Voting, kicking, lobby registration, and UDP plugin endpoints in `[SERVER]`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct VotingPluginsConfig {
     pub kick_quorum: u32,
     pub voting_quorum: u32,

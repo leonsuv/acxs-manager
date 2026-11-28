@@ -33,8 +33,10 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         drive::launch_championship_round,
         drive::import_race_out_results,
         drive::list_weather_controllers,
-        // Online & Dedicated Server (20)
+        // Online & Dedicated Server (21)
+        online::get_cached_directory_servers,
         online::fetch_directory_servers,
+        online::cancel_directory_search,
         online::fetch_server_detail,
         online::list_watchlist,
         online::save_watchlist,
